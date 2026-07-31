@@ -134,9 +134,30 @@ crabcodex doctor
 crabcodex models
 crabcodex codex-install [--base-url URL]
 crabcodex serve [--host HOST] [--port PORT]
+crabcodex upgrade [--version VERSION]
 ```
 
 Set `RUST_LOG=crabcodex=debug,tower_http=debug` for request diagnostics. Secrets and request authorization headers are not logged by the application.
+
+### Upgrade
+
+Upgrade an installed Linux or macOS binary to the latest checksummed GitHub
+release:
+
+```bash
+crabcodex upgrade
+```
+
+Install a specific release when needed:
+
+```bash
+crabcodex upgrade --version 0.2.0
+```
+
+The command downloads the matching platform archive and `SHA256SUMS`, verifies
+the archive, and atomically replaces the running executable. The executable's
+install directory must be writable. Windows users should download the release
+ZIP because in-place self-upgrade is not currently supported there.
 
 ## Architecture
 

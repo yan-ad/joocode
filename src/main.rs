@@ -5,6 +5,7 @@ mod config;
 mod error;
 mod protocol;
 mod provider;
+mod upgrade;
 
 use anyhow::Context;
 use clap::Parser;
@@ -23,6 +24,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if let Some(Command::Upgrade { version }) = &cli.command {
+        return upgrade::run(version.as_deref()).await;
+    }
+
     let paths = ConfigPaths::resolve(cli.config, cli.auth)?;
     let registry = Registry::load(&paths).context("failed to load OpenCode providers")?;
 
@@ -53,5 +58,6 @@ async fn main() -> anyhow::Result<()> {
             println!("Restart Codex to reload the model picker.");
             Ok(())
         }
+        Command::Upgrade { .. } => unreachable!("upgrade is handled before config discovery"),
     }
 }
