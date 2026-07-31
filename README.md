@@ -34,6 +34,27 @@ Override either path with `--config`, `--auth`, `CRABCODEX_CONFIG`, or `CRABCODE
 
 ## Build and run
 
+### Install a release
+
+On macOS or Linux:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/yan-ad/crabcodex/main/install.sh | sh
+```
+
+The installer detects the host target, verifies the release checksum, and
+installs `crabcodex` to `~/.local/bin` by default. Install a specific version or
+directory with:
+
+```bash
+CRABCODEX_VERSION=0.1.0 CRABCODEX_INSTALL_DIR=/usr/local/bin sh install.sh
+```
+
+Windows ZIP archives are attached to each GitHub release.
+
+### Build from source
+
 ```bash
 cargo build --release
 ./target/release/crabcodex doctor
@@ -125,3 +146,12 @@ Set `RUST_LOG=crabcodex=debug,tower_http=debug` for request diagnostics. Secrets
 - `app`: Axum HTTP routes and upstream transport.
 
 This separation keeps the core small while allowing native provider adapters to be introduced later.
+
+## Releasing
+
+1. Update the version in `Cargo.toml` and `Cargo.lock`.
+2. Push the changes to `main` and wait for CI to pass.
+3. Create and push a matching tag, for example `git tag v0.1.0 && git push origin v0.1.0`.
+
+The release workflow builds Linux, macOS, and Windows archives, generates
+`SHA256SUMS`, and publishes a GitHub release with generated release notes.

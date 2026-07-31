@@ -47,10 +47,10 @@ pub fn to_chat_request(request: &Value, upstream_model: &str) -> Result<Value, A
     if let Some(choice) = request.get("tool_choice") {
         object.insert("tool_choice".into(), convert_tool_choice(choice));
     }
-    if let Some(reasoning) = request.get("reasoning") {
-        if let Some(effort) = reasoning.get("effort") {
-            object.insert("reasoning_effort".into(), effort.clone());
-        }
+    if let Some(reasoning) = request.get("reasoning")
+        && let Some(effort) = reasoning.get("effort")
+    {
+        object.insert("reasoning_effort".into(), effort.clone());
     }
     Ok(output)
 }
