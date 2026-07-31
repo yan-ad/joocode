@@ -175,4 +175,25 @@ This separation keeps the core small while allowing native provider adapters to 
 3. Create and push a matching tag, for example `git tag v0.1.0 && git push origin v0.1.0`.
 
 The release workflow builds Linux, macOS, and Windows archives, generates
-`SHA256SUMS`, and publishes a GitHub release with generated release notes.
+`SHA256SUMS`, publishes a checksum-pinned `crabcodex.rb` Homebrew formula,
+and publishes a GitHub release with generated release notes.
+
+## Homebrew
+
+Install directly from the latest GitHub release:
+
+```bash
+brew install https://github.com/yan-ad/crabcodex/releases/latest/download/crabcodex.rb
+```
+
+Or install from the maintainer tap:
+
+```bash
+brew tap yan-ad/tap
+brew install yan-ad/tap/crabcodex
+```
+
+The release workflow can update `yan-ad/homebrew-tap` automatically when the
+repository has a `HOMEBREW_TAP_TOKEN` secret. The token must be allowed to
+write to the tap repository. Set the optional `HOMEBREW_TAP_REPOSITORY`
+repository variable to publish to a different tap.

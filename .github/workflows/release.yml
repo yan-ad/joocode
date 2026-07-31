@@ -144,6 +144,11 @@ jobs:
         working-directory: dist
         run: sha256sum crabcodex-* > SHA256SUMS
 
+      - name: Generate Homebrew formula
+        run: |
+          python3 scripts/generate-homebrew-formula.py "${RELEASE_TAG}" dist/SHA256SUMS
+          mv crabcodex.rb dist/crabcodex.rb
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -152,3 +157,46 @@ jobs:
             --verify-tag \
             --generate-notes \
             --title "CrabCodex $RELEASE_TAG"
+
+  publish-homebrew:
+    name: Publish Homebrew formula
+    needs: publish
+    runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP_REPOSITORY || 'yan-ad/homebrew-tap' }}
+    steps:
+      - name: Checkout release tag
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Download release checksums
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          gh release download "$RELEASE_TAG" --pattern SHA256SUMS --dir dist
+
+      - name: Generate formula
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        run: python3 scripts/generate-homebrew-formula.py "$RELEASE_TAG" dist/SHA256SUMS
+
+      - name: Publish formula to tap
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPOSITORY}.git" tap
+          mkdir -p tap/Formula
+          cp crabcodex.rb tap/Formula/crabcodex.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/crabcodex.rb
+          git diff --cached --quiet || git commit -m "crabcodex ${RELEASE_TAG}"
+          git push origin HEAD

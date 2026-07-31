@@ -35,3 +35,14 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked
+
+      - name: Check Homebrew formula generator
+        run: |
+          mkdir -p /tmp/crabcodex-formula
+          printf '%064d  crabcodex-aarch64-apple-darwin.tar.gz\n' 1 > /tmp/crabcodex-formula/SHA256SUMS
+          printf '%064d  crabcodex-x86_64-apple-darwin.tar.gz\n' 2 >> /tmp/crabcodex-formula/SHA256SUMS
+          printf '%064d  crabcodex-aarch64-unknown-linux-gnu.tar.gz\n' 3 >> /tmp/crabcodex-formula/SHA256SUMS
+          printf '%064d  crabcodex-x86_64-unknown-linux-gnu.tar.gz\n' 4 >> /tmp/crabcodex-formula/SHA256SUMS
+          cd /tmp/crabcodex-formula
+          python3 "$GITHUB_WORKSPACE/scripts/generate-homebrew-formula.py" v0.1.0 SHA256SUMS >/dev/null
+          ruby -c crabcodex.rb
