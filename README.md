@@ -1,4 +1,4 @@
-# crabcodex
+# 🦀 CrabCodex
 
 A small native Rust bridge that exposes providers configured in OpenCode through an OpenAI Responses-compatible local API for Codex clients.
 
