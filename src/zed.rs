@@ -51,6 +51,7 @@ fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
 }
 
 const PROVIDER_ID: &str = "joocode";
+#[cfg(target_os = "macos")]
 const LOCAL_API_KEY: &str = "joocode-local";
 
 /// Add or replace Joocode's own provider entry without changing unrelated Zed
@@ -182,6 +183,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn local_api_key_is_a_non_secret_placeholder() {
         assert_eq!(PROVIDER_ID, "joocode");
         assert_eq!(LOCAL_API_KEY, "joocode-local");
