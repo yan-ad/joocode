@@ -1,14 +1,14 @@
 # Joocode — JustOpenCode
 
 A small native Rust bridge that makes every compatible provider configured in
-OpenCode available to **ChatGPT Codex** and **Zed**. It reads your existing
+OpenCode available to **ChatGPT Codex**, **Zed**, and **JetBrains AI Assistant**. It reads your existing
 OpenCode configuration and credentials, then exposes the discovered models as
 `provider/model` without creating or duplicating provider configuration.
 
 ## Current scope
 
 - Automatically reads OpenCode configuration and credentials.
-- Makes compatible OpenCode providers available to ChatGPT Codex and Zed.
+- Makes compatible OpenCode providers available to ChatGPT Codex, Zed, and JetBrains AI Assistant.
 - Supports providers configured with `@ai-sdk/openai-compatible`, `@ai-sdk/openai`, or no explicit `npm` adapter.
 - Routes models with an unambiguous `provider/model` identifier.
 - Exposes `GET /v1/models` and `POST /v1/responses`.
@@ -20,9 +20,9 @@ Provider-native Anthropic, Google, and interactive OAuth adapters are intentiona
 
 ## Roadmap
 
-Joocode currently integrates with **ChatGPT Codex** and **Zed**. Support for
-**JetBrains IDEs** and additional AI clients is planned, using the same existing
-OpenCode configuration and `provider/model` model identifiers.
+Joocode currently integrates with **ChatGPT Codex**, **Zed**, and **JetBrains
+AI Assistant**. Support for additional AI clients is planned, using the same
+existing OpenCode configuration and `provider/model` model identifiers.
 
 ## Configuration discovery
 
@@ -123,6 +123,27 @@ continues reading them from OpenCode. Restart Zed once if it was already open.
 Use `ZED_SETTINGS_PATH=/path/to/settings.json joocode zed` for a nonstandard
 settings location.
 
+## JetBrains AI Assistant integration
+
+Start the OpenAI-compatible proxy for JetBrains:
+
+```bash
+joocode jetbrains
+```
+
+The command prints the exact provider values and keeps the proxy running. In
+your JetBrains IDE, open **Settings | Tools | AI Assistant | Providers & API
+keys**, add an **OpenAI-compatible** provider, and use:
+
+- **Base URL:** `http://127.0.0.1:10100/v1`
+- **API key:** any non-empty local value, such as `joocode`
+- **Model:** a discovered `provider/model` ID from `joocode models`
+
+JetBrains stores provider keys in its managed credential store, so Joocode
+does not write IDE settings or copy OpenCode credentials into it. The proxy
+continues to read credentials only from OpenCode. Select the configured model
+under **Models Assignment** to use it in AI Assistant features.
+
 ## HTTP examples
 
 List models:
@@ -162,6 +183,7 @@ joocode doctor
 joocode models
 joocode codex-install [--base-url URL]
 joocode zed [--base-url URL] [--host HOST] [--port PORT]
+joocode jetbrains [--base-url URL] [--host HOST] [--port PORT]
 joocode serve [--host HOST] [--port PORT]
 joocode upgrade [--version VERSION]
 ```

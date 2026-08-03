@@ -2,7 +2,7 @@
 name = "joocode"
 version = "0.1.1"
 edition = "2024"
-description = "Minimal native bridge that exposes OpenCode providers to ChatGPT Codex and Zed; JetBrains and more clients planned"
+description = "Minimal native bridge that exposes OpenCode providers to ChatGPT Codex, Zed, and JetBrains AI Assistant"
 license = "MIT"
 repository = "https://github.com/yan-ad/joc"
 homepage = "https://github.com/yan-ad/joc"

@@ -26,6 +26,16 @@ pub enum Command {
         #[arg(long, default_value_t = 10100)]
         port: u16,
     },
+    /// Start a JetBrains AI Assistant-compatible proxy and print provider setup values.
+    Jetbrains {
+        /// URL where JetBrains can reach the local OpenAI-compatible API.
+        #[arg(long, default_value = "http://127.0.0.1:10100/v1")]
+        base_url: String,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: IpAddr,
+        #[arg(long, default_value_t = 10100)]
+        port: u16,
+    },
     /// Print all available provider/model identifiers.
     Models,
     /// Validate configuration discovery and provider loading.

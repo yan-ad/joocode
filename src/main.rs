@@ -3,6 +3,7 @@ mod cli;
 mod codex;
 mod config;
 mod error;
+mod jetbrains;
 mod protocol;
 mod provider;
 mod upgrade;
@@ -68,6 +69,14 @@ async fn main() -> anyhow::Result<()> {
             println!("Zed settings: {}", settings.display());
             println!("Registered {} OpenCode models.", registry.models().len());
             println!("Restart Zed once if it is already running.");
+            app::serve(host, port, registry).await
+        }
+        Command::Jetbrains {
+            base_url,
+            host,
+            port,
+        } => {
+            println!("{}", jetbrains::setup_instructions(&registry, &base_url));
             app::serve(host, port, registry).await
         }
         Command::Upgrade { .. } => unreachable!("upgrade is handled before config discovery"),
