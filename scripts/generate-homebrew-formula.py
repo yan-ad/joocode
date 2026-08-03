@@ -17,10 +17,10 @@ for line in checksums:
 
 repo = os.environ.get("GITHUB_REPOSITORY", "yan-ad/joc")
 assets = {
-    "arm64_macos": f"joc-aarch64-apple-darwin.tar.gz",
-    "x86_macos": f"joc-x86_64-apple-darwin.tar.gz",
-    "arm64_linux": f"joc-aarch64-unknown-linux-gnu.tar.gz",
-    "x86_linux": f"joc-x86_64-unknown-linux-gnu.tar.gz",
+    "arm64_macos": f"joocode-aarch64-apple-darwin.tar.gz",
+    "x86_macos": f"joocode-x86_64-apple-darwin.tar.gz",
+    "arm64_linux": f"joocode-aarch64-unknown-linux-gnu.tar.gz",
+    "x86_linux": f"joocode-x86_64-unknown-linux-gnu.tar.gz",
 }
 missing = [name for name in assets.values() if name not in values]
 if missing:
@@ -31,7 +31,7 @@ base = f"https://github.com/{repo}/releases/download/v{version}"
 def url(asset: str) -> str:
     return f"{base}/{asset}"
 
-formula = f'''class Joc < Formula
+formula = f'''class Joocode < Formula
   desc "Native bridge from OpenCode providers to the OpenAI Responses API"
   homepage "https://github.com/{repo}"
   version "{version}"
@@ -58,14 +58,14 @@ formula = f'''class Joc < Formula
   end
 
   def install
-    bin.install Dir["joc-*/joc"].first => "joc"
+    bin.install Dir["joocode-*/joocode"].first => "joocode"
   end
 
   test do
-    assert_match "joc", shell_output("#{{bin}}/joc --help")
+    assert_match "joocode", shell_output("#{{bin}}/joocode --help")
   end
 end
 '''
 
-Path("joc.rb").write_text(formula)
+Path("joocode.rb").write_text(formula)
 print(formula, end="")

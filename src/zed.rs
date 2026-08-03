@@ -59,9 +59,10 @@ fn install_at(registry: &Registry, base_url: &str, path: PathBuf) -> anyhow::Res
         })
         .collect::<Vec<_>>();
     compatible.insert(
-        "joc".into(),
+        "joocode".into(),
         json!({ "api_url": base_url, "available_models": models }),
     );
+    compatible.remove("joc");
     compatible.remove("crabcodex");
     let parent = path.parent().context("Zed settings path has no parent")?;
     fs::create_dir_all(parent).with_context(|| format!("failed creating {}", parent.display()))?;
@@ -120,11 +121,11 @@ mod tests {
         assert_eq!(result["theme"], "Ayu");
         assert_eq!(result["language_models"]["openai"]["x"], 1);
         assert_eq!(
-            result["language_models"]["openai_compatible"]["joc"]["api_url"],
+            result["language_models"]["openai_compatible"]["joocode"]["api_url"],
             "http://127.0.0.1:10100/v1"
         );
         assert_eq!(
-            result["language_models"]["openai_compatible"]["joc"]["available_models"][0]["name"],
+            result["language_models"]["openai_compatible"]["joocode"]["available_models"][0]["name"],
             "demo/fast"
         );
     }

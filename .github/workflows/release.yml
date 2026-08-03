@@ -95,10 +95,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          asset="joc-${{ matrix.target }}.tar.gz"
-          staging="joc-${{ matrix.target }}"
+          asset="joocode-${{ matrix.target }}.tar.gz"
+          staging="joocode-${{ matrix.target }}"
           mkdir "$staging"
-          cp "target/${{ matrix.target }}/release/joc" "$staging/"
+          cp "target/${{ matrix.target }}/release/joocode" "$staging/"
           cp README.md LICENSE "$staging/"
           tar -czf "$asset" "$staging"
 
@@ -106,18 +106,18 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $asset = "joc-${{ matrix.target }}.zip"
-          $staging = "joc-${{ matrix.target }}"
+          $asset = "joocode-${{ matrix.target }}.zip"
+          $staging = "joocode-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $staging
-          Copy-Item "target/${{ matrix.target }}/release/joc.exe" $staging
+          Copy-Item "target/${{ matrix.target }}/release/joocode.exe" $staging
           Copy-Item README.md, LICENSE $staging
           Compress-Archive -Path $staging -DestinationPath $asset
 
       - name: Upload packaged binary
         uses: actions/upload-artifact@v4
         with:
-          name: joc-${{ matrix.target }}
-          path: joc-${{ matrix.target }}.${{ matrix.archive }}
+          name: joocode-${{ matrix.target }}
+          path: joocode-${{ matrix.target }}.${{ matrix.archive }}
           if-no-files-found: error
 
   publish:
@@ -142,12 +142,12 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum joc-* > SHA256SUMS
+        run: sha256sum joocode-* > SHA256SUMS
 
       - name: Generate Homebrew formula
         run: |
           python3 scripts/generate-homebrew-formula.py "${RELEASE_TAG}" dist/SHA256SUMS
-          mv joc.rb dist/joc.rb
+          mv joocode.rb dist/joocode.rb
 
       - name: Publish release
         env:
@@ -193,10 +193,10 @@ jobs:
           set -euo pipefail
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPOSITORY}.git" tap
           mkdir -p tap/Formula
-          cp joc.rb tap/Formula/joc.rb
+          cp joocode.rb tap/Formula/joocode.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/joc.rb
-          git diff --cached --quiet || git commit -m "joc ${RELEASE_TAG}"
+          git add Formula/joocode.rb
+          git diff --cached --quiet || git commit -m "joocode ${RELEASE_TAG}"
           git push origin HEAD

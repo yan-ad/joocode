@@ -1,12 +1,12 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY="${JOC_REPOSITORY:-yan-ad/joc}"
-INSTALL_DIR="${JOC_INSTALL_DIR:-$HOME/.local/bin}"
-VERSION="${JOC_VERSION:-${1:-latest}}"
+REPOSITORY="${JOOCODE_REPOSITORY:-${JOC_REPOSITORY:-yan-ad/joc}}"
+INSTALL_DIR="${JOOCODE_INSTALL_DIR:-${JOC_INSTALL_DIR:-$HOME/.local/bin}}"
+VERSION="${JOOCODE_VERSION:-${JOC_VERSION:-${1:-latest}}}"
 
 fail() {
-  printf 'joc installer: %s\n' "$1" >&2
+  printf 'joocode installer: %s\n' "$1" >&2
   exit 1
 }
 
@@ -26,7 +26,7 @@ case "$(uname -m)" in
 esac
 
 target="${arch}-${os}"
-asset="joc-${target}.tar.gz"
+asset="joocode-${target}.tar.gz"
 
 if [ "$VERSION" = "latest" ]; then
   latest_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPOSITORY}/releases/latest")" \
@@ -40,7 +40,7 @@ case "$VERSION" in
 esac
 
 base_url="https://github.com/${REPOSITORY}/releases/download/${VERSION}"
-tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t joc)"
+tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t joocode)"
 trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
 printf 'Downloading JustOpenCode %s for %s...\n' "$VERSION" "$target"
@@ -66,14 +66,14 @@ fi
 
 tar -xzf "$tmp_dir/$asset" -C "$tmp_dir"
 mkdir -p "$INSTALL_DIR"
-install -m 755 "$tmp_dir/joc-${target}/joc" "$INSTALL_DIR/joc"
+install -m 755 "$tmp_dir/joocode-${target}/joocode" "$INSTALL_DIR/joocode"
 
-printf '\nJustOpenCode %s installed to %s/joc\n' "$VERSION" "$INSTALL_DIR"
+printf '\nJustOpenCode %s installed to %s/joocode\n' "$VERSION" "$INSTALL_DIR"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
-  *) printf 'Add %s to PATH to run joc globally.\n' "$INSTALL_DIR" ;;
+  *) printf 'Add %s to PATH to run joocode globally.\n' "$INSTALL_DIR" ;;
 esac
 printf '\nNext steps:\n'
-printf '  joc doctor\n'
-printf '  joc codex-install\n'
-printf '  joc serve\n'
+printf '  joocode doctor\n'
+printf '  joocode codex-install\n'
+printf '  joocode serve\n'

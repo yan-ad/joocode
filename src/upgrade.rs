@@ -17,10 +17,11 @@ struct LatestRelease {
 }
 
 pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
-    let repository =
-        std::env::var("JOC_REPOSITORY").unwrap_or_else(|_| DEFAULT_REPOSITORY.to_owned());
+    let repository = std::env::var("JOOCODE_REPOSITORY")
+        .or_else(|_| std::env::var("JOC_REPOSITORY"))
+        .unwrap_or_else(|_| DEFAULT_REPOSITORY.to_owned());
     let client = reqwest::Client::builder()
-        .user_agent(concat!("joc/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("joocode/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("failed to create upgrade client")?;
 
@@ -49,7 +50,7 @@ pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
     }
 
     let target = release_target()?;
-    let asset = format!("joc-{target}.tar.gz");
+    let asset = format!("joocode-{target}.tar.gz");
     let base_url = format!("https://github.com/{repository}/releases/download/{tag}");
     let archive = client
         .get(format!("{base_url}/{asset}"))
@@ -130,9 +131,9 @@ fn replace_binary(executable: &Path, archive: &[u8], target: &str) -> anyhow::Re
         .unpack(&temp_dir)
         .context("failed to extract the release archive")?;
 
-    let extracted = temp_dir.join(format!("joc-{target}/joc"));
+    let extracted = temp_dir.join(format!("joocode-{target}/joocode"));
     if !extracted.is_file() {
-        bail!("release archive does not contain the expected joc binary");
+        bail!("release archive does not contain the expected joocode binary");
     }
 
     let replacement = executable.with_extension(format!("upgrade-{}", std::process::id()));
@@ -158,7 +159,7 @@ fn tempfile_dir(executable: &Path) -> anyhow::Result<PathBuf> {
         .parent()
         .filter(|path| path.is_dir())
         .unwrap_or_else(|| Path::new("/tmp"));
-    let path = parent.join(format!(".joc-upgrade-{}", std::process::id()));
+    let path = parent.join(format!(".joocode-upgrade-{}", std::process::id()));
     if path.exists() {
         fs::remove_dir_all(&path).context("failed to clear previous upgrade staging")?;
     }
@@ -178,8 +179,14 @@ mod tests {
 
     #[test]
     fn reads_gnu_and_bsd_checksum_formats() {
-        let checksums = "abc  joc-a.tar.gz\ndef *joc-b.tar.gz\n";
-        assert_eq!(checksum_for(checksums, "joc-a.tar.gz"), Some("abc".into()));
-        assert_eq!(checksum_for(checksums, "joc-b.tar.gz"), Some("def".into()));
+        let checksums = "abc  joocode-a.tar.gz\ndef *joocode-b.tar.gz\n";
+        assert_eq!(
+            checksum_for(checksums, "joocode-a.tar.gz"),
+            Some("abc".into())
+        );
+        assert_eq!(
+            checksum_for(checksums, "joocode-b.tar.gz"),
+            Some("def".into())
+        );
     }
 }

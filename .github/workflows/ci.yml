@@ -38,11 +38,11 @@ jobs:
 
       - name: Check Homebrew formula generator
         run: |
-          mkdir -p /tmp/joc-formula
-          printf '%064d  joc-aarch64-apple-darwin.tar.gz\n' 1 > /tmp/joc-formula/SHA256SUMS
-          printf '%064d  joc-x86_64-apple-darwin.tar.gz\n' 2 >> /tmp/joc-formula/SHA256SUMS
-          printf '%064d  joc-aarch64-unknown-linux-gnu.tar.gz\n' 3 >> /tmp/joc-formula/SHA256SUMS
-          printf '%064d  joc-x86_64-unknown-linux-gnu.tar.gz\n' 4 >> /tmp/joc-formula/SHA256SUMS
-          cd /tmp/joc-formula
+          mkdir -p /tmp/joocode-formula
+          printf '%064d  joocode-aarch64-apple-darwin.tar.gz\n' 1 > /tmp/joocode-formula/SHA256SUMS
+          printf '%064d  joocode-x86_64-apple-darwin.tar.gz\n' 2 >> /tmp/joocode-formula/SHA256SUMS
+          printf '%064d  joocode-aarch64-unknown-linux-gnu.tar.gz\n' 3 >> /tmp/joocode-formula/SHA256SUMS
+          printf '%064d  joocode-x86_64-unknown-linux-gnu.tar.gz\n' 4 >> /tmp/joocode-formula/SHA256SUMS
+          cd /tmp/joocode-formula
           python3 "$GITHUB_WORKSPACE/scripts/generate-homebrew-formula.py" v0.1.0 SHA256SUMS >/dev/null
-          ruby -c joc.rb
+          ruby -c joocode.rb

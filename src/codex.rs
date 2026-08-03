@@ -11,7 +11,8 @@ use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::provider::{ModelInfo, Registry};
 
-const PROVIDER_ID: &str = "joc";
+const PROVIDER_ID: &str = "joocode";
+const JOC_PROVIDER_ID: &str = "joc";
 const CRABCODEX_PROVIDER_ID: &str = "crabcodex";
 const LEGACY_PROVIDER_ID: &str = "open_initiative";
 
@@ -32,7 +33,7 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
     fs::create_dir_all(&home)
         .with_context(|| format!("failed to create Codex directory {}", home.display()))?;
 
-    let catalog_path = home.join("joc-models.json");
+    let catalog_path = home.join("joocode-models.json");
     let config_path = home.join("config.toml");
     let existing = match fs::read_to_string(&config_path) {
         Ok(content) => content,
@@ -78,6 +79,7 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(true);
     providers[PROVIDER_ID] = Item::Table(provider);
+    providers.remove(JOC_PROVIDER_ID);
     providers.remove(CRABCODEX_PROVIDER_ID);
     providers.remove(LEGACY_PROVIDER_ID);
 
@@ -85,6 +87,7 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
         .with_context(|| format!("failed to write {}", config_path.display()))?;
 
     for legacy_catalog in [
+        home.join("joc-models.json"),
         home.join("crabcodex-models.json"),
         home.join("open-initiative-models.json"),
     ] {

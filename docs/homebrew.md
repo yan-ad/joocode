@@ -1,18 +1,18 @@
 # Homebrew packaging
 
-The release workflow generates a checksum-pinned `crabcodex.rb` formula and
+The release workflow generates a checksum-pinned `joocode.rb` formula and
 attaches it to every GitHub release.
 
 ## Install directly from a release
 
 ```bash
-brew install https://github.com/yan-ad/crabcodex/releases/latest/download/crabcodex.rb
+brew install https://github.com/yan-ad/joc/releases/latest/download/joocode.rb
 ```
 
 To install a specific release:
 
 ```bash
-brew install https://github.com/yan-ad/crabcodex/releases/download/v0.1.0/crabcodex.rb
+brew install https://github.com/yan-ad/joc/releases/download/v0.1.1/joocode.rb
 ```
 
 ## Install from a tap
@@ -22,7 +22,7 @@ For a stable tap experience, maintainers can publish the generated formula to
 
 ```bash
 brew tap yan-ad/tap
-brew install yan-ad/tap/crabcodex
+brew install yan-ad/tap/joocode
 ```
 
 The release workflow publishes to that tap when the repository has a

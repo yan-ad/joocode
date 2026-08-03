@@ -3,14 +3,14 @@ use std::{net::IpAddr, path::PathBuf};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "joc", version, about)]
+#[command(name = "joocode", version, about)]
 pub struct Cli {
     /// Override the OpenCode configuration path.
-    #[arg(long, env = "JOC_CONFIG")]
+    #[arg(long, env = "JOOCODE_CONFIG")]
     pub config: Option<PathBuf>,
 
     /// Override the OpenCode authentication path.
-    #[arg(long, env = "JOC_AUTH")]
+    #[arg(long, env = "JOOCODE_AUTH")]
     pub auth: Option<PathBuf>,
 
     #[command(subcommand)]

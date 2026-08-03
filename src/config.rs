@@ -27,10 +27,13 @@ impl ConfigPaths {
     pub fn resolve(config: Option<PathBuf>, auth: Option<PathBuf>) -> anyhow::Result<Self> {
         let config = match config {
             Some(path) => path,
+            None if env::var_os("JOOCODE_CONFIG").is_some() => {
+                PathBuf::from(env::var_os("JOOCODE_CONFIG").unwrap())
+            }
+            // Kept for upgrades from Joc and CrabCodex; JOOCODE_CONFIG takes precedence.
             None if env::var_os("JOC_CONFIG").is_some() => {
                 PathBuf::from(env::var_os("JOC_CONFIG").unwrap())
             }
-            // Kept for upgrades from CrabCodex; JOC_CONFIG takes precedence.
             None if env::var_os("CRABCODEX_CONFIG").is_some() => {
                 PathBuf::from(env::var_os("CRABCODEX_CONFIG").unwrap())
             }
@@ -41,10 +44,13 @@ impl ConfigPaths {
         };
         let auth = match auth {
             Some(path) => path,
+            None if env::var_os("JOOCODE_AUTH").is_some() => {
+                PathBuf::from(env::var_os("JOOCODE_AUTH").unwrap())
+            }
+            // Kept for upgrades from Joc and CrabCodex; JOOCODE_AUTH takes precedence.
             None if env::var_os("JOC_AUTH").is_some() => {
                 PathBuf::from(env::var_os("JOC_AUTH").unwrap())
             }
-            // Kept for upgrades from CrabCodex; JOC_AUTH takes precedence.
             None if env::var_os("CRABCODEX_AUTH").is_some() => {
                 PathBuf::from(env::var_os("CRABCODEX_AUTH").unwrap())
             }

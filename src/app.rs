@@ -56,8 +56,8 @@ async fn chat_completions(
             .map_err(|_| ApiError::internal("invalid provider credential"))?;
         upstream_headers.insert("authorization", value);
     }
-    if let Some(value) = headers.get("x-joc-api-key") {
-        upstream_headers.insert("x-joc-api-key", value.clone());
+    if let Some(value) = headers.get("x-joocode-api-key") {
+        upstream_headers.insert("x-joocode-api-key", value.clone());
     }
     let response = state
         .registry
@@ -129,7 +129,7 @@ pub async fn serve(host: IpAddr, port: u16, registry: Registry) -> anyhow::Resul
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
     let address = SocketAddr::from((host, port));
-    info!(%address, "joc listening");
+    info!(%address, "joocode listening");
     let listener = tokio::net::TcpListener::bind(address).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -182,10 +182,11 @@ async fn responses(
         upstream_headers.insert("authorization", value);
     }
     if let Some(value) = headers
-        .get("x-joc-api-key")
+        .get("x-joocode-api-key")
+        .or_else(|| headers.get("x-joc-api-key"))
         .or_else(|| headers.get("x-open-initiative-api-key"))
     {
-        upstream_headers.insert("x-joc-api-key", value.clone());
+        upstream_headers.insert("x-joocode-api-key", value.clone());
     }
     let response = state
         .registry
