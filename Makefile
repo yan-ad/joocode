@@ -8,7 +8,8 @@ help:
 	@echo "  make clippy     Run Clippy with warnings denied"
 	@echo "  make test       Run the locked test suite"
 	@echo "  make build      Build a locked release binary"
-	@echo "  make release    Run all local release checks"
+	@echo "  make release    Bump version, validate, commit, tag, and push a release"
+	@echo "                  Optional: BUMP=minor|major, VERSION=x.y.z, DRY_RUN=1"
 
 fmt-check:
 	cargo fmt --all --check
@@ -22,5 +23,5 @@ test:
 build:
 	cargo build --release --locked
 
-release: fmt-check clippy test build
-	@echo "Release checks passed for joocode v$$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)."
+release:
+	@./scripts/release.sh

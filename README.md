@@ -241,9 +241,24 @@ This separation keeps the core small while allowing native provider adapters to 
 
 ## Releasing
 
-1. Update the version in `Cargo.toml` and `Cargo.lock`.
-2. Push the changes to `main` and wait for CI to pass.
-3. Create and push a matching tag, for example `git tag v0.1.0 && git push origin v0.1.0`.
+Create and publish the next patch release from a clean, up-to-date `main`:
+
+```bash
+make release
+```
+
+`make release` updates `Cargo.toml` and `Cargo.lock`, runs the locked format,
+Clippy, test, and release-build checks, creates a `chore: release vX.Y.Z`
+commit, creates an annotated matching tag, and pushes both `main` and the tag.
+
+Choose a version increment or preview the operation without writing changes:
+
+```bash
+make release BUMP=minor
+make release BUMP=major
+make release VERSION=1.2.3
+make release DRY_RUN=1
+```
 
 The release workflow builds Linux, macOS, and Windows archives, generates
 `SHA256SUMS`, publishes a checksum-pinned `joocode.rb` Homebrew formula,
