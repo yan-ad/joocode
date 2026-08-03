@@ -1,5 +1,8 @@
 use std::{env, fs, path::PathBuf};
 
+#[cfg(target_os = "macos")]
+use std::process::Command;
+
 use anyhow::Context;
 use serde_json::{Map, Value, json};
 
@@ -14,11 +17,51 @@ fn settings_path() -> anyhow::Result<PathBuf> {
         .join(".config/zed/settings.json"))
 }
 
-/// Add or replace JustOpenCode's own provider entry without changing unrelated Zed
-/// preferences or any provider credentials stored in Zed's keychain.
+fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // Zed stores compatible-provider keys as Internet Password records using
+        // the configured API URL as the server field. `security` is the macOS
+        // supported command-line interface to that keychain record type.
+        let status = Command::new("security")
+            .args([
+                "add-internet-password",
+                "-a",
+                PROVIDER_ID,
+                "-s",
+                base_url,
+                "-w",
+                LOCAL_API_KEY,
+                "-U",
+            ])
+            .status()
+            .context("failed to store Joocode's local Zed API key in the macOS keychain")?;
+        anyhow::ensure!(
+            status.success(),
+            "failed to store Joocode's local Zed API key"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = base_url;
+    }
+
+    Ok(())
+}
+
+const PROVIDER_ID: &str = "joocode";
+const LOCAL_API_KEY: &str = "joocode-local";
+
+/// Add or replace Joocode's own provider entry without changing unrelated Zed
+/// preferences. On macOS, this also adds a non-secret local placeholder key to
+/// Zed's keychain. Zed only shows compatible-provider models after it finds an
+/// API key; Joocode ignores this value and continues using OpenCode credentials.
 pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<PathBuf> {
     let path = settings_path()?;
-    install_at(registry, base_url, path)
+    let path = install_at(registry, base_url, path)?;
+    install_local_api_key(base_url)?;
+    Ok(path)
 }
 
 fn install_at(registry: &Registry, base_url: &str, path: PathBuf) -> anyhow::Result<PathBuf> {
@@ -62,7 +105,7 @@ fn install_at(registry: &Registry, base_url: &str, path: PathBuf) -> anyhow::Res
         })
         .collect::<Vec<_>>();
     compatible.insert(
-        "joocode".into(),
+        PROVIDER_ID.into(),
         json!({ "api_url": base_url, "available_models": models }),
     );
     compatible.remove("joc");
@@ -136,5 +179,11 @@ mod tests {
                 ["prompt_cache_key"],
             false
         );
+    }
+
+    #[test]
+    fn local_api_key_is_a_non_secret_placeholder() {
+        assert_eq!(PROVIDER_ID, "joocode");
+        assert_eq!(LOCAL_API_KEY, "joocode-local");
     }
 }

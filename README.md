@@ -134,8 +134,12 @@ joocode zed
 
 This automatically adds a `joocode` OpenAI-compatible provider to Zed’s
 settings and exposes every OpenCode model as `provider/model`. It preserves all
-other Zed settings and never copies credentials into Zed; the local bridge
-continues reading them from OpenCode. Restart Zed once if it was already open.
+other Zed settings and never copies OpenCode credentials into Zed; the local
+bridge continues reading them from OpenCode. On macOS, you may be asked for
+your password to authorize Keychain access for the local Zed tunnel. Joocode
+stores only a harmless local placeholder key there so Zed shows the provider;
+it does not store or expose your OpenCode credentials. Restart Zed once if it
+was already open.
 Use `ZED_SETTINGS_PATH=/path/to/settings.json joocode zed` for a nonstandard
 settings location.
 
