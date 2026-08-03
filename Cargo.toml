@@ -1,6 +1,6 @@
 [package]
 name = "joocode"
-version = "0.1.1"
+version = "0.1.5"
 edition = "2024"
 description = "Minimal native bridge that exposes OpenCode providers to ChatGPT Codex, Zed, and JetBrains AI Assistant"
 license = "MIT"
