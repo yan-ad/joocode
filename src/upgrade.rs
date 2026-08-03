@@ -9,7 +9,7 @@ use flate2::read::GzDecoder;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const DEFAULT_REPOSITORY: &str = "yan-ad/crabcodex";
+const DEFAULT_REPOSITORY: &str = "yan-ad/joc";
 
 #[derive(Debug, Deserialize)]
 struct LatestRelease {
@@ -18,9 +18,9 @@ struct LatestRelease {
 
 pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
     let repository =
-        std::env::var("CRABCODEX_REPOSITORY").unwrap_or_else(|_| DEFAULT_REPOSITORY.to_owned());
+        std::env::var("JOC_REPOSITORY").unwrap_or_else(|_| DEFAULT_REPOSITORY.to_owned());
     let client = reqwest::Client::builder()
-        .user_agent(concat!("crabcodex/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("joc/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("failed to create upgrade client")?;
 
@@ -33,29 +33,29 @@ pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
                 ))
                 .send()
                 .await
-                .context("failed to query the latest CrabCodex release")?
+                .context("failed to query the latest JustOpenCode release")?
                 .error_for_status()
                 .context("GitHub returned an error while checking for updates")?
                 .json::<LatestRelease>()
                 .await
-                .context("failed to parse the latest CrabCodex release")?;
+                .context("failed to parse the latest JustOpenCode release")?;
             release.tag_name
         }
     };
 
     if tag == normalize_tag(env!("CARGO_PKG_VERSION")) {
-        println!("CrabCodex {tag} is already up to date");
+        println!("JustOpenCode {tag} is already up to date");
         return Ok(());
     }
 
     let target = release_target()?;
-    let asset = format!("crabcodex-{target}.tar.gz");
+    let asset = format!("joc-{target}.tar.gz");
     let base_url = format!("https://github.com/{repository}/releases/download/{tag}");
     let archive = client
         .get(format!("{base_url}/{asset}"))
         .send()
         .await
-        .with_context(|| format!("failed to download CrabCodex {tag}"))?
+        .with_context(|| format!("failed to download JustOpenCode {tag}"))?
         .error_for_status()
         .with_context(|| format!("release asset not found: {asset}"))?
         .bytes()
@@ -81,7 +81,7 @@ pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
 
     let executable = std::env::current_exe().context("failed to locate the running binary")?;
     replace_binary(&executable, &archive, &target)?;
-    println!("CrabCodex {tag} installed at {}", executable.display());
+    println!("JustOpenCode {tag} installed at {}", executable.display());
     Ok(())
 }
 
@@ -130,13 +130,13 @@ fn replace_binary(executable: &Path, archive: &[u8], target: &str) -> anyhow::Re
         .unpack(&temp_dir)
         .context("failed to extract the release archive")?;
 
-    let extracted = temp_dir.join(format!("crabcodex-{target}/crabcodex"));
+    let extracted = temp_dir.join(format!("joc-{target}/joc"));
     if !extracted.is_file() {
-        bail!("release archive does not contain the expected crabcodex binary");
+        bail!("release archive does not contain the expected joc binary");
     }
 
     let replacement = executable.with_extension(format!("upgrade-{}", std::process::id()));
-    fs::copy(&extracted, &replacement).context("failed to stage the new CrabCodex binary")?;
+    fs::copy(&extracted, &replacement).context("failed to stage the new JustOpenCode binary")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -158,7 +158,7 @@ fn tempfile_dir(executable: &Path) -> anyhow::Result<PathBuf> {
         .parent()
         .filter(|path| path.is_dir())
         .unwrap_or_else(|| Path::new("/tmp"));
-    let path = parent.join(format!(".crabcodex-upgrade-{}", std::process::id()));
+    let path = parent.join(format!(".joc-upgrade-{}", std::process::id()));
     if path.exists() {
         fs::remove_dir_all(&path).context("failed to clear previous upgrade staging")?;
     }
@@ -178,14 +178,8 @@ mod tests {
 
     #[test]
     fn reads_gnu_and_bsd_checksum_formats() {
-        let checksums = "abc  crabcodex-a.tar.gz\ndef *crabcodex-b.tar.gz\n";
-        assert_eq!(
-            checksum_for(checksums, "crabcodex-a.tar.gz"),
-            Some("abc".into())
-        );
-        assert_eq!(
-            checksum_for(checksums, "crabcodex-b.tar.gz"),
-            Some("def".into())
-        );
+        let checksums = "abc  joc-a.tar.gz\ndef *joc-b.tar.gz\n";
+        assert_eq!(checksum_for(checksums, "joc-a.tar.gz"), Some("abc".into()));
+        assert_eq!(checksum_for(checksums, "joc-b.tar.gz"), Some("def".into()));
     }
 }

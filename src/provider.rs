@@ -105,7 +105,7 @@ impl Registry {
 
         models.sort_by(|a, b| a.id.cmp(&b.id));
         let client = Client::builder()
-            .user_agent(concat!("crabcodex/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("joc/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
             inner: Arc::new(RegistryInner {

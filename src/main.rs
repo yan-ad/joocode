@@ -6,6 +6,7 @@ mod error;
 mod protocol;
 mod provider;
 mod upgrade;
+mod zed;
 
 use anyhow::Context;
 use clap::Parser;
@@ -17,9 +18,7 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| "crabcodex=info".into()),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "joc=info".into()))
         .compact()
         .init();
 
@@ -57,6 +56,17 @@ async fn main() -> anyhow::Result<()> {
             println!("total:   {} models", installed.total_model_count);
             println!("Restart Codex to reload the model picker.");
             Ok(())
+        }
+        Command::Zed {
+            base_url,
+            host,
+            port,
+        } => {
+            let settings = zed::install(&registry, &base_url)?;
+            println!("Zed settings: {}", settings.display());
+            println!("Registered {} OpenCode models.", registry.models().len());
+            println!("Restart Zed once if it is already running.");
+            app::serve(host, port, registry).await
         }
         Command::Upgrade { .. } => unreachable!("upgrade is handled before config discovery"),
     }

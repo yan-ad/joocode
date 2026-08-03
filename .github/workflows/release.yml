@@ -95,10 +95,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          asset="crabcodex-${{ matrix.target }}.tar.gz"
-          staging="crabcodex-${{ matrix.target }}"
+          asset="joc-${{ matrix.target }}.tar.gz"
+          staging="joc-${{ matrix.target }}"
           mkdir "$staging"
-          cp "target/${{ matrix.target }}/release/crabcodex" "$staging/"
+          cp "target/${{ matrix.target }}/release/joc" "$staging/"
           cp README.md LICENSE "$staging/"
           tar -czf "$asset" "$staging"
 
@@ -106,18 +106,18 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $asset = "crabcodex-${{ matrix.target }}.zip"
-          $staging = "crabcodex-${{ matrix.target }}"
+          $asset = "joc-${{ matrix.target }}.zip"
+          $staging = "joc-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $staging
-          Copy-Item "target/${{ matrix.target }}/release/crabcodex.exe" $staging
+          Copy-Item "target/${{ matrix.target }}/release/joc.exe" $staging
           Copy-Item README.md, LICENSE $staging
           Compress-Archive -Path $staging -DestinationPath $asset
 
       - name: Upload packaged binary
         uses: actions/upload-artifact@v4
         with:
-          name: crabcodex-${{ matrix.target }}
-          path: crabcodex-${{ matrix.target }}.${{ matrix.archive }}
+          name: joc-${{ matrix.target }}
+          path: joc-${{ matrix.target }}.${{ matrix.archive }}
           if-no-files-found: error
 
   publish:
@@ -142,12 +142,12 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum crabcodex-* > SHA256SUMS
+        run: sha256sum joc-* > SHA256SUMS
 
       - name: Generate Homebrew formula
         run: |
           python3 scripts/generate-homebrew-formula.py "${RELEASE_TAG}" dist/SHA256SUMS
-          mv crabcodex.rb dist/crabcodex.rb
+          mv joc.rb dist/joc.rb
 
       - name: Publish release
         env:
@@ -156,7 +156,7 @@ jobs:
           gh release create "$RELEASE_TAG" dist/* \
             --verify-tag \
             --generate-notes \
-            --title "CrabCodex $RELEASE_TAG"
+            --title "JustOpenCode $RELEASE_TAG"
 
   publish-homebrew:
     name: Publish Homebrew formula
@@ -193,10 +193,10 @@ jobs:
           set -euo pipefail
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPOSITORY}.git" tap
           mkdir -p tap/Formula
-          cp crabcodex.rb tap/Formula/crabcodex.rb
+          cp joc.rb tap/Formula/joc.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/crabcodex.rb
-          git diff --cached --quiet || git commit -m "crabcodex ${RELEASE_TAG}"
+          git add Formula/joc.rb
+          git diff --cached --quiet || git commit -m "joc ${RELEASE_TAG}"
           git push origin HEAD

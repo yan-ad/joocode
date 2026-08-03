@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a Homebrew formula for a CrabCodex release."""
+"""Generate a Homebrew formula for a JustOpenCode release."""
 
 from pathlib import Path
 import os
@@ -15,12 +15,12 @@ for line in checksums:
     digest, filename = line.split(maxsplit=1)
     values[filename.lstrip("*")] = digest
 
-repo = os.environ.get("GITHUB_REPOSITORY", "yan-ad/crabcodex")
+repo = os.environ.get("GITHUB_REPOSITORY", "yan-ad/joc")
 assets = {
-    "arm64_macos": f"crabcodex-aarch64-apple-darwin.tar.gz",
-    "x86_macos": f"crabcodex-x86_64-apple-darwin.tar.gz",
-    "arm64_linux": f"crabcodex-aarch64-unknown-linux-gnu.tar.gz",
-    "x86_linux": f"crabcodex-x86_64-unknown-linux-gnu.tar.gz",
+    "arm64_macos": f"joc-aarch64-apple-darwin.tar.gz",
+    "x86_macos": f"joc-x86_64-apple-darwin.tar.gz",
+    "arm64_linux": f"joc-aarch64-unknown-linux-gnu.tar.gz",
+    "x86_linux": f"joc-x86_64-unknown-linux-gnu.tar.gz",
 }
 missing = [name for name in assets.values() if name not in values]
 if missing:
@@ -31,7 +31,7 @@ base = f"https://github.com/{repo}/releases/download/v{version}"
 def url(asset: str) -> str:
     return f"{base}/{asset}"
 
-formula = f'''class Crabcodex < Formula
+formula = f'''class Joc < Formula
   desc "Native bridge from OpenCode providers to the OpenAI Responses API"
   homepage "https://github.com/{repo}"
   version "{version}"
@@ -58,14 +58,14 @@ formula = f'''class Crabcodex < Formula
   end
 
   def install
-    bin.install Dir["crabcodex-*/crabcodex"].first => "crabcodex"
+    bin.install Dir["joc-*/joc"].first => "joc"
   end
 
   test do
-    assert_match "crabcodex", shell_output("#{{bin}}/crabcodex --help")
+    assert_match "joc", shell_output("#{{bin}}/joc --help")
   end
 end
 '''
 
-Path("crabcodex.rb").write_text(formula)
+Path("joc.rb").write_text(formula)
 print(formula, end="")

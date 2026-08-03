@@ -1,4 +1,4 @@
-# 🦀 CrabCodex
+# Joc — JustOpenCode
 
 A small native Rust bridge that exposes providers configured in OpenCode through an OpenAI Responses-compatible local API for Codex clients.
 
@@ -30,7 +30,7 @@ When the XDG variables are unset:
 ~/.local/share/opencode/auth.json
 ```
 
-Override either path with `--config`, `--auth`, `CRABCODEX_CONFIG`, or `CRABCODEX_AUTH`.
+Override either path with `--config`, `--auth`, `JOC_CONFIG`, or `JOC_AUTH`.
 
 ## Build and run
 
@@ -40,15 +40,15 @@ On macOS or Linux:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://raw.githubusercontent.com/yan-ad/crabcodex/main/install.sh | sh
+  https://raw.githubusercontent.com/yan-ad/joc/main/install.sh | sh
 ```
 
 The installer detects the host target, verifies the release checksum, and
-installs `crabcodex` to `~/.local/bin` by default. Install a specific version or
+installs `joc` to `~/.local/bin` by default. Install a specific version or
 directory with:
 
 ```bash
-CRABCODEX_VERSION=0.1.0 CRABCODEX_INSTALL_DIR=/usr/local/bin sh install.sh
+JOC_VERSION=0.1.0 JOC_INSTALL_DIR=/usr/local/bin sh install.sh
 ```
 
 Windows ZIP archives are attached to each GitHub release.
@@ -57,10 +57,11 @@ Windows ZIP archives are attached to each GitHub release.
 
 ```bash
 cargo build --release
-./target/release/crabcodex doctor
-./target/release/crabcodex models
-./target/release/crabcodex codex-install
-./target/release/crabcodex serve
+./target/release/joc doctor
+./target/release/joc models
+./target/release/joc codex-install
+./target/release/joc zed
+./target/release/joc serve
 ```
 
 The server listens on `127.0.0.1:10100` by default. Change it with `serve --host 0.0.0.0 --port 10100`. Binding beyond loopback can expose access to every configured provider, so only do this behind trusted network controls.
@@ -70,30 +71,45 @@ The server listens on `127.0.0.1:10100` by default. Change it with `serve --host
 Add every discovered OpenCode model to the Codex model picker:
 
 ```bash
-./target/release/crabcodex codex-install
+./target/release/joc codex-install
 ```
 
 This preserves the existing Codex login and default model, merges Codex's
 built-in OpenAI models with OpenCode's `provider/model` entries, registers the
 local aggregate Responses provider, and writes
-`~/.codex/crabcodex-models.json`. Native OpenAI requests pass through with the
+`~/.codex/joc-models.json`. Native OpenAI requests pass through with the
 authorization already managed by Codex; OpenCode models use credentials from
 OpenCode. Restart the Codex CLI or desktop app after synchronization.
 
 For manual setup, configure a custom model provider in `~/.codex/config.toml`:
 
 ```toml
-model_provider = "crabcodex"
+model_provider = "joc"
 
-[model_providers.crabcodex]
-name = "CrabCodex"
+[model_providers.joc]
+name = "JustOpenCode"
 base_url = "http://127.0.0.1:10100/v1"
 wire_api = "responses"
 requires_openai_auth = true
 ```
 
-Keep using your existing Codex/OpenAI login. CrabCodex does not replace or
+Keep using your existing Codex/OpenAI login. JustOpenCode does not replace or
 store it; Codex supplies it only when native OpenAI models are selected.
+
+## Zed integration
+
+Configure Zed and start the local proxy in one command:
+
+```bash
+joc zed
+```
+
+This automatically adds a `joc` OpenAI-compatible provider to Zed’s
+settings and exposes every OpenCode model as `provider/model`. It preserves all
+other Zed settings and never copies credentials into Zed; the local bridge
+continues reading them from OpenCode. Restart Zed once if it was already open.
+Use `ZED_SETTINGS_PATH=/path/to/settings.json joc zed` for a nonstandard
+settings location.
 
 ## HTTP examples
 
@@ -130,14 +146,15 @@ curl -N http://127.0.0.1:10100/v1/responses \
 ## CLI
 
 ```text
-crabcodex doctor
-crabcodex models
-crabcodex codex-install [--base-url URL]
-crabcodex serve [--host HOST] [--port PORT]
-crabcodex upgrade [--version VERSION]
+joc doctor
+joc models
+joc codex-install [--base-url URL]
+joc zed [--base-url URL] [--host HOST] [--port PORT]
+joc serve [--host HOST] [--port PORT]
+joc upgrade [--version VERSION]
 ```
 
-Set `RUST_LOG=crabcodex=debug,tower_http=debug` for request diagnostics. Secrets and request authorization headers are not logged by the application.
+Set `RUST_LOG=joc=debug,tower_http=debug` for request diagnostics. Secrets and request authorization headers are not logged by the application.
 
 ### Upgrade
 
@@ -145,13 +162,13 @@ Upgrade an installed Linux or macOS binary to the latest checksummed GitHub
 release:
 
 ```bash
-crabcodex upgrade
+joc upgrade
 ```
 
 Install a specific release when needed:
 
 ```bash
-crabcodex upgrade --version 0.2.0
+joc upgrade --version 0.2.0
 ```
 
 The command downloads the matching platform archive and `SHA256SUMS`, verifies
@@ -175,7 +192,7 @@ This separation keeps the core small while allowing native provider adapters to 
 3. Create and push a matching tag, for example `git tag v0.1.0 && git push origin v0.1.0`.
 
 The release workflow builds Linux, macOS, and Windows archives, generates
-`SHA256SUMS`, publishes a checksum-pinned `crabcodex.rb` Homebrew formula,
+`SHA256SUMS`, publishes a checksum-pinned `joc.rb` Homebrew formula,
 and publishes a GitHub release with generated release notes.
 
 ## Homebrew
@@ -183,14 +200,14 @@ and publishes a GitHub release with generated release notes.
 Install directly from the latest GitHub release:
 
 ```bash
-brew install https://github.com/yan-ad/crabcodex/releases/latest/download/crabcodex.rb
+brew install https://github.com/yan-ad/joc/releases/latest/download/joc.rb
 ```
 
 Or install from the maintainer tap:
 
 ```bash
 brew tap yan-ad/tap
-brew install yan-ad/tap/crabcodex
+brew install yan-ad/tap/joc
 ```
 
 The release workflow can update `yan-ad/homebrew-tap` automatically when the

@@ -31,6 +31,57 @@ struct AppState {
     registry: Registry,
 }
 
+/// Zed's OpenAI-compatible provider uses Chat Completions directly. Qualified
+/// models are translated only at routing time; the upstream already speaks this
+/// wire format, so its JSON and SSE response can pass through unchanged.
+async fn chat_completions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut request): Json<Value>,
+) -> Result<ResponseBody, ApiError> {
+    let requested_model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing 'model'"))?
+        .to_owned();
+    let (provider, upstream_model) = state
+        .registry
+        .resolve(&requested_model)
+        .map_err(|e| ApiError::not_found(e.to_string()))?;
+    request["model"] = Value::String(upstream_model);
+    let mut upstream_headers = provider.headers.clone();
+    if let Some(value) = provider.credential.as_deref() {
+        let value = format!("Bearer {value}")
+            .parse()
+            .map_err(|_| ApiError::internal("invalid provider credential"))?;
+        upstream_headers.insert("authorization", value);
+    }
+    if let Some(value) = headers.get("x-joc-api-key") {
+        upstream_headers.insert("x-joc-api-key", value.clone());
+    }
+    let response = state
+        .registry
+        .client()
+        .post(provider.chat_completions_url())
+        .headers(upstream_headers)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| ApiError::upstream(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let status = response.status();
+    let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+    let stream = response.bytes_stream().map_err(std::io::Error::other);
+    let mut builder = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, content_type);
+    }
+    Ok(ResponseBody::Stream(
+        builder
+            .body(Body::from_stream(stream))
+            .expect("valid chat completion proxy response"),
+    ))
+}
+
 async fn proxy_openai(
     state: AppState,
     mut headers: HeaderMap,
@@ -73,11 +124,12 @@ pub async fn serve(host: IpAddr, port: u16, registry: Registry) -> anyhow::Resul
         .route("/healthz", get(healthz))
         .route("/v1/models", get(models))
         .route("/v1/responses", post(responses))
+        .route("/v1/chat/completions", post(chat_completions))
         .with_state(AppState { registry })
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
     let address = SocketAddr::from((host, port));
-    info!(%address, "crabcodex listening");
+    info!(%address, "joc listening");
     let listener = tokio::net::TcpListener::bind(address).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -130,10 +182,10 @@ async fn responses(
         upstream_headers.insert("authorization", value);
     }
     if let Some(value) = headers
-        .get("x-crabcodex-api-key")
+        .get("x-joc-api-key")
         .or_else(|| headers.get("x-open-initiative-api-key"))
     {
-        upstream_headers.insert("x-crabcodex-api-key", value.clone());
+        upstream_headers.insert("x-joc-api-key", value.clone());
     }
     let response = state
         .registry

@@ -1,11 +1,11 @@
 [package]
-name = "crabcodex"
+name = "joc"
 version = "0.1.0"
 edition = "2024"
 description = "Minimal native bridge from OpenCode providers to the OpenAI Responses API"
 license = "MIT"
-repository = "https://github.com/yan-ad/crabcodex"
-homepage = "https://github.com/yan-ad/crabcodex"
+repository = "https://github.com/yan-ad/joc"
+homepage = "https://github.com/yan-ad/joc"
 
 [dependencies]
 anyhow = "1"

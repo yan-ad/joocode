@@ -1,12 +1,12 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY="${CRABCODEX_REPOSITORY:-yan-ad/crabcodex}"
-INSTALL_DIR="${CRABCODEX_INSTALL_DIR:-$HOME/.local/bin}"
-VERSION="${CRABCODEX_VERSION:-${1:-latest}}"
+REPOSITORY="${JOC_REPOSITORY:-yan-ad/joc}"
+INSTALL_DIR="${JOC_INSTALL_DIR:-$HOME/.local/bin}"
+VERSION="${JOC_VERSION:-${1:-latest}}"
 
 fail() {
-  printf 'crabcodex installer: %s\n' "$1" >&2
+  printf 'joc installer: %s\n' "$1" >&2
   exit 1
 }
 
@@ -26,7 +26,7 @@ case "$(uname -m)" in
 esac
 
 target="${arch}-${os}"
-asset="crabcodex-${target}.tar.gz"
+asset="joc-${target}.tar.gz"
 
 if [ "$VERSION" = "latest" ]; then
   latest_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPOSITORY}/releases/latest")" \
@@ -40,10 +40,10 @@ case "$VERSION" in
 esac
 
 base_url="https://github.com/${REPOSITORY}/releases/download/${VERSION}"
-tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t crabcodex)"
+tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t joc)"
 trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
-printf 'Downloading CrabCodex %s for %s...\n' "$VERSION" "$target"
+printf 'Downloading JustOpenCode %s for %s...\n' "$VERSION" "$target"
 curl -fL --retry 3 --proto '=https' --tlsv1.2 \
   "$base_url/$asset" -o "$tmp_dir/$asset" \
   || fail "release asset not found: $asset"
@@ -66,14 +66,14 @@ fi
 
 tar -xzf "$tmp_dir/$asset" -C "$tmp_dir"
 mkdir -p "$INSTALL_DIR"
-install -m 755 "$tmp_dir/crabcodex-${target}/crabcodex" "$INSTALL_DIR/crabcodex"
+install -m 755 "$tmp_dir/joc-${target}/joc" "$INSTALL_DIR/joc"
 
-printf '\nCrabCodex %s installed to %s/crabcodex\n' "$VERSION" "$INSTALL_DIR"
+printf '\nJustOpenCode %s installed to %s/joc\n' "$VERSION" "$INSTALL_DIR"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
-  *) printf 'Add %s to PATH to run crabcodex globally.\n' "$INSTALL_DIR" ;;
+  *) printf 'Add %s to PATH to run joc globally.\n' "$INSTALL_DIR" ;;
 esac
 printf '\nNext steps:\n'
-printf '  crabcodex doctor\n'
-printf '  crabcodex codex-install\n'
-printf '  crabcodex serve\n'
+printf '  joc doctor\n'
+printf '  joc codex-install\n'
+printf '  joc serve\n'

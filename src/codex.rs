@@ -11,7 +11,8 @@ use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::provider::{ModelInfo, Registry};
 
-const PROVIDER_ID: &str = "crabcodex";
+const PROVIDER_ID: &str = "joc";
+const CRABCODEX_PROVIDER_ID: &str = "crabcodex";
 const LEGACY_PROVIDER_ID: &str = "open_initiative";
 
 #[derive(Debug)]
@@ -31,7 +32,7 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
     fs::create_dir_all(&home)
         .with_context(|| format!("failed to create Codex directory {}", home.display()))?;
 
-    let catalog_path = home.join("crabcodex-models.json");
+    let catalog_path = home.join("joc-models.json");
     let config_path = home.join("config.toml");
     let existing = match fs::read_to_string(&config_path) {
         Ok(content) => content,
@@ -57,7 +58,7 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
     fs::write(&catalog_path, serde_json::to_vec_pretty(&catalog)?)
         .with_context(|| format!("failed to write {}", catalog_path.display()))?;
 
-    // Codex selects one provider globally. CrabCodex is an aggregate provider:
+    // Codex selects one provider globally. JustOpenCode is an aggregate provider:
     // native OpenAI model slugs are passed through with Codex's existing auth,
     // while provider/model slugs are routed through OpenCode.
     document["model_provider"] = value(PROVIDER_ID);
@@ -72,18 +73,21 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
         .as_table_mut()
         .context("model_providers must be a TOML table")?;
     let mut provider = Table::new();
-    provider["name"] = value("CrabCodex");
+    provider["name"] = value("JustOpenCode");
     provider["base_url"] = value(base_url.trim_end_matches('/'));
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(true);
     providers[PROVIDER_ID] = Item::Table(provider);
+    providers.remove(CRABCODEX_PROVIDER_ID);
     providers.remove(LEGACY_PROVIDER_ID);
 
     fs::write(&config_path, document.to_string())
         .with_context(|| format!("failed to write {}", config_path.display()))?;
 
-    let legacy_catalog = home.join("open-initiative-models.json");
-    if legacy_catalog != catalog_path {
+    for legacy_catalog in [
+        home.join("crabcodex-models.json"),
+        home.join("open-initiative-models.json"),
+    ] {
         match fs::remove_file(&legacy_catalog) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
