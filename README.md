@@ -65,6 +65,22 @@ JOOCODE_VERSION=0.1.1 JOOCODE_INSTALL_DIR=/usr/local/bin sh install.sh
 
 Windows ZIP archives are attached to each GitHub release.
 
+### Uninstall
+
+For standalone installations made with `install.sh`, download and run the
+uninstaller:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/yan-ad/joc/main/uninstall.sh | sh
+```
+
+It removes only the `joocode` binary from `~/.local/bin` by default and keeps
+your OpenCode credentials plus Codex and Zed settings. Use
+`JOOCODE_INSTALL_DIR=/custom/bin sh uninstall.sh --yes` for a custom install
+directory or non-interactive use. If installed with Homebrew, use
+`brew uninstall joocode` instead.
+
 ### Build from source
 
 ```bash

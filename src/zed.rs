@@ -49,7 +49,10 @@ fn install_at(registry: &Registry, base_url: &str, path: PathBuf) -> anyhow::Res
                     "tools": true,
                     "images": true,
                     "parallel_tool_calls": true,
-                    "chat_completions": true
+                    "chat_completions": true,
+                    "interleaved_reasoning": false,
+                    "max_tokens_parameter": true,
+                    "prompt_cache_key": false
                 }
             });
             if model.reasoning {
@@ -127,6 +130,11 @@ mod tests {
         assert_eq!(
             result["language_models"]["openai_compatible"]["joocode"]["available_models"][0]["name"],
             "demo/fast"
+        );
+        assert_eq!(
+            result["language_models"]["openai_compatible"]["joocode"]["available_models"][0]["capabilities"]
+                ["prompt_cache_key"],
+            false
         );
     }
 }
