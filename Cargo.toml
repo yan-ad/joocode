@@ -1,6 +1,6 @@
 [package]
 name = "joc"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Minimal native bridge from OpenCode providers to the OpenAI Responses API"
 license = "MIT"
