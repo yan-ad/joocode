@@ -13,8 +13,49 @@ pub struct Cli {
     #[arg(long, env = "JOOCODE_AUTH")]
     pub auth: Option<PathBuf>,
 
+    /// Configure every supported desktop integration and start one shared local proxy.
+    #[arg(long)]
+    pub all: bool,
+
+    /// URL where desktop applications can reach the local API when using --all.
+    #[arg(long, default_value = "http://127.0.0.1:10100/v1", requires = "all")]
+    pub base_url: String,
+
+    /// Interface to bind the shared proxy to when using --all.
+    #[arg(long, default_value = "127.0.0.1", requires = "all")]
+    pub host: IpAddr,
+
+    /// Port for the shared proxy when using --all.
+    #[arg(long, default_value_t = 10100, requires = "all")]
+    pub port: u16,
+
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_mode_accepts_shared_proxy_options() {
+        let cli = Cli::try_parse_from([
+            "joocode",
+            "--all",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "1234",
+            "--base-url",
+            "http://localhost:1234/v1",
+        ])
+        .unwrap();
+
+        assert!(cli.all);
+        assert_eq!(cli.host, "0.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(cli.port, 1234);
+        assert_eq!(cli.base_url, "http://localhost:1234/v1");
+    }
 }
 
 #[derive(Clone, Debug, Subcommand)]

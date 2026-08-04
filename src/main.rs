@@ -26,12 +26,38 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if cli.all && cli.command.is_some() {
+        anyhow::bail!("--all cannot be combined with a subcommand");
+    }
     if let Some(Command::Upgrade { version }) = &cli.command {
         return upgrade::run(version.as_deref()).await;
     }
 
+    fn configure_all_desktop_clients(registry: &Registry, base_url: &str) -> anyhow::Result<()> {
+        let codex = codex::install(registry, base_url)?;
+        let zed_settings = zed::install(registry, base_url)?;
+
+        println!("Configured all supported desktop integrations:");
+        println!("  Codex: {}", codex.config.display());
+        println!("  Zed:   {}", zed_settings.display());
+        println!("  JetBrains: setup values below (stored by the IDE credential store).");
+        println!(
+            "  Models: {} OpenCode provider/model entries",
+            registry.models().len()
+        );
+        println!();
+        println!("{}", jetbrains::setup_instructions(registry, base_url));
+        println!("Restart Codex and Zed if they are already running.");
+        Ok(())
+    }
+
     let paths = ConfigPaths::resolve(cli.config, cli.auth)?;
     let registry = Registry::load(&paths).context("failed to load OpenCode providers")?;
+
+    if cli.all {
+        configure_all_desktop_clients(&registry, &cli.base_url)?;
+        return app::serve(cli.host, cli.port, registry).await;
+    }
 
     match cli.command.unwrap_or(Command::Serve {
         host: "127.0.0.1".parse()?,

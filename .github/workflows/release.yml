@@ -99,7 +99,7 @@ jobs:
           staging="joocode-${{ matrix.target }}"
           mkdir "$staging"
           cp "target/${{ matrix.target }}/release/joocode" "$staging/"
-          cp README.md LICENSE "$staging/"
+          cp README.md LICENSE install.bash install.sh "$staging/"
           tar -czf "$asset" "$staging"
 
       - name: Package Windows binary
@@ -110,7 +110,7 @@ jobs:
           $staging = "joocode-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $staging
           Copy-Item "target/${{ matrix.target }}/release/joocode.exe" $staging
-          Copy-Item README.md, LICENSE $staging
+          Copy-Item README.md, LICENSE, install.ps1 $staging
           Compress-Archive -Path $staging -DestinationPath $asset
 
       - name: Upload packaged binary

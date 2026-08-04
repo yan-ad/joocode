@@ -48,11 +48,11 @@ for upgrades.
 
 ### Install a release
 
-On macOS or Linux:
+On macOS, Linux, WSL, or Git Bash:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://raw.githubusercontent.com/yan-ad/joc/main/install.sh | sh
+  https://raw.githubusercontent.com/yan-ad/joocode/main/install.bash | bash
 ```
 
 The installer detects the host target, verifies the release checksum, and
@@ -60,42 +60,33 @@ installs `joocode` to `~/.local/bin` by default. Install a specific version or
 directory with:
 
 ```bash
-JOOCODE_VERSION=0.1.1 JOOCODE_INSTALL_DIR=/usr/local/bin sh install.sh
+curl -LsSf https://raw.githubusercontent.com/yan-ad/joocode/main/install.bash -o install.bash
+JOOCODE_VERSION=0.1.6 JOOCODE_INSTALL_DIR=/usr/local/bin bash install.bash
 ```
+
+`install.sh` remains available as a backward-compatible alias for
+`install.bash`.
 
 ### Install on Windows
 
-Windows is supported through the release ZIP and its published SHA-256
-checksum. In PowerShell,
-download and extract the latest `joocode-x86_64-pc-windows-msvc.zip` release
-asset, then add its extraction directory to your user `PATH`:
+In PowerShell, run:
 
 ```powershell
-$version = "0.1.8"
-$asset = "joocode-x86_64-pc-windows-msvc.zip"
-$url = "https://github.com/yan-ad/joc/releases/download/v$version/$asset"
-$destination = Join-Path $HOME ".local\bin\joocode"
-$extract = Join-Path $env:TEMP "joocode-$version"
-
-New-Item -ItemType Directory -Force -Path $destination | Out-Null
-Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\$asset"
-Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue
-Expand-Archive -Force "$env:TEMP\$asset" $extract
-Copy-Item (Get-ChildItem -Path $extract -Filter joocode.exe -Recurse | Select-Object -First 1).FullName $destination
-[Environment]::SetEnvironmentVariable("Path", "$destination;$([Environment]::GetEnvironmentVariable("Path", "User"))", "User")
+irm https://raw.githubusercontent.com/yan-ad/joocode/main/install.ps1 | iex
 ```
 
-Open a new PowerShell window, then verify the installation:
+It selects the x64 or ARM64 release automatically, verifies its SHA-256
+checksum, installs `joocode.exe` to `~/.local/bin`, and adds that directory to
+your user `PATH`. Open a new PowerShell window, then verify the installation:
 
 ```powershell
 joocode --version
 joocode doctor
 ```
 
-Windows ARM64 users should download
-`joocode-aarch64-pc-windows-msvc.zip` from the same release and use that asset
-name in the command above. Windows self-upgrade and uninstall are not yet
-available; replace or remove the extracted `joocode.exe` manually.
+To install a specific version, download the script first and run
+`./install.ps1 -Version 0.1.6`. Windows self-upgrade and uninstall are not yet
+available; replace or remove the installed `joocode.exe` manually.
 
 ### Uninstall
 
@@ -104,7 +95,7 @@ uninstaller:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://raw.githubusercontent.com/yan-ad/joc/main/uninstall.sh | sh
+  https://raw.githubusercontent.com/yan-ad/joocode/main/uninstall.sh | sh
 ```
 
 It removes only the `joocode` binary from `~/.local/bin` by default and keeps
@@ -122,6 +113,7 @@ cargo build --release
 ./target/release/joocode codex-install
 ./target/release/joocode zed
 ./target/release/joocode serve
+./target/release/joocode --all
 ```
 
 The server listens on `127.0.0.1:10100` by default. Change it with `serve --host 0.0.0.0 --port 10100`. Binding beyond loopback can expose access to every configured provider, so only do this behind trusted network controls.
@@ -155,6 +147,20 @@ requires_openai_auth = true
 
 Keep using your existing Codex/OpenAI login. JustOpenCode does not replace or
 store it; Codex supplies it only when native OpenAI models are selected.
+
+## Configure all desktop clients
+
+Configure supported desktop integrations and start **one shared local proxy**:
+
+```bash
+joocode --all
+```
+
+This updates Joocode-managed Codex and Zed settings, prints the one-time
+JetBrains AI Assistant setup values, and serves all clients at
+`http://127.0.0.1:10100/v1`. Every client receives the same discovered
+`provider/model` list. Use `--host`, `--port`, and `--base-url` together to
+use a different local endpoint.
 
 ## Zed integration
 
@@ -232,6 +238,7 @@ curl -N http://127.0.0.1:10100/v1/responses \
 
 ```text
 joocode doctor
+joocode --all [--base-url URL] [--host HOST] [--port PORT]
 joocode models
 joocode codex-install [--base-url URL]
 joocode zed [--base-url URL] [--host HOST] [--port PORT]
@@ -298,28 +305,20 @@ and publishes a GitHub release with generated release notes.
 
 ## Homebrew
 
-`brew install joocode` becomes available only after Homebrew accepts Joocode
-into the official [`homebrew/core`](https://github.com/Homebrew/homebrew-core)
-repository. That review is managed by Homebrew and cannot be enabled solely by
-this repository. The core-submission steps are documented in
-[`docs/homebrew-core.md`](docs/homebrew-core.md).
-
-Until that merge happens, use either supported install method below.
-
-Install directly from the latest GitHub release:
-
-```bash
-brew install https://github.com/yan-ad/joc/releases/latest/download/joocode.rb
-```
-
-Or install from the maintainer tap:
+Install from the Joocode Homebrew tap:
 
 ```bash
 brew tap yan-ad/tap
+brew install joocode
+```
+
+The tap adds Joocode's formula to your local Homebrew installation, so the
+second command can use the short `joocode` name. To install in one command:
+
+```bash
 brew install yan-ad/tap/joocode
 ```
 
-The release workflow can update `yan-ad/homebrew-tap` automatically when the
-repository has a `HOMEBREW_TAP_TOKEN` secret. The token must be allowed to
-write to the tap repository. Set the optional `HOMEBREW_TAP_REPOSITORY`
-repository variable to publish to a different tap.
+Maintainers can publish formula updates automatically to
+`yan-ad/homebrew-tap` with a `HOMEBREW_TAP_TOKEN` secret. Set the optional
+`HOMEBREW_TAP_REPOSITORY` repository variable to use a different tap.

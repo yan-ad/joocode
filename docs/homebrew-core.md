@@ -1,18 +1,16 @@
-# Homebrew Core Submission
+# Homebrew Packaging
 
-Once Joocode has a stable release history, submit it to
-[`Homebrew/homebrew-core`](https://github.com/Homebrew/homebrew-core) so users
-can install it with:
+Joocode is distributed through its official Homebrew tap. Users should install
+it with:
 
 ```bash
+brew tap yan-ad/tap
 brew install joocode
 ```
 
-Until Homebrew merges the formula, the supported commands are:
+Or use the fully qualified one-command form:
 
 ```bash
-brew install https://github.com/yan-ad/joc/releases/latest/download/joocode.rb
-# or
 brew install yan-ad/tap/joocode
 ```
 
@@ -36,13 +34,6 @@ brew install yan-ad/tap/joocode
    brew audit --strict --online ./joocode.rb
    ```
 
-5. Fork `Homebrew/homebrew-core`, add the formula as
-   `Formula/j/joocode.rb`, and open a pull request that follows its
-   [acceptable formulae policy](https://docs.brew.sh/Acceptable-Formulae).
-
-## Formula requirements
-
-Homebrew core review may request changes to the description, test block,
-download layout, or release history. Do not claim `brew install joocode` is
-available until that pull request is merged. After approval, the existing tap
-and direct-release formula may remain available as alternatives.
+5. Configure `HOMEBREW_TAP_TOKEN` in the Joocode repository with write access
+   to `yan-ad/homebrew-tap`. Each tagged release will then update
+   `Formula/joocode.rb` in the tap automatically.
