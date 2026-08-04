@@ -63,7 +63,39 @@ directory with:
 JOOCODE_VERSION=0.1.1 JOOCODE_INSTALL_DIR=/usr/local/bin sh install.sh
 ```
 
-Windows ZIP archives are attached to each GitHub release.
+### Install on Windows
+
+Windows is supported through the release ZIP and its published SHA-256
+checksum. In PowerShell,
+download and extract the latest `joocode-x86_64-pc-windows-msvc.zip` release
+asset, then add its extraction directory to your user `PATH`:
+
+```powershell
+$version = "0.1.8"
+$asset = "joocode-x86_64-pc-windows-msvc.zip"
+$url = "https://github.com/yan-ad/joc/releases/download/v$version/$asset"
+$destination = Join-Path $HOME ".local\bin\joocode"
+$extract = Join-Path $env:TEMP "joocode-$version"
+
+New-Item -ItemType Directory -Force -Path $destination | Out-Null
+Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\$asset"
+Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue
+Expand-Archive -Force "$env:TEMP\$asset" $extract
+Copy-Item (Get-ChildItem -Path $extract -Filter joocode.exe -Recurse | Select-Object -First 1).FullName $destination
+[Environment]::SetEnvironmentVariable("Path", "$destination;$([Environment]::GetEnvironmentVariable("Path", "User"))", "User")
+```
+
+Open a new PowerShell window, then verify the installation:
+
+```powershell
+joocode --version
+joocode doctor
+```
+
+Windows ARM64 users should download
+`joocode-aarch64-pc-windows-msvc.zip` from the same release and use that asset
+name in the command above. Windows self-upgrade and uninstall are not yet
+available; replace or remove the extracted `joocode.exe` manually.
 
 ### Uninstall
 
@@ -265,6 +297,14 @@ The release workflow builds Linux, macOS, and Windows archives, generates
 and publishes a GitHub release with generated release notes.
 
 ## Homebrew
+
+`brew install joocode` becomes available only after Homebrew accepts Joocode
+into the official [`homebrew/core`](https://github.com/Homebrew/homebrew-core)
+repository. That review is managed by Homebrew and cannot be enabled solely by
+this repository. The core-submission steps are documented in
+[`docs/homebrew-core.md`](docs/homebrew-core.md).
+
+Until that merge happens, use either supported install method below.
 
 Install directly from the latest GitHub release:
 
