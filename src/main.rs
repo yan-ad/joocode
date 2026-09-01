@@ -5,7 +5,7 @@ mod config;
 mod dashboard;
 mod desktop;
 mod error;
-mod jetbrains;
+mod local_config;
 mod protocol;
 mod provider;
 mod sources;
@@ -42,7 +42,10 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to discover model providers")?;
 
-    if registry.models().is_empty() && !matches!(cli.command, Some(Command::Doctor)) {
+    if registry.models().is_empty()
+        && cli.command.is_some()
+        && !matches!(cli.command, Some(Command::Doctor))
+    {
         anyhow::bail!("no compatible models found; run `joocode doctor` for source diagnostics");
     }
 
@@ -51,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
             cli.host,
             cli.port,
             registry,
+            selection,
             DesktopTargets::all_supported(),
             cli.base_url,
         )
@@ -62,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
             "127.0.0.1".parse()?,
             10100,
             registry,
+            selection,
             DesktopTargets::detect(),
             "http://127.0.0.1:10100/v1".to_owned(),
         )
@@ -103,25 +108,6 @@ async fn main() -> anyhow::Result<()> {
             println!("total:   {} models", installed.total_model_count);
             println!("Restart Codex to reload the model picker.");
             Ok(())
-        }
-        Command::Zed {
-            base_url,
-            host,
-            port,
-        } => {
-            let settings = zed::install(&registry, &base_url)?;
-            println!("Zed settings: {}", settings.display());
-            println!("Registered {} discovered models.", registry.models().len());
-            println!("Restart Zed once if it is already running.");
-            app::serve(host, port, registry).await
-        }
-        Command::Jetbrains {
-            base_url,
-            host,
-            port,
-        } => {
-            println!("{}", jetbrains::setup_instructions(&registry, &base_url));
-            app::serve(host, port, registry).await
         }
         Command::Upgrade { .. } => unreachable!("upgrade is handled before config discovery"),
     }

@@ -36,7 +36,7 @@ fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
         // Zed stores compatible-provider keys as Internet Password records using
         // the configured API URL as the server field. `security` is the macOS
         // supported command-line interface to that keychain record type.
-        let status = Command::new(security)
+        let output = Command::new(security)
             .args([
                 "add-internet-password",
                 "-a",
@@ -47,11 +47,12 @@ fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
                 LOCAL_API_KEY,
                 "-U",
             ])
-            .status()
+            .output()
             .context("failed to store Joocode's local Zed API key in the macOS keychain")?;
         anyhow::ensure!(
-            status.success(),
-            "failed to store Joocode's local Zed API key"
+            output.status.success(),
+            "failed to store Joocode's local Zed API key: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
         );
     }
 

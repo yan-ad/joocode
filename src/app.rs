@@ -24,13 +24,14 @@ use crate::{
     dashboard::{self, DashboardData},
     desktop::{self, DesktopTargets},
     error::ApiError,
-    protocol,
-    provider::{ModelInfo, Registry},
+    local_config, protocol,
+    provider::{ModelInfo, Registry, RegistryStore},
+    sources::SourceSelection,
 };
 
 #[derive(Clone)]
 struct AppState {
-    registry: Registry,
+    registry: RegistryStore,
 }
 
 /// Zed's OpenAI-compatible provider uses Chat Completions directly. Qualified
@@ -41,25 +42,24 @@ async fn chat_completions(
     headers: HeaderMap,
     Json(mut request): Json<Value>,
 ) -> Result<ResponseBody, ApiError> {
+    let registry = state.registry.snapshot();
     let requested_model = request
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("missing 'model'"))?
         .to_owned();
-    let (provider, upstream_model) = state
-        .registry
+    let (provider, upstream_model) = registry
         .resolve(&requested_model)
         .map_err(|e| ApiError::not_found(e.to_string()))?;
     request["model"] = Value::String(upstream_model);
     let (base_url, mut upstream_headers) = provider
-        .request_parts(state.registry.client())
+        .request_parts(registry.client())
         .await
         .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
     if let Some(value) = headers.get("x-joocode-api-key") {
         upstream_headers.insert("x-joocode-api-key", value.clone());
     }
-    let response = state
-        .registry
+    let response = registry
         .client()
         .post(format!(
             "{}/chat/completions",
@@ -89,6 +89,7 @@ async fn proxy_openai(
     mut headers: HeaderMap,
     request: Value,
 ) -> Result<ResponseBody, ApiError> {
+    let registry = state.registry.snapshot();
     let chatgpt_session = headers.contains_key("chatgpt-account-id");
     let url = if chatgpt_session {
         "https://chatgpt.com/backend-api/codex/responses"
@@ -98,8 +99,7 @@ async fn proxy_openai(
     for name in [header::HOST, header::CONTENT_LENGTH, header::CONTENT_TYPE] {
         headers.remove(name);
     }
-    let response = state
-        .registry
+    let response = registry
         .client()
         .post(url)
         .headers(headers)
@@ -122,7 +122,7 @@ async fn proxy_openai(
 }
 
 pub async fn serve(host: IpAddr, port: u16, registry: Registry) -> anyhow::Result<()> {
-    let (listener, app, address) = prepare_server(host, port, registry).await?;
+    let (listener, app, address) = prepare_server(host, port, RegistryStore::new(registry)).await?;
     info!(%address, "joocode listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -134,10 +134,12 @@ pub async fn serve_dashboard(
     host: IpAddr,
     port: u16,
     registry: Registry,
+    selection: SourceSelection,
     targets: DesktopTargets,
     base_url: String,
 ) -> anyhow::Result<()> {
-    let (listener, app, address) = prepare_server(host, port, registry.clone()).await?;
+    let registry_store = RegistryStore::new(registry.clone());
+    let (listener, app, address) = prepare_server(host, port, registry_store.clone()).await?;
     let dashboard_data = DashboardData::new(&registry, &targets, address);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
@@ -149,8 +151,10 @@ pub async fn serve_dashboard(
     });
 
     let setup_registry = registry;
-    let _setup_task = tokio::task::spawn_blocking(move || {
-        desktop::configure_detected(&setup_registry, &base_url, &targets);
+    let setup_targets = targets.clone();
+    let setup_base_url = base_url.clone();
+    std::thread::spawn(move || {
+        desktop::configure_detected(&setup_registry, &setup_base_url, &setup_targets);
     });
 
     if !dashboard::is_interactive() {
@@ -161,7 +165,44 @@ pub async fn serve_dashboard(
         return Ok(());
     }
 
-    let dashboard = tokio::task::spawn_blocking(move || dashboard::run(dashboard_data));
+    let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let reload_store = registry_store;
+    let reload_targets = targets.clone();
+    let reload_base_url = base_url.clone();
+    tokio::spawn(async move {
+        while let Some(dashboard::DashboardCommand::AddProvider { base_url, api_key }) =
+            command_rx.recv().await
+        {
+            let result = async {
+                let client = reload_store.snapshot().client().clone();
+                let provider = local_config::probe(&client, &base_url, &api_key).await?;
+                local_config::save(provider.clone())?;
+                let registry = Registry::discover(&selection).await?;
+                reload_store.replace(registry.clone());
+                let setup_registry = registry.clone();
+                let setup_targets = reload_targets.clone();
+                let setup_base_url = reload_base_url.clone();
+                std::thread::spawn(move || {
+                    desktop::configure_detected(&setup_registry, &setup_base_url, &setup_targets);
+                });
+                Ok::<_, anyhow::Error>((provider, registry))
+            }
+            .await;
+            let event = match result {
+                Ok((provider, registry)) => dashboard::DashboardEvent::ProviderAdded {
+                    provider: provider.name,
+                    models: provider.models,
+                    config_sources: dashboard::config_sources(&registry),
+                },
+                Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+            };
+            let _ = event_tx.send(event);
+        }
+    });
+
+    let dashboard =
+        tokio::task::spawn_blocking(move || dashboard::run(dashboard_data, command_tx, event_rx));
     let dashboard_result = dashboard.await?;
     let _ = shutdown_tx.send(());
     server.await??;
@@ -171,7 +212,7 @@ pub async fn serve_dashboard(
 async fn prepare_server(
     host: IpAddr,
     port: u16,
-    registry: Registry,
+    registry: RegistryStore,
 ) -> anyhow::Result<(tokio::net::TcpListener, Router, SocketAddr)> {
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -195,8 +236,9 @@ async fn healthz() -> impl IntoResponse {
 }
 
 async fn models(State(state): State<AppState>) -> impl IntoResponse {
+    let registry = state.registry.snapshot();
     Json(
-        json!({ "object": "list", "data": state.registry.models().iter().map(model_json).collect::<Vec<_>>() }),
+        json!({ "object": "list", "data": registry.models().iter().map(model_json).collect::<Vec<_>>() }),
     )
 }
 
@@ -219,13 +261,13 @@ async fn responses(
     if !requested_model.contains('/') {
         return proxy_openai(state, headers, request).await;
     }
-    let (provider, upstream_model) = state
-        .registry
+    let registry = state.registry.snapshot();
+    let (provider, upstream_model) = registry
         .resolve(&requested_model)
         .map_err(|e| ApiError::not_found(e.to_string()))?;
     let chat_request = protocol::to_chat_request(&request, &upstream_model)?;
     let (base_url, mut upstream_headers) = provider
-        .request_parts(state.registry.client())
+        .request_parts(registry.client())
         .await
         .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
     if let Some(value) = headers
@@ -235,8 +277,7 @@ async fn responses(
     {
         upstream_headers.insert("x-joocode-api-key", value.clone());
     }
-    let response = state
-        .registry
+    let response = registry
         .client()
         .post(format!(
             "{}/chat/completions",

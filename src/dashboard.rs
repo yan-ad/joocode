@@ -1,4 +1,9 @@
-use std::{io::IsTerminal, net::SocketAddr, time::Duration};
+use std::{
+    io::IsTerminal,
+    net::SocketAddr,
+    sync::mpsc::{Receiver, TryRecvError},
+    time::Duration,
+};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -6,8 +11,9 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{desktop::DesktopTargets, provider::Registry};
 
@@ -20,43 +26,157 @@ pub struct DashboardData {
 
 impl DashboardData {
     pub fn new(registry: &Registry, targets: &DesktopTargets, address: SocketAddr) -> Self {
-        let config_sources = registry
-            .source_reports()
-            .iter()
-            .filter(|report| report.status == "loaded")
-            .map(|report| display_source(&report.source))
-            .collect();
         Self {
-            config_sources,
+            config_sources: config_sources(registry),
             ide_targets: targets.names().into_iter().map(str::to_owned).collect(),
             listening: format!("http://{address}"),
         }
     }
 }
 
+#[derive(Debug)]
+pub enum DashboardCommand {
+    AddProvider { base_url: String, api_key: String },
+}
+
+#[derive(Debug)]
+pub enum DashboardEvent {
+    ProviderAdded {
+        provider: String,
+        models: Vec<String>,
+        config_sources: Vec<String>,
+    },
+    ProviderError(String),
+}
+
+#[derive(Default)]
+enum Screen {
+    #[default]
+    Dashboard,
+    BaseUrl(String),
+    ApiKey {
+        base_url: String,
+        api_key: String,
+    },
+    Loading,
+    Models {
+        provider: String,
+        models: Vec<String>,
+    },
+    Error(String),
+}
+
+pub fn config_sources(registry: &Registry) -> Vec<String> {
+    registry
+        .source_reports()
+        .iter()
+        .filter(|report| report.status == "loaded")
+        .map(|report| display_source(&report.source))
+        .collect()
+}
+
 pub fn is_interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-pub fn run(data: DashboardData) -> anyhow::Result<()> {
+pub fn run(
+    mut data: DashboardData,
+    command_tx: UnboundedSender<DashboardCommand>,
+    event_rx: Receiver<DashboardEvent>,
+) -> anyhow::Result<()> {
+    let mut screen = Screen::Dashboard;
     ratatui::run(|terminal| {
         loop {
-            terminal.draw(|frame| draw(frame, &data))?;
-            if event::poll(Duration::from_millis(250))?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-                && (key.code == KeyCode::Esc
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)))
-            {
-                return Ok::<(), std::io::Error>(());
+            receive_events(&mut data, &mut screen, &event_rx);
+            terminal.draw(|frame| draw(frame, &data, &screen))?;
+            if !event::poll(Duration::from_millis(100))? {
+                continue;
             }
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if key.code == KeyCode::Esc {
+                if matches!(screen, Screen::Dashboard) {
+                    return Ok::<(), std::io::Error>(());
+                }
+                screen = Screen::Dashboard;
+                continue;
+            }
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Ok(());
+            }
+            handle_key(&mut screen, key.code, &command_tx);
         }
     })?;
     Ok(())
 }
 
-fn draw(frame: &mut Frame<'_>, data: &DashboardData) {
+fn receive_events(
+    data: &mut DashboardData,
+    screen: &mut Screen,
+    event_rx: &Receiver<DashboardEvent>,
+) {
+    loop {
+        match event_rx.try_recv() {
+            Ok(DashboardEvent::ProviderAdded {
+                provider,
+                models,
+                config_sources,
+            }) => {
+                data.config_sources = config_sources;
+                *screen = Screen::Models { provider, models };
+            }
+            Ok(DashboardEvent::ProviderError(error)) => *screen = Screen::Error(error),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<DashboardCommand>) {
+    match screen {
+        Screen::Dashboard if key == KeyCode::Tab => *screen = Screen::BaseUrl(String::new()),
+        Screen::BaseUrl(base_url) => match key {
+            KeyCode::Enter if !base_url.trim().is_empty() => {
+                *screen = Screen::ApiKey {
+                    base_url: base_url.trim().to_owned(),
+                    api_key: String::new(),
+                };
+            }
+            KeyCode::Backspace => {
+                base_url.pop();
+            }
+            KeyCode::Char(character) => base_url.push(character),
+            _ => {}
+        },
+        Screen::ApiKey { base_url, api_key } => match key {
+            KeyCode::Enter => {
+                let command = DashboardCommand::AddProvider {
+                    base_url: base_url.clone(),
+                    api_key: api_key.clone(),
+                };
+                if command_tx.send(command).is_ok() {
+                    *screen = Screen::Loading;
+                } else {
+                    *screen = Screen::Error("provider reload channel is unavailable".into());
+                }
+            }
+            KeyCode::Backspace => {
+                api_key.pop();
+            }
+            KeyCode::Char(character) => api_key.push(character),
+            _ => {}
+        },
+        Screen::Models { .. } | Screen::Error(_) if key == KeyCode::Enter => {
+            *screen = Screen::Dashboard;
+        }
+        _ => {}
+    }
+}
+
+fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(7),
@@ -64,15 +184,83 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData) {
     ])
     .areas(frame.area());
 
-    let title = Paragraph::new(Line::from(vec![Span::styled(
-        "Joocode",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )]))
-    .block(Block::default().borders(Borders::BOTTOM));
-    frame.render_widget(title, header);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "Joocode",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .block(Block::default().borders(Borders::BOTTOM)),
+        header,
+    );
 
+    match screen {
+        Screen::Dashboard => draw_dashboard(frame, body, data),
+        Screen::BaseUrl(value) => draw_input(frame, body, "Step 1/3 — Base URL", value, false),
+        Screen::ApiKey { api_key, .. } => {
+            draw_input(frame, body, "Step 2/3 — API key", api_key, true)
+        }
+        Screen::Loading => frame.render_widget(
+            Paragraph::new("Step 3/3 — Loading /models…").wrap(Wrap { trim: true }),
+            body,
+        ),
+        Screen::Models { provider, models } => {
+            let items = models
+                .iter()
+                .map(|model| ListItem::new(format!("joocode/{provider}/{model}")))
+                .collect::<Vec<_>>();
+            frame.render_widget(
+                List::new(items).block(
+                    Block::default()
+                        .title(format!("Step 3/3 — {} models", models.len()))
+                        .borders(Borders::ALL),
+                ),
+                body,
+            );
+        }
+        Screen::Error(error) => frame.render_widget(
+            Paragraph::new(error.as_str())
+                .style(Style::default().fg(Color::Red))
+                .wrap(Wrap { trim: true }),
+            body,
+        ),
+    }
+
+    let help = match screen {
+        Screen::Dashboard => vec![
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" to exit  ·  "),
+            Span::styled(
+                "Tab",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" to add new key"),
+        ],
+        Screen::BaseUrl(_) | Screen::ApiKey { .. } => vec![
+            Span::styled("Enter", Style::default().fg(Color::Green)),
+            Span::raw(" to continue  ·  Esc to cancel"),
+        ],
+        Screen::Loading => vec![Span::raw("Fetching models…  ·  Esc to cancel")],
+        Screen::Models { .. } | Screen::Error(_) => vec![
+            Span::styled("Enter", Style::default().fg(Color::Green)),
+            Span::raw(" to return  ·  Esc to cancel"),
+        ],
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(help)).block(Block::default().borders(Borders::TOP)),
+        footer,
+    );
+}
+
+fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &DashboardData) {
     let sources = if data.config_sources.is_empty() {
         "None".to_owned()
     } else {
@@ -100,21 +288,33 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData) {
             Span::raw(&data.listening),
         ]),
     ];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), body);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
+}
 
+fn draw_input(
+    frame: &mut Frame<'_>,
+    area: ratatui::layout::Rect,
+    title: &str,
+    value: &str,
+    secret: bool,
+) {
+    let rendered = if secret {
+        "•".repeat(value.chars().count())
+    } else {
+        value.to_owned()
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "Esc",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" to exit"),
-        ]))
-        .block(Block::default().borders(Borders::TOP)),
-        footer,
+        Paragraph::new(rendered)
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        area,
     );
+    let x = area
+        .x
+        .saturating_add(1)
+        .saturating_add(value.chars().count() as u16);
+    let y = area.y.saturating_add(1);
+    frame.set_cursor_position((x.min(area.right().saturating_sub(1)), y));
 }
 
 fn display_source(source: &str) -> String {
@@ -123,6 +323,7 @@ fn display_source(source: &str) -> String {
         "ocx" => "OpenCodex".into(),
         "hermes" => "Hermes".into(),
         "copilot" => "GitHub Copilot".into(),
+        "joocode" => "Joocode".into(),
         other => other.to_owned(),
     }
 }
@@ -137,5 +338,14 @@ mod tests {
         assert_eq!(display_source("ocx"), "OpenCodex");
         assert_eq!(display_source("hermes"), "Hermes");
         assert_eq!(display_source("copilot"), "GitHub Copilot");
+        assert_eq!(display_source("joocode"), "Joocode");
+    }
+
+    #[test]
+    fn tab_opens_provider_wizard() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = Screen::Dashboard;
+        handle_key(&mut screen, KeyCode::Tab, &tx);
+        assert!(matches!(screen, Screen::BaseUrl(_)));
     }
 }

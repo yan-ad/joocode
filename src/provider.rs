@@ -23,6 +23,27 @@ pub struct ModelInfo {
     pub max_output_tokens: Option<u64>,
 }
 
+#[derive(Clone)]
+pub struct RegistryStore {
+    inner: Arc<std::sync::RwLock<Registry>>,
+}
+
+impl RegistryStore {
+    pub fn new(registry: Registry) -> Self {
+        Self {
+            inner: Arc::new(std::sync::RwLock::new(registry)),
+        }
+    }
+
+    pub fn snapshot(&self) -> Registry {
+        self.inner.read().expect("registry lock poisoned").clone()
+    }
+
+    pub fn replace(&self, registry: Registry) {
+        *self.inner.write().expect("registry lock poisoned") = registry;
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Credential {
     None,

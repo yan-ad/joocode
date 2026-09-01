@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::{
     config::{self, AuthEntry, ConfigPaths, ModelConfig},
+    local_config,
     provider::{CopilotCredential, Credential, ModelInfo, Provider},
 };
 
@@ -26,6 +27,7 @@ pub enum SourceKind {
     Ocx,
     Hermes,
     Copilot,
+    Joocode,
 }
 
 fn source_error(source: &str, error: anyhow::Error) -> anyhow::Error {
@@ -52,8 +54,10 @@ impl SourceSelection {
                 SourceKind::Ocx,
                 SourceKind::Hermes,
                 SourceKind::Copilot,
+                SourceKind::Joocode,
             ]);
         }
+        enabled.insert(SourceKind::Joocode);
         if enabled.is_empty() {
             bail!("select at least one provider source");
         }
@@ -110,7 +114,43 @@ pub async fn discover(
                 .map_err(|error| source_error("copilot", error)),
         );
     }
+    if selection.enabled(SourceKind::Joocode) {
+        catalogs.push(discover_joocode().map_err(|error| source_error("joocode", error)));
+    }
     catalogs
+}
+
+fn discover_joocode() -> anyhow::Result<DiscoveredCatalog> {
+    let configured = local_config::load()?;
+    let providers = configured
+        .into_iter()
+        .map(|configured| {
+            let public_provider = format!("joocode/{}", configured.name);
+            let models = configured
+                .models
+                .iter()
+                .map(|model| simple_model(&public_provider, model, model, None, None))
+                .collect();
+            DiscoveredProvider {
+                key: format!("joocode:{}", configured.name),
+                provider: Provider {
+                    base_url: configured.base_url,
+                    credential: if configured.api_key.is_empty() {
+                        Credential::None
+                    } else {
+                        Credential::Bearer(configured.api_key)
+                    },
+                    headers: HeaderMap::new(),
+                },
+                models,
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(DiscoveredCatalog {
+        source: "joocode".into(),
+        detail: Some(local_config::path()?.display().to_string()),
+        providers,
+    })
 }
 
 fn empty_catalog(source: &str, detail: impl Into<String>) -> DiscoveredCatalog {
@@ -821,6 +861,7 @@ providers:
         assert!(selection.enabled(SourceKind::Ocx));
         assert!(selection.enabled(SourceKind::Hermes));
         assert!(selection.enabled(SourceKind::Copilot));
+        assert!(selection.enabled(SourceKind::Joocode));
     }
 
     #[test]

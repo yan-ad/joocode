@@ -160,7 +160,6 @@ cargo build --release
 ./target/release/joocode doctor
 ./target/release/joocode models
 ./target/release/joocode codex-install
-./target/release/joocode zed
 ./target/release/joocode serve
 ./target/release/joocode --all
 ```
@@ -217,7 +216,7 @@ Config: OpenCode, OpenCodex, Hermes
 IDE Target: Codex, Zed, JetBrains
 Listening: http://127.0.0.1:10100
 
-Esc to exit
+Esc to exit  ·  Tab to add new key
 ```
 
 The displayed sources and IDE targets reflect what was actually discovered.
@@ -228,36 +227,45 @@ To configure every integration even when Joocode cannot detect its application,
 use `joocode --all`. Use `--host`, `--port`, and `--base-url` with `--all` to
 select a different local endpoint.
 
-## Zed integration
+### Add an OpenAI-compatible provider
 
-Configure Zed and start the local proxy in one command:
+Press `Tab` in the dashboard. Joocode walks through three steps:
 
-```bash
-joocode zed
+1. Enter the OpenAI-compatible base URL, including `/v1` when required.
+2. Enter the API key. The key is masked in the terminal.
+3. Joocode requests `GET /models` and displays the discovered model list.
+
+Providers are stored in `~/.config/joocode/providers.json` with private file
+permissions. They are loaded as the built-in **Joocode** source, using model IDs
+such as `joocode/openrouter/model-name`. The running proxy and every detected
+desktop catalog are reloaded automatically after a provider is added.
+
+The flat file can also be edited directly:
+
+```json
+[
+  {
+    "name": "openrouter",
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key": "...",
+    "models": ["anthropic/claude-sonnet-4"]
+  }
+]
 ```
 
-This automatically adds a `joocode` OpenAI-compatible provider to Zed’s
-settings and exposes every discovered model with its routable ID. It preserves
-all other Zed settings and never copies upstream credentials into Zed; the local
-bridge continues reading them from their source. On macOS, you may be asked for
-your password to authorize Keychain access for the local Zed tunnel. Joocode
-stores only a harmless local placeholder key there so Zed shows the provider;
-it does not store or expose upstream credentials. Restart Zed once if it
-was already open.
-Use `ZED_SETTINGS_PATH=/path/to/settings.json joocode zed` for a nonstandard
-settings location.
+Set `JOOCODE_PROVIDERS=/custom/providers.json` to override the file location.
 
-## JetBrains AI Assistant integration
+## Built-in desktop integrations
 
-Start the OpenAI-compatible proxy for JetBrains:
+Zed and JetBrains are no longer separate subcommands. Running `joocode`
+auto-detects installed desktop clients and only prepares integrations that are
+present. Zed receives the complete discovered catalog automatically. On macOS,
+you may be asked for your password to authorize Keychain access for the local
+Zed tunnel; Joocode stores only a harmless local placeholder key there, never an
+upstream provider credential.
 
-```bash
-joocode jetbrains
-```
-
-The command prints the exact provider values and keeps the proxy running. In
-your JetBrains IDE, open **Settings | Tools | AI Assistant | Providers & API
-keys**, add an **OpenAI-compatible** provider, and use:
+For JetBrains AI Assistant, use the built-in local endpoint when the IDE asks
+for an OpenAI-compatible provider:
 
 - **Base URL:** `http://127.0.0.1:10100/v1`
 - **API key:** any non-empty local value, such as `joocode`
@@ -308,8 +316,6 @@ joocode doctor
 joocode --all [--base-url URL] [--host HOST] [--port PORT]
 joocode models
 joocode codex-install [--base-url URL]
-joocode zed [--base-url URL] [--host HOST] [--port PORT]
-joocode jetbrains [--base-url URL] [--host HOST] [--port PORT]
 joocode serve [--host HOST] [--port PORT]
 joocode upgrade [--version VERSION]
 ```
