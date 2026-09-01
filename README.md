@@ -1,246 +1,205 @@
-# Joocode — JustOpenCode
+<h1 align="center">Joocode</h1>
+<h3 align="center">your AI configs, everywhere.</h3>
 
-A small native Rust bridge that makes models from your existing AI tools
-available to **ChatGPT Codex**, **Zed**, and **JetBrains AI Assistant**. It can
-discover providers from OpenCode, OCX profiles, Hermes Agent, and GitHub
-Copilot, then expose them without duplicating upstream credentials.
+<p align="center"><b>The OCX idea, supercharged as one fast native Rust binary.</b><br>
+Reuse OpenCode, OCX, Hermes, Copilot, and OpenAI-compatible providers inside Codex, Zed, and JetBrains.</p>
 
-## Current scope
-
-- Automatically discovers OpenCode, OCX, Hermes Agent, and GitHub Copilot.
-- Makes compatible providers available to ChatGPT Codex, Zed, and JetBrains AI Assistant.
-- Supports providers configured with `@ai-sdk/openai-compatible`, `@ai-sdk/openai`, or no explicit `npm` adapter.
-- Routes models with source-aware identifiers such as `provider/model`,
-  `hermes/provider/model`, `ocx-profile/provider/model`, and `copilot/model`.
-- Exposes `GET /v1/models` and `POST /v1/responses`.
-- Translates text, image URLs, instructions, function tools, function calls, and function results.
-- Supports regular JSON responses and SSE streaming, including streamed tool arguments.
-- Never prints credential values.
-
-OpenCode, OCX, and Hermes entries currently need an OpenAI Chat
-Completions-compatible upstream. GitHub Copilot uses its official token exchange
-and live model catalog; Joocode keeps exchanged tokens in memory only.
-
-## Roadmap
-
-Joocode currently integrates with **ChatGPT Codex**, **Zed**, and **JetBrains
-AI Assistant**. Support for additional AI clients is planned, using the same
-existing provider configuration and source-qualified model identifiers.
-
-## Provider source discovery
-
-All available sources are enabled by default. Select sources explicitly by
-repeating or comma-separating `--source`:
+<p align="center">
+  <a href="https://github.com/yan-ad/joocode/releases/latest"><img src="https://img.shields.io/github/v/release/yan-ad/joocode?color=6f42c1&label=release" alt="Latest release"></a>
+  <a href="https://github.com/yan-ad/joocode/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/yan-ad/joocode/ci.yml?branch=main&label=build" alt="Build status"></a>
+  <a href="https://github.com/yan-ad/joocode/blob/main/LICENSE"><img src="https://img.shields.io/github/license/yan-ad/joocode?color=blue" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/Rust-native-dea584?logo=rust" alt="Native Rust">
+  <img src="https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-2ea44f" alt="Supported platforms">
+</p>
 
 ```bash
-joocode --source opencode,hermes models
-joocode --source copilot doctor
-joocode --source ocx zed
+brew tap yan-ad/tap
+brew install joocode
+joocode
 ```
-
-Supported source values are `auto`, `opencode`, `ocx`, `hermes`, and `copilot`.
-
-### OpenCode
-
-By default:
 
 ```text
-$XDG_CONFIG_HOME/opencode/opencode.jsonc
-$XDG_DATA_HOME/opencode/auth.json
+◈ Joocode
+
+◆ Config: OpenCode, Joocode
+⌘ IDE Target: Codex, Zed, JetBrains
+● Listening: http://127.0.0.1:10100
+
+◉ Models: 30    ◇ Providers: 5
+
+Esc to exit  ·  Tab to add new key
 ```
 
-When the XDG variables are unset:
+Joocode takes the universal local-proxy idea behind projects such as OCX and
+pushes it in a different direction: **reuse the provider configurations you
+already have, wire installed desktop clients automatically, and keep the whole
+runtime small enough to disappear into the background.**
 
-```text
-~/.config/opencode/opencode.jsonc
-~/.local/share/opencode/auth.json
+No second provider dashboard is required. No upstream key needs to be copied
+into Codex, Zed, or JetBrains. Start Joocode and keep using the native client UI.
+
+## Why Joocode?
+
+- **Config-first** — discovers OpenCode, OCX profiles, Hermes Agent, GitHub
+  Copilot, and Joocode's own flat OpenAI-compatible provider file.
+- **Desktop-aware** — detects installed Codex, Zed, and JetBrains clients and
+  prepares only the integrations present on the machine.
+- **One native process** — a single Rust binary, one shared proxy, no Node/Bun
+  runtime and no browser dashboard required.
+- **Live catalog reload** — press `Tab`, enter a base URL and API key, fetch
+  `/models`, and use the new models without restarting Joocode.
+- **Protocol bridge** — Responses API and Chat Completions, JSON and SSE,
+  images, tool calls, streamed arguments, and function results.
+- **Credential-safe** — upstream credentials stay in their original source;
+  Joocode never prints authorization values.
+
+## Performance
+
+Joocode is intentionally narrower than OpenCodex/OCX: it focuses on provider
+discovery, desktop integration, and protocol proxying rather than OCX's full web
+dashboard, account pooling, and service-management feature set. The comparison
+below measures the **CLI-only runtime footprint**, not feature parity.
+
+| Metric | Joocode `0.1.9` | OpenCodex / `ocx` `2.39.0` | Difference |
+| --- | ---: | ---: | ---: |
+| Startup time | **5.8 ms** | 289.1 ms | **~49.8× faster** |
+| Memory usage, idle | **5.8 MB** | 15.3 MB | **~62% less memory** |
+| Installed bundle footprint | **8.2 MiB** | 110 MiB | **~13.4× smaller** |
+
+**Test environment:** MacBook Pro with Apple M1, arm64, macOS 27 Golden Gate,
+measured September 1, 2026. Startup is the median of 100 warm process launches
+using `<command> --version`,
+with output redirected; this isolates CLI/runtime startup from provider network
+latency. Memory is idle RSS in CLI-only proxy mode. Bundle footprint compares
+the optimized standalone Joocode binary with the locally installed OCX npm
+package and its runtime dependencies. Results vary by version, build flags, and
+host environment.
+
+## Quick start
+
+### macOS with Homebrew
+
+```bash
+brew tap yan-ad/tap
+brew install joocode
+joocode
 ```
 
-Override either path with `--config`, `--auth`, `JOOCODE_CONFIG`, or
-`JOOCODE_AUTH`. The prior `JOC_CONFIG` and `JOC_AUTH` names remain supported
-for upgrades.
+Or install directly from the tap in one command:
 
-### OCX profiles
-
-Joocode scans every global OCX profile with an OpenCode config at:
-
-```text
-$XDG_CONFIG_HOME/opencode/profiles/*/opencode.jsonc
+```bash
+brew install yan-ad/tap/joocode
 ```
 
-Models are exposed as `ocx-PROFILE/provider/model` and use the normal OpenCode
-auth store. This avoids collisions between profiles that define the same
-provider name.
-
-### Hermes Agent
-
-Joocode reads `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) and
-`~/.hermes/.env`. Modern `providers:` and legacy `custom_providers:` entries
-are supported when they declare an OpenAI Chat-compatible endpoint and model
-list. Models are exposed as `hermes/provider/model`. Inline `api_key`,
-`${ENV_VAR}`, and `key_env` credentials are supported; dynamic `key_cmd` and
-provider-native Anthropic transports are not yet proxied.
-
-### GitHub Copilot
-
-Joocode checks environment variables (`COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
-`GITHUB_TOKEN`), the Copilot macOS Keychain entries, Copilot's documented
-plaintext fallback, then `gh auth token`. On Linux and Windows, use a supported
-token environment variable when Copilot stores its login only in the OS
-credential manager. Run `copilot login` if `joocode doctor` reports a Copilot
-auth error. Classic `ghp_` PATs are ignored because Copilot does not support them.
-Available account models are fetched from Copilot's live catalog and exposed as
-`copilot/model`.
-
-## Build and run
-
-### Install a release
-
-On macOS, Linux, WSL, or Git Bash:
+### macOS, Linux, WSL, or Git Bash
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://raw.githubusercontent.com/yan-ad/joocode/main/install.bash | bash
+joocode
 ```
 
-The installer detects the host target, verifies the release checksum, and
-installs `joocode` to `~/.local/bin` by default. Install a specific version or
-directory with:
+The installer detects the platform, verifies `SHA256SUMS`, and installs to
+`~/.local/bin`. Install a specific version or directory with:
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/yan-ad/joocode/main/install.bash -o install.bash
-JOOCODE_VERSION=0.1.6 JOOCODE_INSTALL_DIR=/usr/local/bin bash install.bash
+JOOCODE_VERSION=0.1.9 JOOCODE_INSTALL_DIR=/usr/local/bin bash install.bash
 ```
 
-`install.sh` remains available as a backward-compatible alias for
-`install.bash`.
-
-### Install on Windows
-
-In PowerShell, run:
+### Windows PowerShell
 
 ```powershell
 irm https://raw.githubusercontent.com/yan-ad/joocode/main/install.ps1 | iex
 ```
 
-It selects the x64 or ARM64 release automatically, verifies its SHA-256
-checksum, installs `joocode.exe` to `~/.local/bin`, and adds that directory to
-your user `PATH`. Open a new PowerShell window, then verify the installation:
+Open a new PowerShell window, then run:
 
 ```powershell
 joocode --version
 joocode doctor
-joocode --source opencode,hermes,copilot models
+joocode
 ```
 
-To install a specific version, download the script first and run
-`./install.ps1 -Version 0.1.6`. Windows self-upgrade and uninstall are not yet
-available; replace or remove the installed `joocode.exe` manually.
-
-### Uninstall
-
-For standalone installations made with `install.sh`, download and run the
-uninstaller:
-
-```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://raw.githubusercontent.com/yan-ad/joocode/main/uninstall.sh | sh
-```
-
-It removes only the `joocode` binary from `~/.local/bin` by default and keeps
-your OpenCode credentials plus Codex and Zed settings. Use
-`JOOCODE_INSTALL_DIR=/custom/bin sh uninstall.sh --yes` for a custom install
-directory or non-interactive use. If installed with Homebrew, use
-`brew uninstall joocode` instead.
+The installer selects x64 or ARM64, verifies the SHA-256 checksum, installs
+`joocode.exe` to `~/.local/bin`, and adds that directory to the user `PATH`.
+Install a specific version with `./install.ps1 -Version 0.1.9`.
 
 ### Build from source
 
 ```bash
-cargo build --release
-./target/release/joocode doctor
-./target/release/joocode models
-./target/release/joocode codex-install
-./target/release/joocode serve
-./target/release/joocode --all
+git clone https://github.com/yan-ad/joocode.git
+cd joocode
+cargo build --release --locked
+./target/release/joocode
 ```
 
-The server listens on `127.0.0.1:10100` by default. Change it with `serve --host 0.0.0.0 --port 10100`. Binding beyond loopback can expose access to every configured provider, so only do this behind trusted network controls.
+## How it works
 
-## Codex configuration
-
-Add every discovered model to the Codex model picker:
-
-```bash
-./target/release/joocode codex-install
+```text
+OpenCode ───────┐
+OCX profiles ───┤
+Hermes ─────────┤                    ┌─ Codex Responses API
+GitHub Copilot ─┼─► Joocode proxy ───┼─ Zed Chat Completions
+providers.json ─┘                    └─ JetBrains OpenAI-compatible
 ```
 
-This preserves the existing Codex login and default model, merges Codex's
-built-in OpenAI models with Joocode's discovered entries, registers the
-local aggregate Responses provider, and writes
-`~/.codex/joocode-models.json`. Native OpenAI requests pass through with the
-authorization already managed by Codex; routed models use credentials from
-their original source. Restart the Codex CLI or desktop app after synchronization.
+Joocode builds one source-aware model registry, exposes it through
+`GET /v1/models`, and routes each request back to the provider that owns the
+selected model. Model IDs remain explicit:
 
-For manual setup, configure a custom model provider in `~/.codex/config.toml`:
-
-```toml
-model_provider = "joocode"
-
-[model_providers.joocode]
-name = "JustOpenCode"
-base_url = "http://127.0.0.1:10100/v1"
-wire_api = "responses"
-requires_openai_auth = true
+```text
+provider/model
+ocx-profile/provider/model
+hermes/provider/model
+copilot/model
+joocode/provider/model
 ```
-
-Keep using your existing Codex/OpenAI login. JustOpenCode does not replace or
-store it; Codex supplies it only when native OpenAI models are selected.
 
 ## Run Joocode
 
-Start Joocode with no subcommand:
+Start the automatic desktop mode:
 
 ```bash
 joocode
 ```
 
-Joocode automatically detects supported desktop clients installed on the
-machine. It configures Codex and Zed only when they are present, detects
-JetBrains IDEs, starts one shared proxy at `http://127.0.0.1:10100/v1`, and
-opens a terminal dashboard:
+Joocode detects installed clients, starts one proxy at
+`http://127.0.0.1:10100/v1`, and opens the terminal dashboard. Press `Esc` or
+`Ctrl-C` to stop gracefully. In a non-interactive terminal it falls back to
+headless logs.
 
-```text
-Joocode
+Force every integration even when its application is not detected:
 
-Config: OpenCode, OpenCodex, Hermes
-IDE Target: Codex, Zed, JetBrains
-Listening: http://127.0.0.1:10100
-
-Esc to exit  ·  Tab to add new key
+```bash
+joocode --all
 ```
 
-The displayed sources and IDE targets reflect what was actually discovered.
-Press `Esc` or `Ctrl-C` to stop the proxy gracefully. When Joocode runs without
-an interactive terminal, it automatically falls back to normal headless logs.
+Choose a different listener:
 
-To configure every integration even when Joocode cannot detect its application,
-use `joocode --all`. Use `--host`, `--port`, and `--base-url` with `--all` to
-select a different local endpoint.
+```bash
+joocode --host 127.0.0.1 --port 10200 \
+  --base-url http://127.0.0.1:10200/v1
+```
 
-### Add an OpenAI-compatible provider
+Binding beyond loopback can expose access to every configured provider. Only do
+so behind trusted network controls.
 
-Press `Tab` in the dashboard. Joocode walks through three steps:
+## Add any OpenAI-compatible provider
+
+Press `Tab` in the dashboard:
 
 1. Enter the OpenAI-compatible base URL, including `/v1` when required.
-2. Enter the API key. The key is masked in the terminal.
-3. Joocode requests `GET /models` and displays the discovered model list.
+2. Enter the API key. It remains masked in the terminal.
+3. Joocode requests `GET /models` and previews the discovered catalog.
 
-Providers are stored in `~/.config/joocode/providers.json` with private file
-permissions. They are loaded as the built-in **Joocode** source, using model IDs
-such as `joocode/openrouter/model-name`. The running proxy and every detected
-desktop catalog are reloaded automatically after a provider is added.
+The provider is saved with private file permissions to:
 
-The flat file can also be edited directly:
+```text
+~/.config/joocode/providers.json
+```
+
+The flat JSON format is deliberately simple:
 
 ```json
 [
@@ -253,34 +212,126 @@ The flat file can also be edited directly:
 ]
 ```
 
-Set `JOOCODE_PROVIDERS=/custom/providers.json` to override the file location.
+The running registry and detected desktop catalogs reload automatically. Override
+the path with `JOOCODE_PROVIDERS=/custom/providers.json`.
 
-## Built-in desktop integrations
+## Provider discovery
 
-Zed and JetBrains are no longer separate subcommands. Running `joocode`
-auto-detects installed desktop clients and only prepares integrations that are
-present. Zed receives the complete discovered catalog automatically. On macOS,
-you may be asked for your password to authorize Keychain access for the local
-Zed tunnel; Joocode stores only a harmless local placeholder key there, never an
-upstream provider credential.
+All available sources are enabled by default. Restrict discovery with repeated
+or comma-separated `--source` values:
 
-For JetBrains AI Assistant, use the built-in local endpoint when the IDE asks
-for an OpenAI-compatible provider:
+```bash
+joocode --source opencode,hermes models
+joocode --source copilot doctor
+joocode --source ocx serve
+```
+
+Supported values are `auto`, `opencode`, `ocx`, `hermes`, and `copilot`.
+Joocode's local `providers.json` source remains available for live additions.
+
+### OpenCode
+
+Joocode reads:
+
+```text
+$XDG_CONFIG_HOME/opencode/opencode.jsonc
+$XDG_DATA_HOME/opencode/auth.json
+```
+
+With the usual fallbacks:
+
+```text
+~/.config/opencode/opencode.jsonc
+~/.local/share/opencode/auth.json
+```
+
+Override them with `--config`, `--auth`, `JOOCODE_CONFIG`, or `JOOCODE_AUTH`.
+Legacy `JOC_*` and `CRABCODEX_*` variables remain supported for migration.
+
+Compatible OpenCode entries currently use `@ai-sdk/openai-compatible`,
+`@ai-sdk/openai`, or no explicit `npm` adapter.
+
+### OCX profiles
+
+Every global OpenCode profile under the following path is discovered:
+
+```text
+$XDG_CONFIG_HOME/opencode/profiles/*/opencode.jsonc
+```
+
+Models are exposed as `ocx-PROFILE/provider/model` and reuse the normal OpenCode
+auth store, preventing collisions between profiles.
+
+### Hermes Agent
+
+Joocode reads `~/.hermes/config.yaml` or `$HERMES_HOME/config.yaml`, plus
+`~/.hermes/.env`. Modern `providers:` and legacy `custom_providers:` entries are
+supported for OpenAI Chat-compatible endpoints. Models become
+`hermes/provider/model`.
+
+Inline `api_key`, `${ENV_VAR}`, and `key_env` credentials are supported.
+Dynamic `key_cmd` and provider-native Anthropic transports are not yet proxied.
+
+### GitHub Copilot
+
+Joocode checks `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, supported
+Copilot macOS Keychain entries, Copilot's plaintext fallback, and finally
+`gh auth token`. Run `copilot login` when `joocode doctor` reports an auth error.
+Classic `ghp_` PATs are ignored because Copilot does not support them.
+
+The account's live model catalog is exposed as `copilot/model`; exchanged tokens
+remain in memory only.
+
+## Desktop integrations
+
+### Codex
+
+Synchronize manually when needed:
+
+```bash
+joocode codex-install
+```
+
+Joocode preserves the existing Codex login and default model, merges native
+OpenAI models with discovered entries, registers the local Responses provider,
+and writes `~/.codex/joocode-models.json`. Native OpenAI requests keep using the
+authorization managed by Codex.
+
+Manual provider configuration:
+
+```toml
+model_provider = "joocode"
+
+[model_providers.joocode]
+name = "Joocode"
+base_url = "http://127.0.0.1:10100/v1"
+wire_api = "responses"
+requires_openai_auth = true
+```
+
+### Zed
+
+When Zed is installed, automatic desktop mode writes the complete discovered
+catalog into Zed's OpenAI-compatible provider settings. On macOS, the system may
+ask for your password to authorize Keychain access for the local tunnel.
+Joocode stores only a harmless local placeholder key—never an upstream provider
+credential.
+
+### JetBrains AI Assistant
+
+Use the built-in endpoint when JetBrains asks for an OpenAI-compatible provider:
 
 - **Base URL:** `http://127.0.0.1:10100/v1`
 - **API key:** any non-empty local value, such as `joocode`
-- **Model:** a discovered `provider/model` ID from `joocode models`
+- **Model:** any discovered ID from `joocode models`
 
-JetBrains stores provider keys in its managed credential store, so Joocode
-does not write IDE settings or copy upstream credentials into it. The proxy
-continues to read credentials from the selected source. Select the configured model
-under **Models Assignment** to use it in AI Assistant features.
+JetBrains keeps the local placeholder in its managed credential store; upstream
+credentials remain in their original source.
 
-## HTTP examples
-
-List models:
+## HTTP API
 
 ```bash
+curl http://127.0.0.1:10100/healthz
 curl http://127.0.0.1:10100/v1/models
 ```
 
@@ -290,81 +341,82 @@ Create a response:
 curl http://127.0.0.1:10100/v1/responses \
   -H 'content-type: application/json' \
   -d '{
-    "model": "your-provider/your-model",
+    "model": "provider/model",
     "input": "Reply with hello",
     "stream": false
   }'
 ```
 
-Stream a response:
-
-```bash
-curl -N http://127.0.0.1:10100/v1/responses \
-  -H 'content-type: application/json' \
-  -d '{
-    "model": "your-provider/your-model",
-    "input": "Reply with hello",
-    "stream": true
-  }'
-```
+Use `POST /v1/chat/completions` for OpenAI-compatible clients. Both endpoints
+support SSE streaming and tool calls.
 
 ## CLI
 
 ```text
-joocode
+joocode [--source SOURCE] [--host HOST] [--port PORT]
+joocode --all
 joocode doctor
-joocode --all [--base-url URL] [--host HOST] [--port PORT]
 joocode models
 joocode codex-install [--base-url URL]
 joocode serve [--host HOST] [--port PORT]
 joocode upgrade [--version VERSION]
 ```
 
-Set `RUST_LOG=joocode=debug,tower_http=debug` for request diagnostics. Secrets and request authorization headers are not logged by the application.
+Set `RUST_LOG=joocode=debug,tower_http=debug` for diagnostics. Joocode does not
+log secrets or request authorization headers.
 
 ### Upgrade
 
-Upgrade an installed Linux or macOS binary to the latest checksummed GitHub
-release:
-
 ```bash
 joocode upgrade
-```
-
-Install a specific release when needed:
-
-```bash
 joocode upgrade --version 0.2.0
 ```
 
-The command downloads the matching platform archive and `SHA256SUMS`, verifies
-the archive, and atomically replaces the running executable. The executable's
-install directory must be writable. Windows users should download the release
-ZIP because in-place self-upgrade is not currently supported there.
+Linux and macOS upgrades download the matching archive and `SHA256SUMS`, verify
+the checksum, and atomically replace the executable. Windows currently uses the
+release ZIP or PowerShell installer for upgrades.
+
+### Uninstall
+
+Homebrew:
+
+```bash
+brew uninstall joocode
+```
+
+Standalone installation:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/yan-ad/joocode/main/uninstall.sh | sh
+```
+
+The uninstaller removes the binary and preserves provider credentials plus
+Codex/Zed settings by default.
 
 ## Architecture
 
-- `config`: OpenCode JSONC/auth parsing.
-- `sources`: OpenCode, OCX, Hermes, and Copilot discovery adapters.
-- `provider`: merged provider registry, route lookup, headers, and credentials.
-- `protocol`: Responses ↔ Chat Completions conversion and streaming state.
-- `app`: Axum HTTP routes and upstream transport.
+- `sources` — OpenCode, OCX, Hermes, Copilot, and flat-file discovery.
+- `provider` — merged registry, source-aware routes, headers, and credentials.
+- `protocol` — Responses ↔ Chat Completions conversion and streaming state.
+- `desktop` — installed-client detection and catalog synchronization.
+- `dashboard` — Ratatui status UI and live provider wizard.
+- `app` — Axum routes, upstream transport, and hot-reloadable registry.
 
-This separation keeps the core small while allowing native provider adapters to be introduced later.
+This separation keeps the proxy core small while allowing additional config
+sources and desktop targets to be added independently.
 
 ## Releasing
 
-Create and publish the next patch release from a clean, up-to-date `main`:
+From a clean and synchronized `main`:
 
 ```bash
 make release
 ```
 
-`make release` updates `Cargo.toml` and `Cargo.lock`, runs the locked format,
-Clippy, test, and release-build checks, creates a `chore: release vX.Y.Z`
-commit, creates an annotated matching tag, and pushes both `main` and the tag.
-
-Choose a version increment or preview the operation without writing changes:
+The target bumps the patch version by default, updates Cargo metadata, runs
+locked format/Clippy/tests/build checks, commits, creates an annotated tag, and
+pushes both `main` and the tag.
 
 ```bash
 make release BUMP=minor
@@ -373,26 +425,9 @@ make release VERSION=1.2.3
 make release DRY_RUN=1
 ```
 
-The release workflow builds Linux, macOS, and Windows archives, generates
-`SHA256SUMS`, publishes a checksum-pinned `joocode.rb` Homebrew formula,
-and publishes a GitHub release with generated release notes.
+Release CI builds Linux, macOS, and Windows archives, publishes checksums and a
+Homebrew formula, and updates `yan-ad/homebrew-tap` when its token is configured.
 
-## Homebrew
+## License
 
-Install from the Joocode Homebrew tap:
-
-```bash
-brew tap yan-ad/tap
-brew install joocode
-```
-
-The tap adds Joocode's formula to your local Homebrew installation, so the
-second command can use the short `joocode` name. To install in one command:
-
-```bash
-brew install yan-ad/tap/joocode
-```
-
-Maintainers can publish formula updates automatically to
-`yan-ad/homebrew-tap` with a `HOMEBREW_TAP_TOKEN` secret. Set the optional
-`HOMEBREW_TAP_REPOSITORY` repository variable to use a different tap.
+[MIT](LICENSE)
