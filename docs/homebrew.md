@@ -6,13 +6,13 @@ attaches it to every GitHub release.
 ## Install directly from a release
 
 ```bash
-brew install https://github.com/yan-ad/joc/releases/latest/download/joocode.rb
+brew install https://github.com/yan-ad/joocode/releases/latest/download/joocode.rb
 ```
 
 To install a specific release:
 
 ```bash
-brew install https://github.com/yan-ad/joc/releases/download/v0.1.1/joocode.rb
+brew install https://github.com/yan-ad/joocode/releases/download/v0.1.1/joocode.rb
 ```
 
 ## Install from a tap
@@ -23,6 +23,7 @@ For a stable tap experience, maintainers can publish the generated formula to
 ```bash
 brew tap yan-ad/tap
 brew install yan-ad/tap/joocode
+jcx --version
 ```
 
 The release workflow publishes to that tap when the repository has a

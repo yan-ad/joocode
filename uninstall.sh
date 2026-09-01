@@ -2,7 +2,8 @@
 set -eu
 
 INSTALL_DIR="${JOOCODE_INSTALL_DIR:-${JOC_INSTALL_DIR:-$HOME/.local/bin}}"
-BINARY="$INSTALL_DIR/joocode"
+BINARY="$INSTALL_DIR/jcx"
+LEGACY_BINARY="$INSTALL_DIR/joocode"
 
 usage() {
   cat <<'EOF'
@@ -11,7 +12,7 @@ Usage: uninstall.sh [--yes]
 Removes the standalone Joocode binary, app launcher, icon, and auto-start entry.
 
 Environment:
-  JOOCODE_INSTALL_DIR  Directory containing the joocode binary.
+  JOOCODE_INSTALL_DIR  Directory containing the jcx and joocode binaries.
 
 This script does not remove OpenCode credentials or configuration, nor Joocode
 entries in Codex or Zed settings. Remove a Homebrew installation with:
@@ -29,19 +30,21 @@ case "${1:-}" in
     ;;
 esac
 
-if [ ! -e "$BINARY" ]; then
+if [ ! -e "$BINARY" ] && [ ! -e "$LEGACY_BINARY" ]; then
   printf 'joocode uninstaller: no binary found at %s\n' "$BINARY" >&2
   printf 'If installed with Homebrew, run: brew uninstall joocode\n' >&2
   exit 0
 fi
 
-if [ ! -f "$BINARY" ]; then
-  printf 'joocode uninstaller: refusing to remove non-file path: %s\n' "$BINARY" >&2
-  exit 1
-fi
+for candidate in "$BINARY" "$LEGACY_BINARY"; do
+  if [ -e "$candidate" ] && [ ! -f "$candidate" ]; then
+    printf 'joocode uninstaller: refusing to remove non-file path: %s\n' "$candidate" >&2
+    exit 1
+  fi
+done
 
 if [ "$confirm" = true ]; then
-  printf 'Remove Joocode binary at %s? [y/N] ' "$BINARY"
+  printf 'Remove Joocode commands from %s? [y/N] ' "$INSTALL_DIR"
   read -r answer || answer=""
   case "$answer" in
     y|Y|yes|YES) ;;
@@ -52,8 +55,8 @@ if [ "$confirm" = true ]; then
   esac
 fi
 
-rm -f "$BINARY"
-printf 'Removed %s\n' "$BINARY"
+rm -f "$BINARY" "$LEGACY_BINARY"
+printf 'Removed %s and compatibility alias %s\n' "$BINARY" "$LEGACY_BINARY"
 
 case "$(uname -s)" in
   Darwin)

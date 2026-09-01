@@ -56,11 +56,16 @@ fn executable() -> anyhow::Result<PathBuf> {
 #[cfg(unix)]
 fn stable_executable_candidates() -> Vec<PathBuf> {
     let mut candidates = vec![
+        PathBuf::from("/opt/homebrew/bin/jcx"),
+        PathBuf::from("/usr/local/bin/jcx"),
+        PathBuf::from("/home/linuxbrew/.linuxbrew/bin/jcx"),
         PathBuf::from("/opt/homebrew/bin/joocode"),
         PathBuf::from("/usr/local/bin/joocode"),
         PathBuf::from("/home/linuxbrew/.linuxbrew/bin/joocode"),
     ];
     if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".local/bin/jcx"));
+        candidates.push(home.join(".cargo/bin/jcx"));
         candidates.push(home.join(".local/bin/joocode"));
         candidates.push(home.join(".cargo/bin/joocode"));
     }

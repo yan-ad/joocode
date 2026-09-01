@@ -2,6 +2,9 @@
 set -eu
 
 for candidate in \
+  "$HOME/.local/bin/jcx" \
+  "/opt/homebrew/bin/jcx" \
+  "/usr/local/bin/jcx" \
   "$HOME/.local/bin/joocode" \
   "/opt/homebrew/bin/joocode" \
   "/usr/local/bin/joocode"

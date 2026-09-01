@@ -49,11 +49,15 @@ try {
 
   $extract = Join-Path $tmp "extracted"
   Expand-Archive -Path $archivePath -DestinationPath $extract -Force
-  $source = Join-Path $extract "joocode-$target\joocode.exe"
-  if (-not (Test-Path -LiteralPath $source)) { Fail "archive did not contain joocode.exe" }
+  $source = Join-Path $extract "joocode-$target\jcx.exe"
+  if (-not (Test-Path -LiteralPath $source)) { Fail "archive did not contain jcx.exe" }
 
   New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-  Copy-Item -Force -Path $source -Destination (Join-Path $InstallDir "joocode.exe")
+  Copy-Item -Force -Path $source -Destination (Join-Path $InstallDir "jcx.exe")
+  $legacySource = Join-Path $extract "joocode-$target\joocode.exe"
+  if (Test-Path -LiteralPath $legacySource) {
+    Copy-Item -Force -Path $legacySource -Destination (Join-Path $InstallDir "joocode.exe")
+  }
   $iconSource = Join-Path $extract "joocode-$target\joocode.ico"
   if (Test-Path -LiteralPath $iconSource) {
     Copy-Item -Force -Path $iconSource -Destination (Join-Path $InstallDir "joocode.ico")
@@ -61,12 +65,12 @@ try {
     $shortcutPath = Join-Path $programs "Joocode.lnk"
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = Join-Path $InstallDir "joocode.exe"
+    $shortcut.TargetPath = Join-Path $InstallDir "jcx.exe"
     $shortcut.IconLocation = Join-Path $InstallDir "joocode.ico"
     $shortcut.WorkingDirectory = $InstallDir
     $shortcut.Save()
   }
-  Write-Host "`nJoocode $Version installed to $InstallDir\joocode.exe"
+  Write-Host "`nJoocode $Version installed to $InstallDir\jcx.exe"
 
   $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
   $pathItems = @($userPath -split ';' | Where-Object { $_ })
@@ -74,7 +78,7 @@ try {
     [Environment]::SetEnvironmentVariable("Path", "$InstallDir;$userPath", "User")
     Write-Host "Added $InstallDir to your user PATH. Open a new PowerShell window."
   }
-  Write-Host "`nNext steps:`n  joocode doctor`n  joocode codex-install`n  joocode"
+  Write-Host "`nNext steps:`n  jcx doctor`n  jcx codex-install`n  jcx"
 } finally {
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp
 }

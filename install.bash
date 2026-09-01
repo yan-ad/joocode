@@ -13,9 +13,9 @@ fail() {
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 
 case "$(uname -s)" in
-  Linux) os="unknown-linux-gnu"; archive="tar.gz"; binary="joocode" ;;
-  Darwin) os="apple-darwin"; archive="tar.gz"; binary="joocode" ;;
-  MINGW*|MSYS*|CYGWIN*) os="pc-windows-msvc"; archive="zip"; binary="joocode.exe" ;;
+  Linux) os="unknown-linux-gnu"; archive="tar.gz"; binary="jcx"; legacy_binary="joocode" ;;
+  Darwin) os="apple-darwin"; archive="tar.gz"; binary="jcx"; legacy_binary="joocode" ;;
+  MINGW*|MSYS*|CYGWIN*) os="pc-windows-msvc"; archive="zip"; binary="jcx.exe"; legacy_binary="joocode.exe" ;;
   *) fail "unsupported operating system: $(uname -s)" ;;
 esac
 
@@ -80,6 +80,11 @@ esac
 mkdir -p "$INSTALL_DIR"
 cp "$source" "$INSTALL_DIR/$binary"
 [ "$archive" = "zip" ] || chmod 755 "$INSTALL_DIR/$binary"
+legacy_source="$source_root/$legacy_binary"
+if [ -f "$legacy_source" ]; then
+  cp "$legacy_source" "$INSTALL_DIR/$legacy_binary"
+  [ "$archive" = "zip" ] || chmod 755 "$INSTALL_DIR/$legacy_binary"
+fi
 
 case "$(uname -s)" in
   Darwin)
@@ -97,7 +102,7 @@ case "$(uname -s)" in
       desktop_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
       mkdir -p "$icon_dir" "$desktop_dir"
       cp "$source_root/joocode-icon.png" "$icon_dir/joocode.png"
-      sed "s#^Exec=.*#Exec=$INSTALL_DIR/joocode#" "$source_root/joocode.desktop" > "$desktop_dir/joocode.desktop"
+      sed "s#^Exec=.*#Exec=$INSTALL_DIR/jcx#" "$source_root/joocode.desktop" > "$desktop_dir/joocode.desktop"
     fi
     ;;
 esac
@@ -105,9 +110,9 @@ esac
 printf '\nJoocode %s installed to %s/%s\n' "$VERSION" "$INSTALL_DIR" "$binary"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
-  *) printf 'Add %s to PATH to run joocode globally.\n' "$INSTALL_DIR" ;;
+  *) printf 'Add %s to PATH to run jcx globally.\n' "$INSTALL_DIR" ;;
 esac
 printf '\nNext steps:\n'
-printf '  joocode doctor\n'
-printf '  joocode codex-install\n'
-printf '  joocode\n'
+printf '  jcx doctor\n'
+printf '  jcx codex-install\n'
+printf '  jcx\n'

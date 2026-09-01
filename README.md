@@ -19,8 +19,10 @@ Reuse OpenCode, OCX, Hermes, Copilot, and OpenAI-compatible providers inside Cod
 ```bash
 brew tap yan-ad/tap
 brew install joocode
-joocode
+jcx
 ```
+
+> **`jcx` is the flagship command.** `joocode` ships as a fully compatible alias for existing scripts and installations.
 
 ```text
 ◈ Joocode
@@ -40,7 +42,7 @@ already have, wire installed desktop clients automatically, and keep the whole
 runtime small enough to disappear into the background.**
 
 No second provider dashboard is required. No upstream key needs to be copied
-into Codex, Zed, or JetBrains. Start Joocode and keep using the native client UI.
+into Codex, Zed, or JetBrains. Start `jcx` and keep using the native client UI.
 
 ## Why Joocode?
 
@@ -56,7 +58,7 @@ into Codex, Zed, or JetBrains. Start Joocode and keep using the native client UI
   the native macOS LaunchAgent,
   Linux systemd user service, or Windows Startup entry. Startup runs headlessly.
 - **Desktop app launcher** — release installers include the Joocode palm/crab
-  icon and install a platform launcher while retaining the `joocode` CLI.
+  icon and install a platform launcher while retaining the `jcx` flagship CLI (`joocode` remains an alias).
 - **Protocol bridge** — Responses API and Chat Completions, JSON and SSE,
   images, tool calls, streamed arguments, and function results.
 - **Credential-safe** — upstream credentials stay in their original source;
@@ -91,7 +93,7 @@ host environment.
 ```bash
 brew tap yan-ad/tap
 brew install joocode
-joocode
+jcx
 ```
 
 Or install directly from the tap in one command:
@@ -105,7 +107,7 @@ brew install yan-ad/tap/joocode
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://raw.githubusercontent.com/yan-ad/joocode/main/install.bash | bash
-joocode
+jcx
 ```
 
 The installer detects the platform, verifies `SHA256SUMS`, and installs to
@@ -125,9 +127,9 @@ irm https://raw.githubusercontent.com/yan-ad/joocode/main/install.ps1 | iex
 Open a new PowerShell window, then run:
 
 ```powershell
-joocode --version
-joocode doctor
-joocode
+jcx --version
+jcx doctor
+jcx
 ```
 
 The installer selects x64 or ARM64, verifies the SHA-256 checksum, installs
@@ -140,7 +142,7 @@ Install a specific version with `./install.ps1 -Version 0.1.9`.
 git clone https://github.com/yan-ad/joocode.git
 cd joocode
 cargo build --release --locked
-./target/release/joocode
+./target/release/jcx
 ```
 
 ## How it works
@@ -170,7 +172,7 @@ joocode/provider/model
 Start the automatic desktop mode:
 
 ```bash
-joocode
+jcx
 ```
 
 Joocode detects installed clients, starts one proxy at
@@ -181,13 +183,13 @@ headless logs.
 Force every integration even when its application is not detected:
 
 ```bash
-joocode --all
+jcx --all
 ```
 
 Choose a different listener:
 
 ```bash
-joocode --host 127.0.0.1 --port 10200 \
+jcx --host 127.0.0.1 --port 10200 \
   --base-url http://127.0.0.1:10200/v1
 ```
 
@@ -230,9 +232,9 @@ All available sources are enabled by default. Restrict discovery with repeated
 or comma-separated `--source` values:
 
 ```bash
-joocode --source opencode,hermes models
-joocode --source copilot doctor
-joocode --source ocx serve
+jcx --source opencode,hermes models
+jcx --source copilot doctor
+jcx --source ocx serve
 ```
 
 Supported values are `auto`, `opencode`, `ocx`, `hermes`, and `copilot`.
@@ -285,7 +287,7 @@ Dynamic `key_cmd` and provider-native Anthropic transports are not yet proxied.
 
 Joocode checks `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, supported
 Copilot macOS Keychain entries, Copilot's plaintext fallback, and finally
-`gh auth token`. Run `copilot login` when `joocode doctor` reports an auth error.
+`gh auth token`. Run `copilot login` when `jcx doctor` reports an auth error.
 Classic `ghp_` PATs are ignored because Copilot does not support them.
 
 The account's live model catalog is exposed as `copilot/model`; exchanged tokens
@@ -298,7 +300,7 @@ remain in memory only.
 Synchronize manually when needed:
 
 ```bash
-joocode codex-install
+jcx codex-install
 ```
 
 Joocode preserves the existing Codex login and default model, merges native
@@ -332,7 +334,7 @@ Use the built-in endpoint when JetBrains asks for an OpenAI-compatible provider:
 
 - **Base URL:** `http://127.0.0.1:10100/v1`
 - **API key:** any non-empty local value, such as `joocode`
-- **Model:** any discovered ID from `joocode models`
+- **Model:** any discovered ID from `jcx models`
 
 JetBrains keeps the local placeholder in its managed credential store; upstream
 credentials remain in their original source.
@@ -362,13 +364,13 @@ support SSE streaming and tool calls.
 ## CLI
 
 ```text
-joocode [--source SOURCE] [--host HOST] [--port PORT]
-joocode --all
-joocode doctor
-joocode models
-joocode codex-install [--base-url URL]
-joocode serve [--host HOST] [--port PORT]
-joocode upgrade [--version VERSION]
+jcx [--source SOURCE] [--host HOST] [--port PORT]
+jcx --all
+jcx doctor
+jcx models
+jcx codex-install [--base-url URL]
+jcx serve [--host HOST] [--port PORT]
+jcx upgrade [--version VERSION]
 ```
 
 Set `RUST_LOG=joocode=debug,tower_http=debug` for diagnostics. Joocode does not
@@ -377,8 +379,8 @@ log secrets or request authorization headers.
 ### Upgrade
 
 ```bash
-joocode upgrade
-joocode upgrade --version 0.2.0
+jcx upgrade
+jcx upgrade --version 0.2.0
 ```
 
 Linux and macOS upgrades download the matching archive and `SHA256SUMS`, verify

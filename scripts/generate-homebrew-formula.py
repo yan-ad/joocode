@@ -15,7 +15,7 @@ for line in checksums:
     digest, filename = line.split(maxsplit=1)
     values[filename.lstrip("*")] = digest
 
-repo = os.environ.get("GITHUB_REPOSITORY", "yan-ad/joc")
+repo = os.environ.get("GITHUB_REPOSITORY", "yan-ad/joocode")
 assets = {
     "arm64_macos": f"joocode-aarch64-apple-darwin.tar.gz",
     "x86_macos": f"joocode-x86_64-apple-darwin.tar.gz",
@@ -58,11 +58,12 @@ formula = f'''class Joocode < Formula
   end
 
   def install
+    bin.install Dir["joocode-*/jcx"].first => "jcx"
     bin.install Dir["joocode-*/joocode"].first => "joocode"
   end
 
   test do
-    assert_match "joocode", shell_output("#{{bin}}/joocode --help")
+    assert_match "jcx", shell_output("#{{bin}}/jcx --help")
   end
 end
 '''

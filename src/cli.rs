@@ -6,7 +6,7 @@ use crate::sources::SourceKind;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "joocode",
+    name = "jcx",
     version,
     about,
     long_about = "Discover configured AI providers, auto-detect installed desktop clients, and run one local proxy. Running without a subcommand opens the Joocode dashboard."
@@ -52,19 +52,25 @@ pub struct Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn default_invocation_starts_auto_detect_mode() {
-        let cli = Cli::try_parse_from(["joocode"]).unwrap();
+        let cli = Cli::try_parse_from(["jcx"]).unwrap();
         assert!(!cli.all);
         assert!(cli.command.is_none());
         assert_eq!(cli.sources, vec![SourceKind::Auto]);
     }
 
     #[test]
+    fn flagship_command_name_is_jcx() {
+        assert_eq!(Cli::command().get_name(), "jcx");
+    }
+
+    #[test]
     fn all_mode_accepts_shared_proxy_options() {
         let cli = Cli::try_parse_from([
-            "joocode",
+            "jcx",
             "--all",
             "--host",
             "0.0.0.0",
@@ -84,8 +90,8 @@ mod tests {
 
     #[test]
     fn accepts_multiple_provider_sources() {
-        let cli = Cli::try_parse_from(["joocode", "--source", "opencode,hermes,copilot", "models"])
-            .unwrap();
+        let cli =
+            Cli::try_parse_from(["jcx", "--source", "opencode,hermes,copilot", "models"]).unwrap();
         assert_eq!(
             cli.sources,
             vec![

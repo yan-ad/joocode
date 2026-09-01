@@ -98,6 +98,7 @@ jobs:
           asset="joocode-${{ matrix.target }}.tar.gz"
           staging="joocode-${{ matrix.target }}"
           mkdir "$staging"
+          cp "target/${{ matrix.target }}/release/jcx" "$staging/"
           cp "target/${{ matrix.target }}/release/joocode" "$staging/"
           cp README.md LICENSE install.bash install.sh "$staging/"
           if [ "${{ runner.os }}" = "macOS" ]; then
@@ -118,6 +119,7 @@ jobs:
           $asset = "joocode-${{ matrix.target }}.zip"
           $staging = "joocode-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $staging
+          Copy-Item "target/${{ matrix.target }}/release/jcx.exe" $staging
           Copy-Item "target/${{ matrix.target }}/release/joocode.exe" $staging
           Copy-Item README.md, LICENSE, install.ps1, assets/joocode.ico $staging
           Compress-Archive -Path $staging -DestinationPath $asset

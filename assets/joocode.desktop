@@ -2,7 +2,7 @@
 Type=Application
 Name=Joocode
 Comment=Native multi-provider desktop AI proxy
-Exec=joocode
+Exec=jcx
 Icon=joocode
 Terminal=false
 Categories=Development;Utility;

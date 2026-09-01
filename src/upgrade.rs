@@ -188,26 +188,49 @@ fn replace_binary(executable: &Path, archive: &[u8], target: &str) -> anyhow::Re
         .unpack(&temp_dir)
         .context("failed to extract the release archive")?;
 
-    let extracted = temp_dir.join(format!("joocode-{target}/joocode"));
+    let binary_name = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| matches!(*name, "jcx" | "joocode"))
+        .unwrap_or("jcx");
+    let extracted = temp_dir.join(format!("joocode-{target}/{binary_name}"));
     if !extracted.is_file() {
-        bail!("release archive does not contain the expected joocode binary");
+        bail!("release archive does not contain the expected {binary_name} binary");
     }
 
-    let replacement = executable.with_extension(format!("upgrade-{}", std::process::id()));
-    fs::copy(&extracted, &replacement).context("failed to stage the new JustOpenCode binary")?;
+    replace_executable(executable, &extracted)?;
+
+    let alias_name = if binary_name == "jcx" {
+        "joocode"
+    } else {
+        "jcx"
+    };
+    let alias_source = temp_dir.join(format!("joocode-{target}/{alias_name}"));
+    let alias_destination = executable.with_file_name(alias_name);
+    if alias_source.is_file() && alias_destination.is_file() {
+        replace_executable(&alias_destination, &alias_source)
+            .with_context(|| format!("failed to update the {alias_name} compatibility command"))?;
+    }
+
+    let _ = fs::remove_dir_all(temp_dir);
+    Ok(())
+}
+
+fn replace_executable(destination: &Path, source: &Path) -> anyhow::Result<()> {
+    let replacement = destination.with_extension(format!("upgrade-{}", std::process::id()));
+    fs::copy(source, &replacement).context("failed to stage the new JustOpenCode binary")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755))
             .context("failed to set executable permissions")?;
     }
-    fs::rename(&replacement, executable).with_context(|| {
+    fs::rename(&replacement, destination).with_context(|| {
         format!(
             "failed to replace {}; check that the install directory is writable",
-            executable.display()
+            destination.display()
         )
     })?;
-    let _ = fs::remove_dir_all(temp_dir);
     Ok(())
 }
 

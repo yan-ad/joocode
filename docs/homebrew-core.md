@@ -6,6 +6,7 @@ it with:
 ```bash
 brew tap yan-ad/tap
 brew install joocode
+jcx --version
 ```
 
 Or use the fully qualified one-command form:
