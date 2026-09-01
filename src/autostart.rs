@@ -359,13 +359,12 @@ fn disable() -> anyhow::Result<()> {
 fn pause_platform() -> anyhow::Result<()> {
     fs::write(pause_marker(), b"paused")
         .context("failed to create the Joocode background pause marker")?;
+    let startup = entry_path().to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$startup = '{startup}'; Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like \"*$startup*\" -or $_.CommandLine -like '* serve --host 127.0.0.1 --port 10100*' }} | Invoke-CimMethod -MethodName Terminate | Out-Null"
+    );
     let _ = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '* serve --host 127.0.0.1 --port 10100*' } | Invoke-CimMethod -MethodName Terminate | Out-Null",
-        ])
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output();
     Ok(())
 }
