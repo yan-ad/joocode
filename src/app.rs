@@ -3,6 +3,7 @@ use std::{
     net::{IpAddr, SocketAddr},
 };
 
+use anyhow::Context;
 use async_stream::stream;
 use axum::{
     Json, Router,
@@ -34,6 +35,34 @@ use crate::{
 #[derive(Clone)]
 struct AppState {
     registry: RegistryStore,
+}
+
+struct PersistentProxyHandoff {
+    active: bool,
+}
+
+impl PersistentProxyHandoff {
+    fn begin(interactive: bool) -> anyhow::Result<Self> {
+        if interactive && autostart::status().enabled() {
+            autostart::prepare_dashboard_handoff()
+                .context("failed to prepare the persistent Joocode proxy handoff")?;
+        }
+        Ok(Self {
+            active: interactive,
+        })
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for PersistentProxyHandoff {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = autostart::resume();
+        }
+    }
 }
 
 fn desktop_base_url(address: std::net::SocketAddr) -> String {
@@ -154,6 +183,8 @@ pub async fn serve_dashboard(
     targets: DesktopTargets,
     base_url: Option<String>,
 ) -> anyhow::Result<()> {
+    let interactive = dashboard::is_interactive();
+    let mut persistent_proxy = PersistentProxyHandoff::begin(interactive)?;
     let registry_store = RegistryStore::new(registry.clone());
     let (listener, app, address, port_warning) =
         prepare_server(host, port, registry_store.clone()).await?;
@@ -175,7 +206,7 @@ pub async fn serve_dashboard(
         desktop::configure_detected(&setup_registry, &setup_base_url, &setup_targets);
     });
 
-    if !dashboard::is_interactive() {
+    if !interactive {
         info!(address = %dashboard_data.listening, "joocode listening");
         shutdown_signal().await;
         let _ = shutdown_tx.send(());
@@ -230,7 +261,9 @@ pub async fn serve_dashboard(
                     let _ = event_tx.send(event);
                 }
                 dashboard::DashboardCommand::ToggleAutoStart => {
-                    let event = match tokio::task::spawn_blocking(autostart::toggle).await {
+                    let event = match tokio::task::spawn_blocking(autostart::toggle_for_dashboard)
+                        .await
+                    {
                         Ok(Ok(status)) => dashboard::DashboardEvent::AutoStartUpdated(status),
                         Ok(Err(error)) => {
                             dashboard::DashboardEvent::ProviderError(error.to_string())
@@ -259,7 +292,13 @@ pub async fn serve_dashboard(
     server.await??;
     match dashboard_result? {
         dashboard::DashboardExit::Quit => Ok(()),
-        dashboard::DashboardExit::Restart => upgrade::restart_current(),
+        dashboard::DashboardExit::Restart => {
+            let result = upgrade::restart_current();
+            if result.is_ok() {
+                persistent_proxy.disarm();
+            }
+            result
+        }
     }
 }
 

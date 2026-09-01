@@ -10,6 +10,58 @@ pub enum Status {
     Off,
 }
 
+/// Pause the background proxy and refresh an existing startup entry to the
+/// current persistent-service definition. This transparently migrates older
+/// login-only entries when the dashboard is opened after an upgrade.
+pub fn prepare_dashboard_handoff() -> anyhow::Result<()> {
+    if !status().enabled() {
+        return Ok(());
+    }
+    pause_platform()?;
+    enable()?;
+    pause_platform()?;
+    Ok(())
+}
+
+/// Enable or disable Auto-start without changing the currently running
+/// dashboard process. Enabling writes and registers the persistent service,
+/// then leaves it paused until the dashboard hands the port back on exit.
+pub fn toggle_for_dashboard() -> anyhow::Result<Status> {
+    if status().enabled() {
+        disable()?;
+        Ok(Status::Off)
+    } else {
+        enable()?;
+        pause_platform()?;
+        Ok(Status::On)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pause_platform() -> anyhow::Result<()> {
+    let unit = format!("{LABEL}.service");
+    run_systemctl(["stop", unit.as_str()])
+}
+
+#[cfg(target_os = "linux")]
+fn resume_platform() -> anyhow::Result<()> {
+    let unit = format!("{LABEL}.service");
+    run_systemctl(["start", unit.as_str()])
+}
+
+#[cfg(target_os = "windows")]
+fn pause_marker() -> PathBuf {
+    entry_path().with_extension("paused")
+}
+
+/// Start the persistent proxy when Auto-start is enabled.
+pub fn resume() -> anyhow::Result<()> {
+    if status().enabled() {
+        resume_platform()?;
+    }
+    Ok(())
+}
+
 impl Status {
     pub fn label(self) -> &'static str {
         match self {
@@ -28,16 +80,6 @@ pub fn status() -> Status {
         Status::On
     } else {
         Status::Off
-    }
-}
-
-pub fn toggle() -> anyhow::Result<Status> {
-    if status().enabled() {
-        disable()?;
-        Ok(Status::Off)
-    } else {
-        enable()?;
-        Ok(Status::On)
     }
 }
 
@@ -111,9 +153,15 @@ fn enable() -> anyhow::Result<()> {
 <dict>
   <key>Label</key><string>{LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>{executable}</string></array>
+  <array>
+    <string>{executable}</string>
+    <string>serve</string>
+    <string>--host</string><string>127.0.0.1</string>
+    <string>--port</string><string>10100</string>
+  </array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><false/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>3</integer>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>{stdout}</string>
   <key>StandardErrorPath</key><string>{stderr}</string>
@@ -127,7 +175,84 @@ fn enable() -> anyhow::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn disable() -> anyhow::Result<()> {
-    remove_entry()
+    remove_entry()?;
+    let _ = pause_platform();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_domain() -> anyhow::Result<String> {
+    let output = std::process::Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .context("failed to determine the current macOS user id")?;
+    if !output.status.success() {
+        anyhow::bail!("failed to determine the current macOS user id");
+    }
+    Ok(format!(
+        "gui/{}",
+        String::from_utf8_lossy(&output.stdout).trim()
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn pause_platform() -> anyhow::Result<()> {
+    let domain = launchctl_domain()?;
+    let service = format!("{domain}/{LABEL}");
+    let output = std::process::Command::new("/bin/launchctl")
+        .args(["bootout", &service])
+        .output()
+        .context("failed to stop the Joocode LaunchAgent")?;
+    if output.status.success() || launchctl_item_not_found(&output.stderr) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "failed to stop the Joocode LaunchAgent: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn resume_platform() -> anyhow::Result<()> {
+    let domain = launchctl_domain()?;
+    let output = std::process::Command::new("/bin/launchctl")
+        .args(["bootstrap", &domain])
+        .arg(entry_path())
+        .output()
+        .context("failed to start the Joocode LaunchAgent")?;
+    if !output.status.success() && !launchctl_already_loaded(&output.stderr) {
+        anyhow::bail!(
+            "failed to start the Joocode LaunchAgent: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let service = format!("{domain}/{LABEL}");
+    let output = std::process::Command::new("/bin/launchctl")
+        .args(["kickstart", "-k", &service])
+        .output()
+        .context("failed to kick-start the Joocode LaunchAgent")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "failed to kick-start the Joocode LaunchAgent: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_item_not_found(stderr: &[u8]) -> bool {
+    let message = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    message.contains("could not find specified service")
+        || message.contains("no such process")
+        || message.contains("not found")
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_already_loaded(stderr: &[u8]) -> bool {
+    let message = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    message.contains("service already loaded") || message.contains("already exists")
 }
 
 #[cfg(target_os = "linux")]
@@ -145,7 +270,7 @@ fn enable() -> anyhow::Result<()> {
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let executable = systemd_escape(&executable()?.to_string_lossy());
     let service = format!(
-        "[Unit]\nDescription=Joocode desktop AI proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={executable}\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Joocode desktop AI proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={executable} serve --host 127.0.0.1 --port 10100\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n"
     );
     fs::write(&path, service).with_context(|| format!("failed to write {}", path.display()))?;
     run_systemctl(["daemon-reload"])?;
@@ -165,7 +290,7 @@ fn disable() -> anyhow::Result<()> {
         .to_string_lossy()
         .into_owned();
     let _ = std::process::Command::new("systemctl")
-        .args(["--user", "disable", &unit])
+        .args(["--user", "disable", "--now", &unit])
         .output();
     remove_entry()?;
     let _ = run_systemctl(["daemon-reload"]);
@@ -203,8 +328,10 @@ fn enable() -> anyhow::Result<()> {
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let executable = executable()?;
     let command = format!(
-        "@echo off\r\nstart \"\" /min \"{}\"\r\n",
-        executable.display()
+        "@echo off\r\n:joocode_loop\r\nif exist \"{}\" goto joocode_wait\r\n\"{}\" serve --host 127.0.0.1 --port 10100\r\n:joocode_wait\r\ntimeout /t 3 /nobreak >nul\r\nif exist \"{}\" goto joocode_loop\r\n",
+        pause_marker().display(),
+        executable.display(),
+        path.display()
     );
     fs::write(&path, command).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
@@ -212,7 +339,40 @@ fn enable() -> anyhow::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn disable() -> anyhow::Result<()> {
-    remove_entry()
+    remove_entry()?;
+    let _ = pause_platform();
+    let _ = fs::remove_file(pause_marker());
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn pause_platform() -> anyhow::Result<()> {
+    fs::write(pause_marker(), b"paused")
+        .context("failed to create the Joocode background pause marker")?;
+    let _ = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '* serve --host 127.0.0.1 --port 10100*' } | Invoke-CimMethod -MethodName Terminate | Out-Null",
+        ])
+        .output();
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn resume_platform() -> anyhow::Result<()> {
+    match fs::remove_file(pause_marker()) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("failed to clear the Joocode pause marker"),
+    }
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", "/MIN"])
+        .arg(entry_path())
+        .spawn()
+        .context("failed to start the Joocode background supervisor")?;
+    Ok(())
 }
 
 fn remove_entry() -> anyhow::Result<()> {
