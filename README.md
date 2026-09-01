@@ -54,9 +54,11 @@ into Codex, Zed, or JetBrains. Start `jcx` and keep using the native client UI.
   runtime and no browser dashboard required.
 - **Live catalog reload** — press `Tab`, enter a base URL and API key, fetch
   `/models`, and use the new models without restarting Joocode.
-- **Login auto-start** — press `/`, select Auto-start, then press `Space` to toggle
-  the native macOS LaunchAgent,
-  Linux systemd user service, or Windows Startup entry. Startup runs headlessly.
+- **Persistent background proxy** — press `/`, select Auto-start, then press
+  `Space` to toggle the native macOS LaunchAgent, Linux systemd user service,
+  or Windows Startup supervisor. When enabled, Joocode runs headlessly at login
+  and is restarted automatically if it exits. Opening the dashboard temporarily
+  takes over the proxy port; pressing `Esc` hands it back to the background service.
 - **Desktop app launcher** — release installers include the Joocode palm/crab
   icon and install a platform launcher while retaining the `jcx` flagship CLI (`joocode` remains an alias).
 - **Protocol bridge** — Responses API and Chat Completions, JSON and SSE,

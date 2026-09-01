@@ -10,6 +10,13 @@ pub enum Status {
     Off,
 }
 
+#[cfg(target_os = "linux")]
+fn systemd_service(executable: &str) -> String {
+    format!(
+        "[Unit]\nDescription=Joocode desktop AI proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={executable} serve --host 127.0.0.1 --port 10100\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n"
+    )
+}
+
 /// Pause the background proxy and refresh an existing startup entry to the
 /// current persistent-service definition. This transparently migrates older
 /// login-only entries when the dashboard is opened after an upgrade.
@@ -146,7 +153,14 @@ fn enable() -> anyhow::Result<()> {
     let logs = log_dir()?;
     let stdout = xml_escape(&logs.join("autostart.log").to_string_lossy());
     let stderr = xml_escape(&logs.join("autostart-error.log").to_string_lossy());
-    let plist = format!(
+    let plist = macos_plist(&executable, &stdout, &stderr);
+    fs::write(&path, plist).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_plist(executable: &str, stdout: &str, stderr: &str) -> String {
+    format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -168,9 +182,7 @@ fn enable() -> anyhow::Result<()> {
 </dict>
 </plist>
 "#
-    );
-    fs::write(&path, plist).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(())
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -269,9 +281,7 @@ fn enable() -> anyhow::Result<()> {
     let parent = path.parent().context("invalid systemd user path")?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let executable = systemd_escape(&executable()?.to_string_lossy());
-    let service = format!(
-        "[Unit]\nDescription=Joocode desktop AI proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={executable} serve --host 127.0.0.1 --port 10100\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n"
-    );
+    let service = systemd_service(&executable);
     fs::write(&path, service).with_context(|| format!("failed to write {}", path.display()))?;
     run_systemctl(["daemon-reload"])?;
     run_systemctl([
@@ -415,5 +425,22 @@ mod tests {
     #[test]
     fn xml_values_are_escaped() {
         assert_eq!(xml_escape("a&<\"'"), "a&amp;&lt;&quot;&apos;");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launch_agent_is_persistent_and_headless() {
+        let plist = macos_plist("/tmp/jcx", "/tmp/out", "/tmp/err");
+        assert!(plist.contains("<key>KeepAlive</key><true/>"));
+        assert!(plist.contains("<string>serve</string>"));
+        assert!(plist.contains("<string>10100</string>"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_service_is_persistent_and_headless() {
+        let service = systemd_service("/tmp/jcx");
+        assert!(service.contains("ExecStart=/tmp/jcx serve"));
+        assert!(service.contains("Restart=always"));
     }
 }
