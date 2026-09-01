@@ -197,19 +197,36 @@ requires_openai_auth = true
 Keep using your existing Codex/OpenAI login. JustOpenCode does not replace or
 store it; Codex supplies it only when native OpenAI models are selected.
 
-## Configure all desktop clients
+## Run Joocode
 
-Configure supported desktop integrations and start **one shared local proxy**:
+Start Joocode with no subcommand:
 
 ```bash
-joocode --all
+joocode
 ```
 
-This updates Joocode-managed Codex and Zed settings, prints the one-time
-JetBrains AI Assistant setup values, and serves all clients at
-`http://127.0.0.1:10100/v1`. Every client receives the same discovered
-`provider/model` list. Use `--host`, `--port`, and `--base-url` together to
-use a different local endpoint.
+Joocode automatically detects supported desktop clients installed on the
+machine. It configures Codex and Zed only when they are present, detects
+JetBrains IDEs, starts one shared proxy at `http://127.0.0.1:10100/v1`, and
+opens a terminal dashboard:
+
+```text
+Joocode
+
+Config: OpenCode, OpenCodex, Hermes
+IDE Target: Codex, Zed, JetBrains
+Listening: http://127.0.0.1:10100
+
+Esc to exit
+```
+
+The displayed sources and IDE targets reflect what was actually discovered.
+Press `Esc` or `Ctrl-C` to stop the proxy gracefully. When Joocode runs without
+an interactive terminal, it automatically falls back to normal headless logs.
+
+To configure every integration even when Joocode cannot detect its application,
+use `joocode --all`. Use `--host`, `--port`, and `--base-url` with `--all` to
+select a different local endpoint.
 
 ## Zed integration
 
@@ -286,6 +303,7 @@ curl -N http://127.0.0.1:10100/v1/responses \
 ## CLI
 
 ```text
+joocode
 joocode doctor
 joocode --all [--base-url URL] [--host HOST] [--port PORT]
 joocode models

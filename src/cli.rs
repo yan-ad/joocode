@@ -5,7 +5,12 @@ use clap::{Parser, Subcommand};
 use crate::sources::SourceKind;
 
 #[derive(Debug, Parser)]
-#[command(name = "joocode", version, about)]
+#[command(
+    name = "joocode",
+    version,
+    about,
+    long_about = "Discover configured AI providers, auto-detect installed desktop clients, and run one local proxy. Running without a subcommand opens the Joocode dashboard."
+)]
 pub struct Cli {
     /// Override the OpenCode configuration path.
     #[arg(long, env = "JOOCODE_CONFIG")]
@@ -24,7 +29,7 @@ pub struct Cli {
     )]
     pub sources: Vec<SourceKind>,
 
-    /// Configure every supported desktop integration and start one shared local proxy.
+    /// Force every supported desktop integration and start one shared local proxy.
     #[arg(long)]
     pub all: bool,
 
@@ -47,6 +52,14 @@ pub struct Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_invocation_starts_auto_detect_mode() {
+        let cli = Cli::try_parse_from(["joocode"]).unwrap();
+        assert!(!cli.all);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.sources, vec![SourceKind::Auto]);
+    }
 
     #[test]
     fn all_mode_accepts_shared_proxy_options() {

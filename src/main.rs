@@ -2,6 +2,8 @@ mod app;
 mod cli;
 mod codex;
 mod config;
+mod dashboard;
+mod desktop;
 mod error;
 mod jetbrains;
 mod protocol;
@@ -13,6 +15,7 @@ mod zed;
 use anyhow::Context;
 use clap::Parser;
 use cli::{Cli, Command};
+use desktop::DesktopTargets;
 use provider::Registry;
 use sources::SourceSelection;
 use tracing_subscriber::EnvFilter;
@@ -34,24 +37,6 @@ async fn main() -> anyhow::Result<()> {
         return upgrade::run(version.as_deref()).await;
     }
 
-    fn configure_all_desktop_clients(registry: &Registry, base_url: &str) -> anyhow::Result<()> {
-        let codex = codex::install(registry, base_url)?;
-        let zed_settings = zed::install(registry, base_url)?;
-
-        println!("Configured all supported desktop integrations:");
-        println!("  Codex: {}", codex.config.display());
-        println!("  Zed:   {}", zed_settings.display());
-        println!("  JetBrains: setup values below (stored by the IDE credential store).");
-        println!(
-            "  Models: {} discovered provider/model entries",
-            registry.models().len()
-        );
-        println!();
-        println!("{}", jetbrains::setup_instructions(registry, base_url));
-        println!("Restart Codex and Zed if they are already running.");
-        Ok(())
-    }
-
     let selection = SourceSelection::new(cli.sources, cli.config, cli.auth)?;
     let registry = Registry::discover(&selection)
         .await
@@ -62,14 +47,28 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if cli.all {
-        configure_all_desktop_clients(&registry, &cli.base_url)?;
-        return app::serve(cli.host, cli.port, registry).await;
+        return app::serve_dashboard(
+            cli.host,
+            cli.port,
+            registry,
+            DesktopTargets::all_supported(),
+            cli.base_url,
+        )
+        .await;
     }
 
-    match cli.command.unwrap_or(Command::Serve {
-        host: "127.0.0.1".parse()?,
-        port: 10100,
-    }) {
+    let Some(command) = cli.command else {
+        return app::serve_dashboard(
+            "127.0.0.1".parse()?,
+            10100,
+            registry,
+            DesktopTargets::detect(),
+            "http://127.0.0.1:10100/v1".to_owned(),
+        )
+        .await;
+    };
+
+    match command {
         Command::Serve { host, port } => app::serve(host, port, registry).await,
         Command::Models => {
             for model in registry.models() {

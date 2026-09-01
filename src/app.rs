@@ -21,6 +21,8 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
 use crate::{
+    dashboard::{self, DashboardData},
+    desktop::{self, DesktopTargets},
     error::ApiError,
     protocol,
     provider::{ModelInfo, Registry},
@@ -120,6 +122,57 @@ async fn proxy_openai(
 }
 
 pub async fn serve(host: IpAddr, port: u16, registry: Registry) -> anyhow::Result<()> {
+    let (listener, app, address) = prepare_server(host, port, registry).await?;
+    info!(%address, "joocode listening");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+pub async fn serve_dashboard(
+    host: IpAddr,
+    port: u16,
+    registry: Registry,
+    targets: DesktopTargets,
+    base_url: String,
+) -> anyhow::Result<()> {
+    let (listener, app, address) = prepare_server(host, port, registry.clone()).await?;
+    let dashboard_data = DashboardData::new(&registry, &targets, address);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let setup_registry = registry;
+    let _setup_task = tokio::task::spawn_blocking(move || {
+        desktop::configure_detected(&setup_registry, &base_url, &targets);
+    });
+
+    if !dashboard::is_interactive() {
+        info!(address = %dashboard_data.listening, "joocode listening");
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(());
+        server.await??;
+        return Ok(());
+    }
+
+    let dashboard = tokio::task::spawn_blocking(move || dashboard::run(dashboard_data));
+    let dashboard_result = dashboard.await?;
+    let _ = shutdown_tx.send(());
+    server.await??;
+    dashboard_result
+}
+
+async fn prepare_server(
+    host: IpAddr,
+    port: u16,
+    registry: Registry,
+) -> anyhow::Result<(tokio::net::TcpListener, Router, SocketAddr)> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/models", get(models))
@@ -129,12 +182,9 @@ pub async fn serve(host: IpAddr, port: u16, registry: Registry) -> anyhow::Resul
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
     let address = SocketAddr::from((host, port));
-    info!(%address, "joocode listening");
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-    Ok(())
+    let address = listener.local_addr()?;
+    Ok((listener, app, address))
 }
 
 async fn shutdown_signal() {

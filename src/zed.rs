@@ -20,10 +20,23 @@ fn settings_path() -> anyhow::Result<PathBuf> {
 fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
+        let security = if PathBuf::from("/usr/bin/security").is_file() {
+            "/usr/bin/security"
+        } else {
+            "security"
+        };
+        let existing = Command::new(security)
+            .args(["find-internet-password", "-a", PROVIDER_ID, "-s", base_url])
+            .output()
+            .context("failed to inspect Joocode's local Zed API key")?;
+        if existing.status.success() {
+            return Ok(());
+        }
+
         // Zed stores compatible-provider keys as Internet Password records using
         // the configured API URL as the server field. `security` is the macOS
         // supported command-line interface to that keychain record type.
-        let status = Command::new("security")
+        let status = Command::new(security)
             .args([
                 "add-internet-password",
                 "-a",
