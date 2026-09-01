@@ -165,7 +165,22 @@ fn draw_update_prompt(frame: &mut Frame<'_>, tag: &str) {
 }
 
 const AUTO_START_ITEM: usize = 0;
-const CONFIG_ITEM_COUNT: usize = 1;
+const CONFIG_ITEMS: &[usize] = &[AUTO_START_ITEM];
+
+fn adjacent_config_item(selected: usize, forward: bool) -> usize {
+    let Some(index) = CONFIG_ITEMS.iter().position(|item| *item == selected) else {
+        return CONFIG_ITEMS.first().copied().unwrap_or_default();
+    };
+    let adjacent = if forward {
+        index.checked_add(1)
+    } else {
+        index.checked_sub(1)
+    };
+    adjacent
+        .and_then(|index| CONFIG_ITEMS.get(index))
+        .copied()
+        .unwrap_or(selected)
+}
 
 fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
     let [_, vertical, _] = Layout::vertical([
@@ -562,12 +577,8 @@ fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<Da
         Screen::Dashboard if key == KeyCode::Tab => *screen = Screen::BaseUrl(String::new()),
         Screen::Dashboard if key == KeyCode::Char('/') => *screen = Screen::Config { selected: 0 },
         Screen::Config { selected } => match key {
-            KeyCode::Up => {
-                *selected = selected.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                *selected = (*selected + 1).min(CONFIG_ITEM_COUNT - 1);
-            }
+            KeyCode::Up => *selected = adjacent_config_item(*selected, false),
+            KeyCode::Down => *selected = adjacent_config_item(*selected, true),
             KeyCode::Char(' ') if *selected == AUTO_START_ITEM => {
                 let _ = command_tx.send(DashboardCommand::ToggleAutoStart);
             }
