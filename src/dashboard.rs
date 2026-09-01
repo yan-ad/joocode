@@ -652,6 +652,8 @@ fn display_source(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::{Terminal, backend::TestBackend};
+
     use super::*;
 
     #[test]
@@ -775,5 +777,34 @@ mod tests {
             detect_easter_egg(&mut screen, &mut input, KeyCode::Char(character));
         }
         assert!(matches!(screen, Screen::Dashboard));
+    }
+
+    #[test]
+    fn easter_egg_replaces_the_entire_dashboard() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = DashboardData {
+            config_sources: vec!["OpenCode".into(), "Joocode".into()],
+            ide_targets: vec!["Codex".into(), "Zed".into()],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 30,
+            provider_count: 5,
+            autostart: AutoStartStatus::Off,
+        };
+
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::EasterEgg { tick: 4 }))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("JOOCODE SECRET MODE"));
+        assert!(!rendered.contains("Listening:"));
+        assert!(!rendered.contains("Config:"));
     }
 }
