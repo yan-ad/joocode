@@ -108,16 +108,18 @@ fn application_exists(names: &[&str]) -> bool {
         .any(|root| names.iter().any(|name| root.join(name).exists()))
 }
 
+#[cfg(target_os = "macos")]
 fn application_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    #[cfg(target_os = "macos")]
-    {
-        roots.push(PathBuf::from("/Applications"));
-        if let Some(home) = dirs::home_dir() {
-            roots.push(home.join("Applications"));
-        }
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join("Applications"));
     }
     roots
+}
+
+#[cfg(not(target_os = "macos"))]
+fn application_roots() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 fn jetbrains_installed() -> bool {
