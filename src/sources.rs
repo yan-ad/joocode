@@ -43,10 +43,10 @@ fn load_opencodex_runtime_port(root: &Path) -> anyhow::Result<Option<OpenCodexRu
     if !path.is_file() {
         return Ok(None);
     }
-    let text = fs::read_to_string(&path)
-        .with_context(|| format!("failed reading {}", path.display()))?;
-    let parsed: OpenCodexRuntimePort = json5::from_str(&text)
-        .with_context(|| format!("invalid JSON in {}", path.display()))?;
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed reading {}", path.display()))?;
+    let parsed: OpenCodexRuntimePort =
+        json5::from_str(&text).with_context(|| format!("invalid JSON in {}", path.display()))?;
     Ok((parsed.port > 0).then_some(parsed))
 }
 
@@ -133,7 +133,10 @@ fn discover_opencodex_at(root: &Path) -> anyhow::Result<DiscoveredCatalog> {
     }
 
     let runtime = load_opencodex_runtime_port(root)?;
-    let runtime_port = runtime.as_ref().map(|runtime| runtime.port).unwrap_or(config.port);
+    let runtime_port = runtime
+        .as_ref()
+        .map(|runtime| runtime.port)
+        .unwrap_or(config.port);
     let runtime_host = runtime
         .as_ref()
         .and_then(|runtime| runtime.hostname.as_deref())
