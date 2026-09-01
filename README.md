@@ -27,7 +27,7 @@ joocode
 
 ◉ Models: 30    ◇ Providers: 5
 
-Esc to exit  ·  Tab to add new key
+Esc to exit  ·  Tab to add new key  ·  Ctrl+A Auto-start (Off)
 ```
 
 Joocode takes the universal local-proxy idea behind projects such as OCX and
@@ -48,6 +48,10 @@ into Codex, Zed, or JetBrains. Start Joocode and keep using the native client UI
   runtime and no browser dashboard required.
 - **Live catalog reload** — press `Tab`, enter a base URL and API key, fetch
   `/models`, and use the new models without restarting Joocode.
+- **Login auto-start** — press `Ctrl+A` to toggle a native macOS LaunchAgent,
+  Linux systemd user service, or Windows Startup entry. Startup runs headlessly.
+- **Desktop app launcher** — release installers include the Joocode palm/crab
+  icon and install a platform launcher while retaining the `joocode` CLI.
 - **Protocol bridge** — Responses API and Chat Completions, JSON and SSE,
   images, tool calls, streamed arguments, and function results.
 - **Credential-safe** — upstream credentials stay in their original source;

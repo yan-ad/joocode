@@ -54,6 +54,18 @@ try {
 
   New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
   Copy-Item -Force -Path $source -Destination (Join-Path $InstallDir "joocode.exe")
+  $iconSource = Join-Path $extract "joocode-$target\joocode.ico"
+  if (Test-Path -LiteralPath $iconSource) {
+    Copy-Item -Force -Path $iconSource -Destination (Join-Path $InstallDir "joocode.ico")
+    $programs = [Environment]::GetFolderPath("Programs")
+    $shortcutPath = Join-Path $programs "Joocode.lnk"
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath = Join-Path $InstallDir "joocode.exe"
+    $shortcut.IconLocation = Join-Path $InstallDir "joocode.ico"
+    $shortcut.WorkingDirectory = $InstallDir
+    $shortcut.Save()
+  }
   Write-Host "`nJoocode $Version installed to $InstallDir\joocode.exe"
 
   $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -62,7 +74,7 @@ try {
     [Environment]::SetEnvironmentVariable("Path", "$InstallDir;$userPath", "User")
     Write-Host "Added $InstallDir to your user PATH. Open a new PowerShell window."
   }
-  Write-Host "`nNext steps:`n  joocode doctor`n  joocode codex-install`n  joocode zed"
+  Write-Host "`nNext steps:`n  joocode doctor`n  joocode codex-install`n  joocode"
 } finally {
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmp
 }

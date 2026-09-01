@@ -100,6 +100,15 @@ jobs:
           mkdir "$staging"
           cp "target/${{ matrix.target }}/release/joocode" "$staging/"
           cp README.md LICENSE install.bash install.sh "$staging/"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            mkdir -p "$staging/Joocode.app/Contents/MacOS" "$staging/Joocode.app/Contents/Resources"
+            cp assets/macos-launcher.sh "$staging/Joocode.app/Contents/MacOS/joocode"
+            chmod 755 "$staging/Joocode.app/Contents/MacOS/joocode"
+            cp assets/joocode.icns "$staging/Joocode.app/Contents/Resources/joocode.icns"
+            sed "s#__JOOCODE_VERSION__#${RELEASE_TAG#v}#" assets/Info.plist > "$staging/Joocode.app/Contents/Info.plist"
+          else
+            cp assets/joocode-icon.png assets/joocode.desktop "$staging/"
+          fi
           tar -czf "$asset" "$staging"
 
       - name: Package Windows binary
@@ -110,7 +119,7 @@ jobs:
           $staging = "joocode-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $staging
           Copy-Item "target/${{ matrix.target }}/release/joocode.exe" $staging
-          Copy-Item README.md, LICENSE, install.ps1 $staging
+          Copy-Item README.md, LICENSE, install.ps1, assets/joocode.ico $staging
           Compress-Archive -Path $staging -DestinationPath $asset
 
       - name: Upload packaged binary

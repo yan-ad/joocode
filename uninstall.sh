@@ -8,7 +8,7 @@ usage() {
   cat <<'EOF'
 Usage: uninstall.sh [--yes]
 
-Removes the standalone Joocode binary from ~/.local/bin by default.
+Removes the standalone Joocode binary, app launcher, icon, and auto-start entry.
 
 Environment:
   JOOCODE_INSTALL_DIR  Directory containing the joocode binary.
@@ -54,4 +54,26 @@ fi
 
 rm -f "$BINARY"
 printf 'Removed %s\n' "$BINARY"
+
+case "$(uname -s)" in
+  Darwin)
+    rm -f "$HOME/Library/LaunchAgents/dev.joocode.proxy.plist"
+    rm -rf "${JOOCODE_APP_DIR:-$HOME/Applications}/Joocode.app"
+    ;;
+  Linux)
+    unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/dev.joocode.proxy.service"
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl --user disable dev.joocode.proxy.service >/dev/null 2>&1 || true
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
+    rm -f "$unit"
+    rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/joocode.desktop"
+    rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps/joocode.png"
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    rm -f "${APPDATA:-}/Microsoft/Windows/Start Menu/Programs/Startup/Joocode.cmd"
+    rm -f "$INSTALL_DIR/joocode.ico"
+    ;;
+esac
+
 printf 'OpenCode, Codex, and Zed configuration was preserved.\n'

@@ -15,7 +15,11 @@ use ratatui::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{desktop::DesktopTargets, provider::Registry};
+use crate::{
+    autostart::{self, Status as AutoStartStatus},
+    desktop::DesktopTargets,
+    provider::Registry,
+};
 
 #[derive(Clone, Debug)]
 pub struct DashboardData {
@@ -24,6 +28,7 @@ pub struct DashboardData {
     pub listening: String,
     pub model_count: usize,
     pub provider_count: usize,
+    pub autostart: AutoStartStatus,
 }
 
 fn draw_easter_egg(frame: &mut Frame<'_>) {
@@ -111,6 +116,7 @@ impl DashboardData {
             listening: format!("http://{address}"),
             model_count: registry.models().len(),
             provider_count: registry.provider_count(),
+            autostart: autostart::status(),
         }
     }
 }
@@ -118,6 +124,7 @@ impl DashboardData {
 #[derive(Debug)]
 pub enum DashboardCommand {
     AddProvider { base_url: String, api_key: String },
+    ToggleAutoStart,
 }
 
 #[derive(Debug)]
@@ -130,6 +137,7 @@ pub enum DashboardEvent {
         provider_count: usize,
     },
     ProviderError(String),
+    AutoStartUpdated(AutoStartStatus),
 }
 
 #[derive(Default)]
@@ -199,6 +207,13 @@ pub fn run(
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 return Ok(());
             }
+            if key.code == KeyCode::Char('a')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(screen, Screen::Dashboard)
+            {
+                let _ = command_tx.send(DashboardCommand::ToggleAutoStart);
+                continue;
+            }
             if detect_easter_egg(&mut screen, &mut secret_input, key.code) {
                 continue;
             }
@@ -228,6 +243,7 @@ fn receive_events(
                 *screen = Screen::Models { provider, models };
             }
             Ok(DashboardEvent::ProviderError(error)) => *screen = Screen::Error(error),
+            Ok(DashboardEvent::AutoStartUpdated(status)) => data.autostart = status,
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
         }
     }
@@ -345,6 +361,14 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" to add new key"),
+            Span::raw("  ·  "),
+            Span::styled(
+                "Ctrl+A",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(" Auto-start ({})", data.autostart.label())),
         ],
         Screen::BaseUrl(_) | Screen::ApiKey { .. } => vec![
             Span::styled("Enter", Style::default().fg(Color::Green)),
@@ -475,6 +499,36 @@ mod tests {
     }
 
     #[test]
+    fn autostart_event_refreshes_dashboard_status() {
+        let mut data = DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 0,
+            provider_count: 0,
+            autostart: AutoStartStatus::Off,
+        };
+        let mut screen = Screen::Dashboard;
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(DashboardEvent::AutoStartUpdated(AutoStartStatus::On))
+            .unwrap();
+
+        receive_events(&mut data, &mut screen, &rx);
+
+        assert_eq!(data.autostart, AutoStartStatus::On);
+    }
+
+    #[test]
+    fn toggle_command_is_available_to_the_dashboard_worker() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(DashboardCommand::ToggleAutoStart).unwrap();
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DashboardCommand::ToggleAutoStart)
+        ));
+    }
+
+    #[test]
     fn paste_populates_wizard_fields_without_newlines() {
         let mut screen = Screen::BaseUrl(String::new());
         handle_paste(&mut screen, "https://example.test/v1\n");
@@ -489,6 +543,7 @@ mod tests {
             listening: "http://127.0.0.1:10100".into(),
             model_count: 30,
             provider_count: 5,
+            autostart: AutoStartStatus::Off,
         };
         let mut screen = Screen::Dashboard;
         let (tx, rx) = std::sync::mpsc::channel();

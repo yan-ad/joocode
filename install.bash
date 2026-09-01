@@ -66,11 +66,13 @@ case "$archive" in
     command -v tar >/dev/null 2>&1 || fail "tar is required"
     tar -xzf "$tmp_dir/$asset" -C "$tmp_dir"
     source="$tmp_dir/joocode-${target}/$binary"
+    source_root="$tmp_dir/joocode-${target}"
     ;;
   zip)
     command -v unzip >/dev/null 2>&1 || fail "unzip is required (use install.ps1 from PowerShell if unavailable)"
     unzip -q "$tmp_dir/$asset" -d "$tmp_dir/extracted"
     source="$tmp_dir/extracted/joocode-${target}/$binary"
+    source_root="$tmp_dir/extracted/joocode-${target}"
     ;;
 esac
 
@@ -78,6 +80,27 @@ esac
 mkdir -p "$INSTALL_DIR"
 cp "$source" "$INSTALL_DIR/$binary"
 [ "$archive" = "zip" ] || chmod 755 "$INSTALL_DIR/$binary"
+
+case "$(uname -s)" in
+  Darwin)
+    if [ -d "$source_root/Joocode.app" ]; then
+      app_dir="${JOOCODE_APP_DIR:-$HOME/Applications}/Joocode.app"
+      mkdir -p "$(dirname "$app_dir")"
+      rm -rf "$app_dir"
+      cp -R "$source_root/Joocode.app" "$app_dir"
+      printf 'Joocode app installed to %s\n' "$app_dir"
+    fi
+    ;;
+  Linux)
+    if [ -f "$source_root/joocode-icon.png" ]; then
+      icon_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps"
+      desktop_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+      mkdir -p "$icon_dir" "$desktop_dir"
+      cp "$source_root/joocode-icon.png" "$icon_dir/joocode.png"
+      sed "s#^Exec=.*#Exec=$INSTALL_DIR/joocode#" "$source_root/joocode.desktop" > "$desktop_dir/joocode.desktop"
+    fi
+    ;;
+esac
 
 printf '\nJoocode %s installed to %s/%s\n' "$VERSION" "$INSTALL_DIR" "$binary"
 case ":$PATH:" in
@@ -87,4 +110,4 @@ esac
 printf '\nNext steps:\n'
 printf '  joocode doctor\n'
 printf '  joocode codex-install\n'
-printf '  joocode zed\n'
+printf '  joocode\n'

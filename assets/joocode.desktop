@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Joocode
+Comment=Native multi-provider desktop AI proxy
+Exec=joocode
+Icon=joocode
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=false

@@ -21,6 +21,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
 use crate::{
+    autostart,
     dashboard::{self, DashboardData},
     desktop::{self, DesktopTargets},
     error::ApiError,
@@ -171,35 +172,51 @@ pub async fn serve_dashboard(
     let reload_targets = targets.clone();
     let reload_base_url = base_url.clone();
     tokio::spawn(async move {
-        while let Some(dashboard::DashboardCommand::AddProvider { base_url, api_key }) =
-            command_rx.recv().await
-        {
-            let result = async {
-                let client = reload_store.snapshot().client().clone();
-                let provider = local_config::probe(&client, &base_url, &api_key).await?;
-                local_config::save(provider.clone())?;
-                let registry = Registry::discover(&selection).await?;
-                reload_store.replace(registry.clone());
-                let setup_registry = registry.clone();
-                let setup_targets = reload_targets.clone();
-                let setup_base_url = reload_base_url.clone();
-                std::thread::spawn(move || {
-                    desktop::configure_detected(&setup_registry, &setup_base_url, &setup_targets);
-                });
-                Ok::<_, anyhow::Error>((provider, registry))
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                dashboard::DashboardCommand::AddProvider { base_url, api_key } => {
+                    let result = async {
+                        let client = reload_store.snapshot().client().clone();
+                        let provider = local_config::probe(&client, &base_url, &api_key).await?;
+                        local_config::save(provider.clone())?;
+                        let registry = Registry::discover(&selection).await?;
+                        reload_store.replace(registry.clone());
+                        let setup_registry = registry.clone();
+                        let setup_targets = reload_targets.clone();
+                        let setup_base_url = reload_base_url.clone();
+                        std::thread::spawn(move || {
+                            desktop::configure_detected(
+                                &setup_registry,
+                                &setup_base_url,
+                                &setup_targets,
+                            );
+                        });
+                        Ok::<_, anyhow::Error>((provider, registry))
+                    }
+                    .await;
+                    let event = match result {
+                        Ok((provider, registry)) => dashboard::DashboardEvent::ProviderAdded {
+                            provider: provider.name,
+                            models: provider.models,
+                            config_sources: dashboard::config_sources(&registry),
+                            model_count: registry.models().len(),
+                            provider_count: registry.provider_count(),
+                        },
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::ToggleAutoStart => {
+                    let event = match tokio::task::spawn_blocking(autostart::toggle).await {
+                        Ok(Ok(status)) => dashboard::DashboardEvent::AutoStartUpdated(status),
+                        Ok(Err(error)) => {
+                            dashboard::DashboardEvent::ProviderError(error.to_string())
+                        }
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
             }
-            .await;
-            let event = match result {
-                Ok((provider, registry)) => dashboard::DashboardEvent::ProviderAdded {
-                    provider: provider.name,
-                    models: provider.models,
-                    config_sources: dashboard::config_sources(&registry),
-                    model_count: registry.models().len(),
-                    provider_count: registry.provider_count(),
-                },
-                Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
-            };
-            let _ = event_tx.send(event);
         }
     });
 
