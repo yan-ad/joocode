@@ -506,14 +506,7 @@ fn copilot_raw_token() -> Option<String> {
         ("copilot-cli", None),
         ("copilot-language-server", Some("oauth-token-key")),
     ] {
-        let mut command = Command::new("security");
-        command.args(["find-generic-password", "-s", service]);
-        if let Some(account) = account {
-            command.args(["-a", account]);
-        }
-        if let Ok(output) = command.arg("-w").output()
-            && output.status.success()
-            && let Ok(token) = String::from_utf8(output.stdout)
+        if let Some(token) = crate::macos_keychain::find_generic_password(service, account)
             && copilot_token_is_supported(token.trim())
         {
             return Some(token.trim().to_owned());

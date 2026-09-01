@@ -7,6 +7,8 @@ mod dashboard;
 mod desktop;
 mod error;
 mod local_config;
+#[cfg(target_os = "macos")]
+mod macos_keychain;
 mod protocol;
 mod provider;
 mod sources;

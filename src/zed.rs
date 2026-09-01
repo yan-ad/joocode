@@ -1,8 +1,5 @@
 use std::{env, fs, path::PathBuf};
 
-#[cfg(target_os = "macos")]
-use std::process::Command;
-
 use anyhow::Context;
 use serde_json::{Map, Value, json};
 
@@ -20,40 +17,10 @@ fn settings_path() -> anyhow::Result<PathBuf> {
 fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let security = if PathBuf::from("/usr/bin/security").is_file() {
-            "/usr/bin/security"
-        } else {
-            "security"
-        };
-        let existing = Command::new(security)
-            .args(["find-internet-password", "-a", PROVIDER_ID, "-s", base_url])
-            .output()
-            .context("failed to inspect Joocode's local Zed API key")?;
-        if existing.status.success() {
-            return Ok(());
-        }
-
         // Zed stores compatible-provider keys as Internet Password records using
-        // the configured API URL as the server field. `security` is the macOS
-        // supported command-line interface to that keychain record type.
-        let output = Command::new(security)
-            .args([
-                "add-internet-password",
-                "-a",
-                PROVIDER_ID,
-                "-s",
-                base_url,
-                "-w",
-                LOCAL_API_KEY,
-                "-U",
-            ])
-            .output()
-            .context("failed to store Joocode's local Zed API key in the macOS keychain")?;
-        anyhow::ensure!(
-            output.status.success(),
-            "failed to store Joocode's local Zed API key: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        // the configured API URL as the server field. A missing item is normal:
+        // the helper creates it in the user's available login/default keychain.
+        crate::macos_keychain::ensure_internet_password(PROVIDER_ID, base_url, LOCAL_API_KEY)?;
     }
 
     #[cfg(not(target_os = "macos"))]
