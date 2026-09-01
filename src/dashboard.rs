@@ -8,7 +8,7 @@ use std::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
@@ -87,36 +87,120 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
     );
 }
 
-fn draw_easter_egg(frame: &mut Frame<'_>) {
-    let [_, vertical, _] = Layout::vertical([
-        Constraint::Percentage(35),
-        Constraint::Length(7),
-        Constraint::Min(0),
-    ])
-    .areas(frame.area());
-    let [_, popup, _] = Layout::horizontal([
-        Constraint::Percentage(18),
-        Constraint::Percentage(64),
-        Constraint::Percentage(18),
-    ])
-    .areas(vertical);
+fn draw_easter_egg(frame: &mut Frame<'_>, tick: usize) {
+    let area = frame.area();
+    frame.render_widget(Clear, area);
 
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(EASTER_EGG_MESSAGE)
-            .style(Style::default().fg(Color::Yellow))
-            .block(
-                Block::default()
-                    .title(" 🌴 Secret unlocked ")
-                    .title_style(
+    let palette = [
+        Color::Rgb(255, 72, 120),
+        Color::Rgb(255, 145, 64),
+        Color::Rgb(255, 221, 74),
+        Color::Rgb(73, 211, 137),
+        Color::Rgb(73, 174, 255),
+        Color::Rgb(145, 105, 255),
+    ];
+    let rain = ['│', '╎', '✦', '·'];
+    let background = (0..area.height)
+        .map(|row| {
+            let spans = (0..area.width)
+                .map(|column| {
+                    let color_index =
+                        (usize::from(column) / 5 + usize::from(row) / 2 + tick / 2) % palette.len();
+                    let seed =
+                        usize::from(column) * 17 + usize::from(row) * 31 + tick.saturating_mul(7);
+                    let character = if seed.is_multiple_of(47) {
+                        rain[(seed / 47) % rain.len()]
+                    } else {
+                        ' '
+                    };
+                    Span::styled(
+                        character.to_string(),
+                        Style::default().fg(Color::White).bg(palette[color_index]),
+                    )
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(background), area);
+
+    let sprite_width = 27_u16.min(area.width);
+    let travel = usize::from(area.width.saturating_add(sprite_width));
+    let sprite_offset = if travel == 0 { 0 } else { tick % travel };
+    let sprite_x = i32::try_from(sprite_offset).unwrap_or_default() - i32::from(sprite_width);
+    if sprite_x < i32::from(area.width) {
+        let clipped_x = sprite_x.max(0) as u16;
+        let clipped_width = sprite_width
+            .saturating_sub(sprite_x.unsigned_abs() as u16 * u16::from(sprite_x < 0))
+            .min(area.width.saturating_sub(clipped_x));
+        if clipped_width > 0 && area.height >= 8 {
+            let sprite = Rect::new(
+                area.x + clipped_x,
+                area.y + area.height.saturating_sub(8) / 2,
+                clipped_width,
+                7,
+            );
+            let art = vec![
+                Line::from("          \\ | /"),
+                Line::from("       ---\\|/---"),
+                Line::from("  ≋≋≋≋  .-^^^^^-.   "),
+                Line::from(" ≋≋≋≋  /  o   o  \\  "),
+                Line::from("≋≋≋≋  (     ^     )  "),
+                Line::from(" ≋≋≋≋  \\  '---'  /  "),
+                Line::from("  ≋≋≋≋  '-.___.-'   "),
+            ];
+            frame.render_widget(
+                Paragraph::new(art)
+                    .style(
                         Style::default()
-                            .fg(Color::Green)
+                            .fg(Color::White)
                             .add_modifier(Modifier::BOLD),
                     )
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: true }),
-        popup,
+                    .alignment(Alignment::Left),
+                sprite,
+            );
+        }
+    }
+
+    let message_width = area.width.saturating_sub(4).min(72);
+    let message_height = 9_u16.min(area.height.saturating_sub(2));
+    let message_area = Rect::new(
+        area.x + area.width.saturating_sub(message_width) / 2,
+        area.y + area.height.saturating_sub(message_height) / 2,
+        message_width,
+        message_height,
+    );
+    frame.render_widget(Clear, message_area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                EASTER_EGG_MESSAGE,
+                Style::default()
+                    .fg(palette[tick % palette.len()])
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "🌴  rain, rainbow, repeat  🦀",
+                Style::default().fg(Color::LightCyan),
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .title(" ✦ JOOCODE SECRET MODE ✦ ")
+                .title_alignment(Alignment::Center)
+                .title_style(
+                    Style::default()
+                        .fg(Color::LightMagenta)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .style(Style::default().bg(Color::Rgb(15, 18, 28)))
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: true }),
+        message_area,
     );
 }
 
@@ -148,7 +232,7 @@ fn detect_easter_egg(screen: &mut Screen, input: &mut String, key: KeyCode) -> b
         .any(|trigger| input.ends_with(trigger))
     {
         input.clear();
-        *screen = Screen::EasterEgg;
+        *screen = Screen::EasterEgg { tick: 0 };
         return true;
     }
 
@@ -214,7 +298,9 @@ enum Screen {
         models: Vec<String>,
     },
     Error(String),
-    EasterEgg,
+    EasterEgg {
+        tick: usize,
+    },
 }
 
 const EASTER_EGG_TRIGGERS: [&str; 3] = ["jokowi", "sawit", "prabowo"];
@@ -243,8 +329,16 @@ pub fn run(
     ratatui::run(|terminal| {
         loop {
             receive_events(&mut data, &mut screen, &event_rx);
+            if let Screen::EasterEgg { tick } = &mut screen {
+                *tick = tick.wrapping_add(1);
+            }
             terminal.draw(|frame| draw(frame, &data, &screen))?;
-            if !event::poll(Duration::from_millis(100))? {
+            let poll_interval = if matches!(screen, Screen::EasterEgg { .. }) {
+                Duration::from_millis(80)
+            } else {
+                Duration::from_millis(100)
+            };
+            if !event::poll(poll_interval)? {
                 continue;
             }
             let input = event::read()?;
@@ -348,7 +442,9 @@ fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<Da
             KeyCode::Char(character) => api_key.push(character),
             _ => {}
         },
-        Screen::Models { .. } | Screen::Error(_) | Screen::EasterEgg if key == KeyCode::Enter => {
+        Screen::Models { .. } | Screen::Error(_) | Screen::EasterEgg { .. }
+            if key == KeyCode::Enter =>
+        {
             *screen = Screen::Dashboard;
         }
         _ => {}
@@ -356,6 +452,11 @@ fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<Da
 }
 
 fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
+    if let Screen::EasterEgg { tick } = screen {
+        draw_easter_egg(frame, *tick);
+        return;
+    }
+
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(7),
@@ -388,10 +489,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             Paragraph::new("Step 3/3 — Loading /models…").wrap(Wrap { trim: true }),
             body,
         ),
-        Screen::EasterEgg => {
-            draw_dashboard(frame, body, data);
-            draw_easter_egg(frame);
-        }
+        Screen::EasterEgg { .. } => unreachable!("easter egg is rendered as a full-screen scene"),
         Screen::Models { provider, models } => {
             let items = models
                 .iter()
@@ -449,10 +547,11 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             Span::raw(" to continue  ·  Esc to cancel"),
         ],
         Screen::Loading => vec![Span::raw("Fetching models…  ·  Esc to cancel")],
-        Screen::Models { .. } | Screen::Error(_) | Screen::EasterEgg => vec![
+        Screen::Models { .. } | Screen::Error(_) => vec![
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::raw(" to return  ·  Esc to cancel"),
         ],
+        Screen::EasterEgg { .. } => unreachable!("easter egg has its own full-screen controls"),
     };
     frame.render_widget(
         Paragraph::new(Line::from(help)).block(Block::default().borders(Borders::TOP)),
@@ -664,7 +763,7 @@ mod tests {
             for character in trigger.chars() {
                 detect_easter_egg(&mut screen, &mut input, KeyCode::Char(character));
             }
-            assert!(matches!(screen, Screen::EasterEgg));
+            assert!(matches!(screen, Screen::EasterEgg { tick: 0 }));
         }
     }
 
