@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -24,6 +24,74 @@ pub struct DashboardData {
     pub listening: String,
     pub model_count: usize,
     pub provider_count: usize,
+}
+
+fn draw_easter_egg(frame: &mut Frame<'_>) {
+    let [_, vertical, _] = Layout::vertical([
+        Constraint::Percentage(35),
+        Constraint::Length(7),
+        Constraint::Min(0),
+    ])
+    .areas(frame.area());
+    let [_, popup, _] = Layout::horizontal([
+        Constraint::Percentage(18),
+        Constraint::Percentage(64),
+        Constraint::Percentage(18),
+    ])
+    .areas(vertical);
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(EASTER_EGG_MESSAGE)
+            .style(Style::default().fg(Color::Yellow))
+            .block(
+                Block::default()
+                    .title(" 🌴 Secret unlocked ")
+                    .title_style(
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+fn detect_easter_egg(screen: &mut Screen, input: &mut String, key: KeyCode) -> bool {
+    if !matches!(screen, Screen::Dashboard) {
+        input.clear();
+        return false;
+    }
+
+    let KeyCode::Char(character) = key else {
+        if key != KeyCode::Backspace {
+            input.clear();
+        }
+        return false;
+    };
+    if !character.is_ascii_alphabetic() {
+        input.clear();
+        return false;
+    }
+
+    input.push(character.to_ascii_lowercase());
+    const MAX_TRIGGER_LENGTH: usize = 7;
+    if input.len() > MAX_TRIGGER_LENGTH {
+        input.drain(..input.len() - MAX_TRIGGER_LENGTH);
+    }
+
+    if EASTER_EGG_TRIGGERS
+        .iter()
+        .any(|trigger| input.ends_with(trigger))
+    {
+        input.clear();
+        *screen = Screen::EasterEgg;
+        return true;
+    }
+
+    false
 }
 
 fn handle_paste(screen: &mut Screen, value: &str) {
@@ -79,7 +147,11 @@ enum Screen {
         models: Vec<String>,
     },
     Error(String),
+    EasterEgg,
 }
+
+const EASTER_EGG_TRIGGERS: [&str; 3] = ["jokowi", "sawit", "prabowo"];
+const EASTER_EGG_MESSAGE: &str = "You really love the regime, huh? Hahaha. Keep planting palm oil!";
 
 pub fn config_sources(registry: &Registry) -> Vec<String> {
     registry
@@ -100,6 +172,7 @@ pub fn run(
     event_rx: Receiver<DashboardEvent>,
 ) -> anyhow::Result<()> {
     let mut screen = Screen::Dashboard;
+    let mut secret_input = String::new();
     ratatui::run(|terminal| {
         loop {
             receive_events(&mut data, &mut screen, &event_rx);
@@ -125,6 +198,9 @@ pub fn run(
             }
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 return Ok(());
+            }
+            if detect_easter_egg(&mut screen, &mut secret_input, key.code) {
+                continue;
             }
             handle_key(&mut screen, key.code, &command_tx);
         }
@@ -191,7 +267,7 @@ fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<Da
             KeyCode::Char(character) => api_key.push(character),
             _ => {}
         },
-        Screen::Models { .. } | Screen::Error(_) if key == KeyCode::Enter => {
+        Screen::Models { .. } | Screen::Error(_) | Screen::EasterEgg if key == KeyCode::Enter => {
             *screen = Screen::Dashboard;
         }
         _ => {}
@@ -227,6 +303,10 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             Paragraph::new("Step 3/3 — Loading /models…").wrap(Wrap { trim: true }),
             body,
         ),
+        Screen::EasterEgg => {
+            draw_dashboard(frame, body, data);
+            draw_easter_egg(frame);
+        }
         Screen::Models { provider, models } => {
             let items = models
                 .iter()
@@ -271,7 +351,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             Span::raw(" to continue  ·  Esc to cancel"),
         ],
         Screen::Loading => vec![Span::raw("Fetching models…  ·  Esc to cancel")],
-        Screen::Models { .. } | Screen::Error(_) => vec![
+        Screen::Models { .. } | Screen::Error(_) | Screen::EasterEgg => vec![
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::raw(" to return  ·  Esc to cancel"),
         ],
@@ -426,5 +506,27 @@ mod tests {
         assert_eq!(data.model_count, 31);
         assert_eq!(data.provider_count, 6);
         assert_eq!(data.config_sources, vec!["OpenCode", "Joocode"]);
+    }
+
+    #[test]
+    fn hidden_words_open_easter_egg_modal() {
+        for trigger in EASTER_EGG_TRIGGERS {
+            let mut screen = Screen::Dashboard;
+            let mut input = String::new();
+            for character in trigger.chars() {
+                detect_easter_egg(&mut screen, &mut input, KeyCode::Char(character));
+            }
+            assert!(matches!(screen, Screen::EasterEgg));
+        }
+    }
+
+    #[test]
+    fn unrelated_input_does_not_open_easter_egg_modal() {
+        let mut screen = Screen::Dashboard;
+        let mut input = String::new();
+        for character in "joocode".chars() {
+            detect_easter_egg(&mut screen, &mut input, KeyCode::Char(character));
+        }
+        assert!(matches!(screen, Screen::Dashboard));
     }
 }
