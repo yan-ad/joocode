@@ -22,6 +22,17 @@ pub struct DashboardData {
     pub config_sources: Vec<String>,
     pub ide_targets: Vec<String>,
     pub listening: String,
+    pub model_count: usize,
+    pub provider_count: usize,
+}
+
+fn handle_paste(screen: &mut Screen, value: &str) {
+    let value = value.replace(['\r', '\n'], "");
+    match screen {
+        Screen::BaseUrl(base_url) => base_url.push_str(&value),
+        Screen::ApiKey { api_key, .. } => api_key.push_str(&value),
+        _ => {}
+    }
 }
 
 impl DashboardData {
@@ -30,6 +41,8 @@ impl DashboardData {
             config_sources: config_sources(registry),
             ide_targets: targets.names().into_iter().map(str::to_owned).collect(),
             listening: format!("http://{address}"),
+            model_count: registry.models().len(),
+            provider_count: registry.provider_count(),
         }
     }
 }
@@ -45,6 +58,8 @@ pub enum DashboardEvent {
         provider: String,
         models: Vec<String>,
         config_sources: Vec<String>,
+        model_count: usize,
+        provider_count: usize,
     },
     ProviderError(String),
 }
@@ -92,9 +107,12 @@ pub fn run(
             if !event::poll(Duration::from_millis(100))? {
                 continue;
             }
-            let Event::Key(key) = event::read()? else {
+            let input = event::read()?;
+            if let Event::Paste(value) = input {
+                handle_paste(&mut screen, &value);
                 continue;
-            };
+            }
+            let Event::Key(key) = input else { continue };
             if key.kind != KeyEventKind::Press {
                 continue;
             }
@@ -125,8 +143,12 @@ fn receive_events(
                 provider,
                 models,
                 config_sources,
+                model_count,
+                provider_count,
             }) => {
                 data.config_sources = config_sources;
+                data.model_count = model_count;
+                data.provider_count = provider_count;
                 *screen = Screen::Models { provider, models };
             }
             Ok(DashboardEvent::ProviderError(error)) => *screen = Screen::Error(error),
@@ -186,7 +208,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "Joocode",
+            "◈ Joocode",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -273,10 +295,12 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
     };
     let lines = vec![
         Line::from(vec![
+            Span::styled("◆ ", Style::default().fg(Color::Cyan)),
             Span::styled("Config: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(sources),
         ]),
         Line::from(vec![
+            Span::styled("⌘ ", Style::default().fg(Color::Magenta)),
             Span::styled(
                 "IDE Target: ",
                 Style::default().add_modifier(Modifier::BOLD),
@@ -284,8 +308,29 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
             Span::raw(targets),
         ]),
         Line::from(vec![
+            Span::styled("● ", Style::default().fg(Color::Green)),
             Span::styled("Listening: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(&data.listening),
+            Span::styled(&data.listening, Style::default().fg(Color::Green)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("◉ ", Style::default().fg(Color::Yellow)),
+            Span::styled("Models: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                data.model_count.to_string(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("    "),
+            Span::styled("◇ ", Style::default().fg(Color::Blue)),
+            Span::styled("Providers: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                data.provider_count.to_string(),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
@@ -347,5 +392,39 @@ mod tests {
         let mut screen = Screen::Dashboard;
         handle_key(&mut screen, KeyCode::Tab, &tx);
         assert!(matches!(screen, Screen::BaseUrl(_)));
+    }
+
+    #[test]
+    fn paste_populates_wizard_fields_without_newlines() {
+        let mut screen = Screen::BaseUrl(String::new());
+        handle_paste(&mut screen, "https://example.test/v1\n");
+        assert!(matches!(screen, Screen::BaseUrl(value) if value == "https://example.test/v1"));
+    }
+
+    #[test]
+    fn provider_event_refreshes_dashboard_totals() {
+        let mut data = DashboardData {
+            config_sources: vec!["OpenCode".into()],
+            ide_targets: vec!["Zed".into()],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 30,
+            provider_count: 5,
+        };
+        let mut screen = Screen::Dashboard;
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(DashboardEvent::ProviderAdded {
+            provider: "local".into(),
+            models: vec!["model-a".into()],
+            config_sources: vec!["OpenCode".into(), "Joocode".into()],
+            model_count: 31,
+            provider_count: 6,
+        })
+        .unwrap();
+
+        receive_events(&mut data, &mut screen, &rx);
+
+        assert_eq!(data.model_count, 31);
+        assert_eq!(data.provider_count, 6);
+        assert_eq!(data.config_sources, vec!["OpenCode", "Joocode"]);
     }
 }

@@ -63,12 +63,12 @@ async fn main() -> anyhow::Result<()> {
 
     let Some(command) = cli.command else {
         return app::serve_dashboard(
-            "127.0.0.1".parse()?,
-            10100,
+            cli.host,
+            cli.port,
             registry,
             selection,
             DesktopTargets::detect(),
-            "http://127.0.0.1:10100/v1".to_owned(),
+            cli.base_url,
         )
         .await;
     };

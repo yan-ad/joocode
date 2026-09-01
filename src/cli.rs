@@ -33,16 +33,16 @@ pub struct Cli {
     #[arg(long)]
     pub all: bool,
 
-    /// URL where desktop applications can reach the local API when using --all.
-    #[arg(long, default_value = "http://127.0.0.1:10100/v1", requires = "all")]
+    /// URL where desktop applications can reach the local API.
+    #[arg(long, default_value = "http://127.0.0.1:10100/v1")]
     pub base_url: String,
 
-    /// Interface to bind the shared proxy to when using --all.
-    #[arg(long, default_value = "127.0.0.1", requires = "all")]
+    /// Interface to bind the shared proxy to.
+    #[arg(long, default_value = "127.0.0.1")]
     pub host: IpAddr,
 
-    /// Port for the shared proxy when using --all.
-    #[arg(long, default_value_t = 10100, requires = "all")]
+    /// Port for the shared proxy.
+    #[arg(long, default_value_t = 10100)]
     pub port: u16,
 
     #[command(subcommand)]

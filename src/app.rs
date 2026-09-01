@@ -194,6 +194,8 @@ pub async fn serve_dashboard(
                     provider: provider.name,
                     models: provider.models,
                     config_sources: dashboard::config_sources(&registry),
+                    model_count: registry.models().len(),
+                    provider_count: registry.provider_count(),
                 },
                 Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
             };
