@@ -18,7 +18,7 @@ pub fn setup_instructions(registry: &Registry, base_url: &str) -> String {
          3. Set Base URL to: {base_url}\n\
          4. Set API key to any non-empty local value (for example: joocode).\n\
          5. Select a discovered model, for example: {model}\n\
-         Joocode exposes {} OpenCode model(s) at GET {base_url}/models.",
+          Joocode exposes {} discovered model(s) at GET {base_url}/models.",
         registry.models().len()
     )
 }

@@ -49,20 +49,20 @@ async fn chat_completions(
         .resolve(&requested_model)
         .map_err(|e| ApiError::not_found(e.to_string()))?;
     request["model"] = Value::String(upstream_model);
-    let mut upstream_headers = provider.headers.clone();
-    if let Some(value) = provider.credential.as_deref() {
-        let value = format!("Bearer {value}")
-            .parse()
-            .map_err(|_| ApiError::internal("invalid provider credential"))?;
-        upstream_headers.insert("authorization", value);
-    }
+    let (base_url, mut upstream_headers) = provider
+        .request_parts(state.registry.client())
+        .await
+        .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
     if let Some(value) = headers.get("x-joocode-api-key") {
         upstream_headers.insert("x-joocode-api-key", value.clone());
     }
     let response = state
         .registry
         .client()
-        .post(provider.chat_completions_url())
+        .post(format!(
+            "{}/chat/completions",
+            base_url.trim_end_matches('/')
+        ))
         .headers(upstream_headers)
         .json(&request)
         .send()
@@ -174,13 +174,10 @@ async fn responses(
         .resolve(&requested_model)
         .map_err(|e| ApiError::not_found(e.to_string()))?;
     let chat_request = protocol::to_chat_request(&request, &upstream_model)?;
-    let mut upstream_headers = provider.headers.clone();
-    if let Some(value) = provider.credential.as_deref() {
-        let value = format!("Bearer {value}")
-            .parse()
-            .map_err(|_| ApiError::internal("invalid provider credential"))?;
-        upstream_headers.insert("authorization", value);
-    }
+    let (base_url, mut upstream_headers) = provider
+        .request_parts(state.registry.client())
+        .await
+        .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
     if let Some(value) = headers
         .get("x-joocode-api-key")
         .or_else(|| headers.get("x-joc-api-key"))
@@ -191,7 +188,10 @@ async fn responses(
     let response = state
         .registry
         .client()
-        .post(provider.chat_completions_url())
+        .post(format!(
+            "{}/chat/completions",
+            base_url.trim_end_matches('/')
+        ))
         .headers(upstream_headers)
         .json(&chat_request)
         .send()

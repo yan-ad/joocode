@@ -1,30 +1,46 @@
 # Joocode — JustOpenCode
 
-A small native Rust bridge that makes every compatible provider configured in
-OpenCode available to **ChatGPT Codex**, **Zed**, and **JetBrains AI Assistant**. It reads your existing
-OpenCode configuration and credentials, then exposes the discovered models as
-`provider/model` without creating or duplicating provider configuration.
+A small native Rust bridge that makes models from your existing AI tools
+available to **ChatGPT Codex**, **Zed**, and **JetBrains AI Assistant**. It can
+discover providers from OpenCode, OCX profiles, Hermes Agent, and GitHub
+Copilot, then expose them without duplicating upstream credentials.
 
 ## Current scope
 
-- Automatically reads OpenCode configuration and credentials.
-- Makes compatible OpenCode providers available to ChatGPT Codex, Zed, and JetBrains AI Assistant.
+- Automatically discovers OpenCode, OCX, Hermes Agent, and GitHub Copilot.
+- Makes compatible providers available to ChatGPT Codex, Zed, and JetBrains AI Assistant.
 - Supports providers configured with `@ai-sdk/openai-compatible`, `@ai-sdk/openai`, or no explicit `npm` adapter.
-- Routes models with an unambiguous `provider/model` identifier.
+- Routes models with source-aware identifiers such as `provider/model`,
+  `hermes/provider/model`, `ocx-profile/provider/model`, and `copilot/model`.
 - Exposes `GET /v1/models` and `POST /v1/responses`.
 - Translates text, image URLs, instructions, function tools, function calls, and function results.
 - Supports regular JSON responses and SSE streaming, including streamed tool arguments.
 - Never prints credential values.
 
-Provider-native Anthropic, Google, and interactive OAuth adapters are intentionally outside the first compatibility layer. OAuth access tokens stored by OpenCode are usable when their upstream speaks the OpenAI protocol.
+OpenCode, OCX, and Hermes entries currently need an OpenAI Chat
+Completions-compatible upstream. GitHub Copilot uses its official token exchange
+and live model catalog; Joocode keeps exchanged tokens in memory only.
 
 ## Roadmap
 
 Joocode currently integrates with **ChatGPT Codex**, **Zed**, and **JetBrains
 AI Assistant**. Support for additional AI clients is planned, using the same
-existing OpenCode configuration and `provider/model` model identifiers.
+existing provider configuration and source-qualified model identifiers.
 
-## Configuration discovery
+## Provider source discovery
+
+All available sources are enabled by default. Select sources explicitly by
+repeating or comma-separating `--source`:
+
+```bash
+joocode --source opencode,hermes models
+joocode --source copilot doctor
+joocode --source ocx zed
+```
+
+Supported source values are `auto`, `opencode`, `ocx`, `hermes`, and `copilot`.
+
+### OpenCode
 
 By default:
 
@@ -43,6 +59,38 @@ When the XDG variables are unset:
 Override either path with `--config`, `--auth`, `JOOCODE_CONFIG`, or
 `JOOCODE_AUTH`. The prior `JOC_CONFIG` and `JOC_AUTH` names remain supported
 for upgrades.
+
+### OCX profiles
+
+Joocode scans every global OCX profile with an OpenCode config at:
+
+```text
+$XDG_CONFIG_HOME/opencode/profiles/*/opencode.jsonc
+```
+
+Models are exposed as `ocx-PROFILE/provider/model` and use the normal OpenCode
+auth store. This avoids collisions between profiles that define the same
+provider name.
+
+### Hermes Agent
+
+Joocode reads `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) and
+`~/.hermes/.env`. Modern `providers:` and legacy `custom_providers:` entries
+are supported when they declare an OpenAI Chat-compatible endpoint and model
+list. Models are exposed as `hermes/provider/model`. Inline `api_key`,
+`${ENV_VAR}`, and `key_env` credentials are supported; dynamic `key_cmd` and
+provider-native Anthropic transports are not yet proxied.
+
+### GitHub Copilot
+
+Joocode checks environment variables (`COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
+`GITHUB_TOKEN`), the Copilot macOS Keychain entries, Copilot's documented
+plaintext fallback, then `gh auth token`. On Linux and Windows, use a supported
+token environment variable when Copilot stores its login only in the OS
+credential manager. Run `copilot login` if `joocode doctor` reports a Copilot
+auth error. Classic `ghp_` PATs are ignored because Copilot does not support them.
+Available account models are fetched from Copilot's live catalog and exposed as
+`copilot/model`.
 
 ## Build and run
 
@@ -82,6 +130,7 @@ your user `PATH`. Open a new PowerShell window, then verify the installation:
 ```powershell
 joocode --version
 joocode doctor
+joocode --source opencode,hermes,copilot models
 ```
 
 To install a specific version, download the script first and run
@@ -120,18 +169,18 @@ The server listens on `127.0.0.1:10100` by default. Change it with `serve --host
 
 ## Codex configuration
 
-Add every discovered OpenCode model to the Codex model picker:
+Add every discovered model to the Codex model picker:
 
 ```bash
 ./target/release/joocode codex-install
 ```
 
 This preserves the existing Codex login and default model, merges Codex's
-built-in OpenAI models with OpenCode's `provider/model` entries, registers the
+built-in OpenAI models with Joocode's discovered entries, registers the
 local aggregate Responses provider, and writes
 `~/.codex/joocode-models.json`. Native OpenAI requests pass through with the
-authorization already managed by Codex; OpenCode models use credentials from
-OpenCode. Restart the Codex CLI or desktop app after synchronization.
+authorization already managed by Codex; routed models use credentials from
+their original source. Restart the Codex CLI or desktop app after synchronization.
 
 For manual setup, configure a custom model provider in `~/.codex/config.toml`:
 
@@ -171,12 +220,12 @@ joocode zed
 ```
 
 This automatically adds a `joocode` OpenAI-compatible provider to Zed’s
-settings and exposes every OpenCode model as `provider/model`. It preserves all
-other Zed settings and never copies OpenCode credentials into Zed; the local
-bridge continues reading them from OpenCode. On macOS, you may be asked for
+settings and exposes every discovered model with its routable ID. It preserves
+all other Zed settings and never copies upstream credentials into Zed; the local
+bridge continues reading them from their source. On macOS, you may be asked for
 your password to authorize Keychain access for the local Zed tunnel. Joocode
 stores only a harmless local placeholder key there so Zed shows the provider;
-it does not store or expose your OpenCode credentials. Restart Zed once if it
+it does not store or expose upstream credentials. Restart Zed once if it
 was already open.
 Use `ZED_SETTINGS_PATH=/path/to/settings.json joocode zed` for a nonstandard
 settings location.
@@ -198,8 +247,8 @@ keys**, add an **OpenAI-compatible** provider, and use:
 - **Model:** a discovered `provider/model` ID from `joocode models`
 
 JetBrains stores provider keys in its managed credential store, so Joocode
-does not write IDE settings or copy OpenCode credentials into it. The proxy
-continues to read credentials only from OpenCode. Select the configured model
+does not write IDE settings or copy upstream credentials into it. The proxy
+continues to read credentials from the selected source. Select the configured model
 under **Models Assignment** to use it in AI Assistant features.
 
 ## HTTP examples
@@ -271,8 +320,9 @@ ZIP because in-place self-upgrade is not currently supported there.
 
 ## Architecture
 
-- `config`: XDG discovery and OpenCode JSONC/auth parsing.
-- `provider`: filtered provider registry, model lookup, headers, and credentials.
+- `config`: OpenCode JSONC/auth parsing.
+- `sources`: OpenCode, OCX, Hermes, and Copilot discovery adapters.
+- `provider`: merged provider registry, route lookup, headers, and credentials.
 - `protocol`: Responses ↔ Chat Completions conversion and streaming state.
 - `app`: Axum HTTP routes and upstream transport.
 

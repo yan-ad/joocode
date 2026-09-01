@@ -57,7 +57,7 @@ const LOCAL_API_KEY: &str = "joocode-local";
 /// Add or replace Joocode's own provider entry without changing unrelated Zed
 /// preferences. On macOS, this also adds a non-secret local placeholder key to
 /// Zed's keychain. Zed only shows compatible-provider models after it finds an
-/// API key; Joocode ignores this value and continues using OpenCode credentials.
+/// API key; Joocode ignores this value and continues using source credentials.
 pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<PathBuf> {
     let path = settings_path()?;
     let path = install_at(registry, base_url, path)?;

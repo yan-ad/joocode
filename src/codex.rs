@@ -26,7 +26,7 @@ pub struct InstallResult {
 
 pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallResult> {
     if registry.models().is_empty() {
-        bail!("no compatible OpenCode models were discovered");
+        bail!("no compatible models were discovered");
     }
 
     let home = codex_home()?;
@@ -61,7 +61,7 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
 
     // Codex selects one provider globally. JustOpenCode is an aggregate provider:
     // native OpenAI model slugs are passed through with Codex's existing auth,
-    // while provider/model slugs are routed through OpenCode.
+    // while qualified slugs are routed through the discovered provider sources.
     document["model_provider"] = value(PROVIDER_ID);
     document["model_catalog_json"] = value(catalog_path.to_string_lossy().as_ref());
 
@@ -132,7 +132,7 @@ fn read_catalog(path: &Path) -> anyhow::Result<Value> {
 fn merged_catalog(
     bundled: &Value,
     existing: &Value,
-    opencode_models: &[ModelInfo],
+    discovered_models: &[ModelInfo],
 ) -> anyhow::Result<Value> {
     let mut merged = Vec::new();
     let mut slugs = HashSet::new();
@@ -150,7 +150,7 @@ fn merged_catalog(
             }
         }
     }
-    for model in opencode_models {
+    for model in discovered_models {
         let preset = model_preset(model, false);
         if slugs.insert(model.id.clone()) {
             merged.push(preset);

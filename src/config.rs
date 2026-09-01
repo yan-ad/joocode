@@ -67,6 +67,18 @@ impl ConfigPaths {
         }
         Ok(Self { config, auth })
     }
+
+    pub fn discover(
+        config: Option<PathBuf>,
+        auth: Option<PathBuf>,
+    ) -> anyhow::Result<Option<Self>> {
+        let explicit = config.is_some() || auth.is_some();
+        match Self::resolve(config, auth) {
+            Ok(paths) => Ok(Some(paths)),
+            Err(_error) if !explicit => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

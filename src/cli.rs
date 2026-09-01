@@ -2,6 +2,8 @@ use std::{net::IpAddr, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 
+use crate::sources::SourceKind;
+
 #[derive(Debug, Parser)]
 #[command(name = "joocode", version, about)]
 pub struct Cli {
@@ -12,6 +14,15 @@ pub struct Cli {
     /// Override the OpenCode authentication path.
     #[arg(long, env = "JOOCODE_AUTH")]
     pub auth: Option<PathBuf>,
+
+    /// Provider configuration sources to load (repeat or comma-separate).
+    #[arg(
+        long = "source",
+        value_enum,
+        value_delimiter = ',',
+        default_value = "auto"
+    )]
+    pub sources: Vec<SourceKind>,
 
     /// Configure every supported desktop integration and start one shared local proxy.
     #[arg(long)]
@@ -55,6 +66,21 @@ mod tests {
         assert_eq!(cli.host, "0.0.0.0".parse::<IpAddr>().unwrap());
         assert_eq!(cli.port, 1234);
         assert_eq!(cli.base_url, "http://localhost:1234/v1");
+        assert_eq!(cli.sources, vec![SourceKind::Auto]);
+    }
+
+    #[test]
+    fn accepts_multiple_provider_sources() {
+        let cli = Cli::try_parse_from(["joocode", "--source", "opencode,hermes,copilot", "models"])
+            .unwrap();
+        assert_eq!(
+            cli.sources,
+            vec![
+                SourceKind::OpenCode,
+                SourceKind::Hermes,
+                SourceKind::Copilot
+            ]
+        );
     }
 }
 
@@ -81,13 +107,13 @@ pub enum Command {
     Models,
     /// Validate configuration discovery and provider loading.
     Doctor,
-    /// Add discovered OpenCode models to Codex while retaining built-in OpenAI models.
+    /// Add discovered models to Codex while retaining built-in OpenAI models.
     CodexInstall {
         /// URL where Codex can reach the local Responses API.
         #[arg(long, default_value = "http://127.0.0.1:10100/v1")]
         base_url: String,
     },
-    /// Configure Zed with discovered OpenCode models and start its local proxy.
+    /// Configure Zed with discovered models and start its local proxy.
     Zed {
         /// URL where Zed can reach the local OpenAI-compatible API.
         #[arg(long, default_value = "http://127.0.0.1:10100/v1")]
