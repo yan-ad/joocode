@@ -1,0 +1,157 @@
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyTarget {
+    Codex,
+    JetBrains,
+    Antigravity,
+    Zed,
+    ClaudeCode,
+    GrokBuild,
+}
+
+impl ProxyTarget {
+    pub const ALL: [Self; 6] = [
+        Self::Codex,
+        Self::JetBrains,
+        Self::Antigravity,
+        Self::Zed,
+        Self::ClaudeCode,
+        Self::GrokBuild,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::JetBrains => "JetBrains",
+            Self::Antigravity => "Antigravity",
+            Self::Zed => "Zed",
+            Self::ClaudeCode => "Claude Code",
+            Self::GrokBuild => "Grok Build",
+        }
+    }
+
+    pub const fn support_note(self) -> Option<&'static str> {
+        match self {
+            Self::JetBrains => Some("manual credential"),
+            Self::Antigravity => Some("experimental"),
+            Self::ClaudeCode => Some("experimental"),
+            Self::Codex | Self::Zed | Self::GrokBuild => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct TargetPreferences {
+    #[serde(default)]
+    pub proxy_to: BTreeMap<ProxyTarget, bool>,
+}
+
+impl TargetPreferences {
+    pub fn load() -> anyhow::Result<Self> {
+        load_from(&path()?)
+    }
+
+    pub fn override_for(&self, target: ProxyTarget) -> Option<bool> {
+        self.proxy_to.get(&target).copied()
+    }
+
+    pub fn set(target: ProxyTarget, enabled: bool) -> anyhow::Result<Self> {
+        let path = path()?;
+        let mut preferences = load_from(&path)?;
+        preferences.proxy_to.insert(target, enabled);
+        save_to(&path, &preferences)?;
+        Ok(preferences)
+    }
+}
+
+pub fn path() -> anyhow::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("JOOCODE_SETTINGS").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    let root = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+        .context("cannot determine Joocode settings directory")?;
+    Ok(root.join("joocode/settings.json"))
+}
+
+fn load_from(path: &Path) -> anyhow::Result<TargetPreferences> {
+    match fs::read_to_string(path) {
+        Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text)
+            .with_context(|| format!("invalid JSON in {}", path.display())),
+        Ok(_) => Ok(TargetPreferences::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(TargetPreferences::default())
+        }
+        Err(error) => Err(error).with_context(|| format!("failed reading {}", path.display())),
+    }
+}
+
+fn save_to(path: &Path, preferences: &TargetPreferences) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(preferences)?)
+        .with_context(|| format!("failed writing {}", temporary.display()))?;
+    set_private_permissions(&temporary)?;
+    fs::rename(&temporary, path).with_context(|| format!("failed replacing {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preferences_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut preferences = TargetPreferences::default();
+        preferences.proxy_to.insert(ProxyTarget::Codex, false);
+        preferences.proxy_to.insert(ProxyTarget::GrokBuild, true);
+        save_to(&path, &preferences).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.override_for(ProxyTarget::Codex), Some(false));
+        assert_eq!(loaded.override_for(ProxyTarget::GrokBuild), Some(true));
+        assert_eq!(loaded.override_for(ProxyTarget::Zed), None);
+    }
+
+    #[test]
+    fn target_order_matches_configuration_menu() {
+        assert_eq!(
+            ProxyTarget::ALL.map(ProxyTarget::label),
+            [
+                "Codex",
+                "JetBrains",
+                "Antigravity",
+                "Zed",
+                "Claude Code",
+                "Grok Build",
+            ]
+        );
+    }
+}

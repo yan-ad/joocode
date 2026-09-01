@@ -8,6 +8,153 @@ use crate::error::ApiError;
 pub fn response_id() -> String {
     format!("resp_{}", Uuid::new_v4().simple())
 }
+
+pub fn anthropic_to_chat_request(request: &Value, upstream_model: &str) -> Result<Value, ApiError> {
+    let mut messages = Vec::new();
+    if let Some(system) = request.get("system") {
+        let text = match system {
+            Value::String(text) => text.clone(),
+            Value::Array(parts) => parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+        if !text.is_empty() {
+            messages.push(json!({"role":"system","content":text}));
+        }
+    }
+    for message in request
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        let content = message.get("content").cloned().unwrap_or(Value::Null);
+        if let Some(text) = content.as_str() {
+            messages.push(json!({"role":role,"content":text}));
+            continue;
+        }
+        let mut parts = Vec::new();
+        for part in content.as_array().into_iter().flatten() {
+            match part.get("type").and_then(Value::as_str) {
+                Some("text") => parts.push(json!({
+                    "type":"text",
+                    "text":part.get("text").and_then(Value::as_str).unwrap_or_default()
+                })),
+                Some("image") => {
+                    let source = part.get("source").unwrap_or(&Value::Null);
+                    let url = if source.get("type").and_then(Value::as_str) == Some("base64") {
+                        format!(
+                            "data:{};base64,{}",
+                            source.get("media_type").and_then(Value::as_str).unwrap_or("image/png"),
+                            source.get("data").and_then(Value::as_str).unwrap_or_default()
+                        )
+                    } else {
+                        source.get("url").and_then(Value::as_str).unwrap_or_default().to_owned()
+                    };
+                    parts.push(json!({"type":"image_url","image_url":{"url":url}}));
+                }
+                Some("tool_use") => messages.push(json!({
+                    "role":"assistant",
+                    "tool_calls":[{"id":part.get("id"),"type":"function","function":{
+                        "name":part.get("name"),
+                        "arguments":serde_json::to_string(part.get("input").unwrap_or(&json!({}))).unwrap_or_else(|_| "{}".into())
+                    }}]
+                })),
+                Some("tool_result") => messages.push(json!({
+                    "role":"tool",
+                    "tool_call_id":part.get("tool_use_id"),
+                    "content":content_to_text(part.get("content").unwrap_or(&Value::Null))
+                })),
+                _ => {}
+            }
+        }
+        if !parts.is_empty() {
+            messages.push(json!({"role":role,"content":parts}));
+        }
+    }
+    let mut output = json!({
+        "model": upstream_model,
+        "messages": messages,
+        "stream": request.get("stream").and_then(Value::as_bool).unwrap_or(false),
+    });
+    let object = output.as_object_mut().expect("object");
+    copy_field(request, object, "max_tokens", "max_tokens");
+    copy_field(request, object, "temperature", "temperature");
+    copy_field(request, object, "top_p", "top_p");
+    copy_field(request, object, "stop_sequences", "stop");
+    if let Some(tools) = request.get("tools").and_then(Value::as_array) {
+        object.insert(
+            "tools".into(),
+            Value::Array(
+                tools
+                    .iter()
+                    .map(|tool| json!({"type":"function","function":{
+                        "name":tool.get("name"),
+                        "description":tool.get("description"),
+                        "parameters":tool.get("input_schema").cloned().unwrap_or_else(|| json!({"type":"object"}))
+                    }}))
+                    .collect(),
+            ),
+        );
+    }
+    Ok(output)
+}
+
+pub fn chat_to_anthropic_response(chat: Value, requested_model: &str) -> Result<Value, ApiError> {
+    let message = chat.pointer("/choices/0/message").ok_or_else(|| {
+        ApiError::upstream(
+            http::StatusCode::BAD_GATEWAY,
+            "upstream response has no message",
+        )
+    })?;
+    let mut content = Vec::new();
+    if let Some(text) = message
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        content.push(json!({"type":"text","text":text}));
+    }
+    for call in message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let input = call
+            .pointer("/function/arguments")
+            .and_then(Value::as_str)
+            .and_then(|value| serde_json::from_str(value).ok())
+            .unwrap_or_else(|| json!({}));
+        content.push(json!({
+            "type":"tool_use",
+            "id":call.get("id").cloned().unwrap_or_else(|| Value::String(call_id())),
+            "name":call.pointer("/function/name").cloned().unwrap_or_else(|| Value::String("tool".into())),
+            "input":input
+        }));
+    }
+    let usage = chat.get("usage").cloned().unwrap_or_else(|| json!({}));
+    Ok(json!({
+        "id":format!("msg_{}", Uuid::new_v4().simple()),
+        "type":"message",
+        "role":"assistant",
+        "model":requested_model,
+        "content":content,
+        "stop_reason":if message.get("tool_calls").is_some() {"tool_use"} else {"end_turn"},
+        "stop_sequence":null,
+        "usage":{
+            "input_tokens":usage.get("prompt_tokens").cloned().unwrap_or_else(|| json!(0)),
+            "output_tokens":usage.get("completion_tokens").cloned().unwrap_or_else(|| json!(0))
+        }
+    }))
+}
 pub fn message_id() -> String {
     format!("msg_{}", Uuid::new_v4().simple())
 }
@@ -441,5 +588,27 @@ mod tests {
         .unwrap();
         assert_eq!(result["output"][0]["content"][0]["text"], "done");
         assert_eq!(result["usage"]["total_tokens"], 3);
+    }
+
+    #[test]
+    fn converts_anthropic_messages_and_response() {
+        let request = json!({
+            "model":"claude-joocode/demo/model-a",
+            "max_tokens":100,
+            "messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],
+            "tools":[{"name":"read","input_schema":{"type":"object"}}]
+        });
+        let chat = anthropic_to_chat_request(&request, "model-a").unwrap();
+        assert_eq!(chat["model"], "model-a");
+        assert_eq!(chat["messages"][0]["content"][0]["text"], "hello");
+        assert_eq!(chat["tools"][0]["function"]["name"], "read");
+
+        let response = chat_to_anthropic_response(
+            json!({"choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}),
+            "claude-joocode/demo/model-a",
+        )
+        .unwrap();
+        assert_eq!(response["content"][0]["text"], "done");
+        assert_eq!(response["usage"]["input_tokens"], 2);
     }
 }

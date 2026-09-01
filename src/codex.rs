@@ -24,6 +24,42 @@ pub struct InstallResult {
     pub total_model_count: usize,
 }
 
+pub fn uninstall() -> anyhow::Result<()> {
+    let home = codex_home()?;
+    let config_path = home.join("config.toml");
+    let catalog_path = home.join("joocode-models.json");
+    if config_path.is_file() {
+        let mut document = fs::read_to_string(&config_path)?
+            .parse::<DocumentMut>()
+            .context("Codex config.toml is not valid TOML")?;
+        if let Some(providers) = document
+            .get_mut("model_providers")
+            .and_then(Item::as_table_mut)
+        {
+            providers.remove(PROVIDER_ID);
+            providers.remove(JOC_PROVIDER_ID);
+            providers.remove(CRABCODEX_PROVIDER_ID);
+            providers.remove(LEGACY_PROVIDER_ID);
+        }
+        if document.get("model_provider").and_then(Item::as_str) == Some(PROVIDER_ID) {
+            document.remove("model_provider");
+        }
+        if document
+            .get("model_catalog_json")
+            .and_then(Item::as_str)
+            .is_some_and(|path| Path::new(path) == catalog_path)
+        {
+            document.remove("model_catalog_json");
+        }
+        fs::write(&config_path, document.to_string())?;
+    }
+    match fs::remove_file(catalog_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallResult> {
     if registry.models().is_empty() {
         bail!("no compatible models were discovered");

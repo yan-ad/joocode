@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     convert::Infallible,
     net::{IpAddr, SocketAddr},
 };
@@ -29,12 +30,184 @@ use crate::{
     local_config, protocol,
     provider::{ModelInfo, Registry, RegistryStore},
     sources::SourceSelection,
+    target_config::TargetPreferences,
     upgrade,
 };
 
 #[derive(Clone)]
 struct AppState {
     registry: RegistryStore,
+}
+
+async fn anthropic_count_tokens(Json(request): Json<Value>) -> impl IntoResponse {
+    let serialized = serde_json::to_string(&request).unwrap_or_default();
+    Json(json!({"input_tokens": serialized.len().div_ceil(4)}))
+}
+
+async fn anthropic_messages(
+    State(state): State<AppState>,
+    Json(request): Json<Value>,
+) -> Result<ResponseBody, ApiError> {
+    let registry = state.registry.snapshot();
+    let requested_model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing 'model'"))?;
+    let routable_model = requested_model
+        .strip_prefix("claude-joocode/")
+        .unwrap_or(requested_model);
+    let (provider, upstream_model) = registry
+        .resolve(routable_model)
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let chat_request = protocol::anthropic_to_chat_request(&request, &upstream_model)?;
+    let (base_url, upstream_headers) = provider
+        .request_parts(registry.client())
+        .await
+        .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let response = registry
+        .client()
+        .post(format!(
+            "{}/chat/completions",
+            base_url.trim_end_matches('/')
+        ))
+        .headers(upstream_headers)
+        .json(&chat_request)
+        .send()
+        .await
+        .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ApiError::upstream(
+            StatusCode::BAD_GATEWAY,
+            format!("upstream returned {status}: {body}"),
+        ));
+    }
+    if request
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        Ok(ResponseBody::Stream(anthropic_stream_response(
+            response.bytes_stream(),
+            requested_model.to_owned(),
+        )))
+    } else {
+        let chat = response
+            .json::<Value>()
+            .await
+            .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
+        Ok(ResponseBody::Json(Json(
+            protocol::chat_to_anthropic_response(chat, requested_model)?,
+        )))
+    }
+}
+
+fn anthropic_stream_response<S>(upstream: S, requested_model: String) -> Response
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
+{
+    let events = stream! {
+        let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+        yield Ok::<Bytes, Infallible>(Bytes::from(format!(
+            "event: message_start\ndata: {}\n\n",
+            json!({"type":"message_start","message":{"id":message_id,"type":"message","role":"assistant","model":requested_model,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}})
+        )));
+        yield Ok(Bytes::from(format!(
+            "event: content_block_start\ndata: {}\n\n",
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})
+        )));
+        let reader = StreamReader::new(upstream.map_err(std::io::Error::other));
+        let mut lines = reader.lines();
+        let mut output_tokens = 0_u64;
+        let mut text_open = true;
+        let mut tools = BTreeMap::<usize, usize>::new();
+        let mut next_block = 1_usize;
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Some(data) = line.strip_prefix("data:") else { continue; };
+            let data = data.trim();
+            if data == "[DONE]" { break; }
+            let Ok(chunk) = serde_json::from_str::<Value>(data) else { continue; };
+            if let Some(text) = chunk.pointer("/choices/0/delta/content").and_then(Value::as_str) {
+                output_tokens = output_tokens.saturating_add((text.len().div_ceil(4)) as u64);
+                yield Ok(Bytes::from(format!(
+                    "event: content_block_delta\ndata: {}\n\n",
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}})
+                )));
+            }
+            for call in chunk
+                .pointer("/choices/0/delta/tool_calls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let upstream_index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let block_index = if let Some(block_index) = tools.get(&upstream_index) {
+                    *block_index
+                } else {
+                    if text_open {
+                        yield Ok(Bytes::from(format!(
+                            "event: content_block_stop\ndata: {}\n\n",
+                            json!({"type":"content_block_stop","index":0})
+                        )));
+                        text_open = false;
+                    }
+                    let block_index = next_block;
+                    next_block = next_block.saturating_add(1);
+                    tools.insert(upstream_index, block_index);
+                    yield Ok(Bytes::from(format!(
+                        "event: content_block_start\ndata: {}\n\n",
+                        json!({
+                            "type":"content_block_start",
+                            "index":block_index,
+                            "content_block":{
+                                "type":"tool_use",
+                                "id":call.get("id").cloned().unwrap_or_else(|| Value::String(protocol::call_id())),
+                                "name":call.pointer("/function/name").cloned().unwrap_or_else(|| Value::String("tool".into())),
+                                "input":{}
+                            }
+                        })
+                    )));
+                    block_index
+                };
+                if let Some(arguments) = call.pointer("/function/arguments").and_then(Value::as_str)
+                    && !arguments.is_empty()
+                {
+                    output_tokens = output_tokens.saturating_add((arguments.len().div_ceil(4)) as u64);
+                    yield Ok(Bytes::from(format!(
+                        "event: content_block_delta\ndata: {}\n\n",
+                        json!({
+                            "type":"content_block_delta",
+                            "index":block_index,
+                            "delta":{"type":"input_json_delta","partial_json":arguments}
+                        })
+                    )));
+                }
+            }
+        }
+        if text_open {
+            yield Ok(Bytes::from(format!(
+                "event: content_block_stop\ndata: {}\n\n",
+                json!({"type":"content_block_stop","index":0})
+            )));
+        }
+        for block_index in tools.values() {
+            yield Ok(Bytes::from(format!(
+                "event: content_block_stop\ndata: {}\n\n",
+                json!({"type":"content_block_stop","index":block_index})
+            )));
+        }
+        yield Ok(Bytes::from(format!(
+            "event: message_delta\ndata: {}\n\n",
+            json!({"type":"message_delta","delta":{"stop_reason":if tools.is_empty() {"end_turn"} else {"tool_use"},"stop_sequence":null},"usage":{"output_tokens":output_tokens}})
+        )));
+        yield Ok(Bytes::from("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+    };
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(events))
+        .expect("valid Anthropic streaming response")
 }
 
 struct PersistentProxyHandoff {
@@ -226,6 +399,7 @@ pub async fn serve_dashboard(
     let reload_targets = targets.clone();
     let reload_base_url = base_url.clone();
     tokio::spawn(async move {
+        let mut active_targets = reload_targets;
         while let Some(command) = command_rx.recv().await {
             match command {
                 dashboard::DashboardCommand::AddProvider { base_url, api_key } => {
@@ -236,7 +410,7 @@ pub async fn serve_dashboard(
                         let registry = Registry::discover(&selection).await?;
                         reload_store.replace(registry.clone());
                         let setup_registry = registry.clone();
-                        let setup_targets = reload_targets.clone();
+                        let setup_targets = active_targets.clone();
                         let setup_base_url = reload_base_url.clone();
                         std::thread::spawn(move || {
                             desktop::configure_detected(
@@ -265,6 +439,30 @@ pub async fn serve_dashboard(
                         .await
                     {
                         Ok(Ok(status)) => dashboard::DashboardEvent::AutoStartUpdated(status),
+                        Ok(Err(error)) => {
+                            dashboard::DashboardEvent::ProviderError(error.to_string())
+                        }
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::ToggleProxyTarget { target } => {
+                    let enabled = !active_targets.enabled(target);
+                    let registry = reload_store.snapshot();
+                    let result = tokio::task::spawn_blocking({
+                        let base_url = reload_base_url.clone();
+                        move || {
+                            desktop::configure_target(&registry, &base_url, target, enabled)?;
+                            TargetPreferences::set(target, enabled)?;
+                            Ok::<_, anyhow::Error>(())
+                        }
+                    })
+                    .await;
+                    let event = match result {
+                        Ok(Ok(())) => {
+                            active_targets.set(target, enabled);
+                            dashboard::DashboardEvent::ProxyTargetUpdated { target, enabled }
+                        }
                         Ok(Err(error)) => {
                             dashboard::DashboardEvent::ProviderError(error.to_string())
                         }
@@ -318,9 +516,12 @@ async fn prepare_server(
 ) -> anyhow::Result<(tokio::net::TcpListener, Router, SocketAddr, Option<String>)> {
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/api/hello", get(healthz))
         .route("/v1/models", get(models))
         .route("/v1/responses", post(responses))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/messages", post(anthropic_messages))
+        .route("/v1/messages/count_tokens", post(anthropic_count_tokens))
         .with_state(AppState { registry })
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
@@ -376,11 +577,30 @@ async fn healthz() -> impl IntoResponse {
     Json(json!({ "ok": true }))
 }
 
-async fn models(State(state): State<AppState>) -> impl IntoResponse {
+async fn models(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let registry = state.registry.snapshot();
-    Json(
-        json!({ "object": "list", "data": registry.models().iter().map(model_json).collect::<Vec<_>>() }),
-    )
+    let local_credential = |name: header::HeaderName| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "joocode-local" || value == "Bearer joocode-local")
+    };
+    let anthropic = headers.contains_key("anthropic-version")
+        || local_credential(header::AUTHORIZATION)
+        || local_credential(header::HeaderName::from_static("x-api-key"));
+    let data = registry
+        .models()
+        .iter()
+        .map(|model| {
+            let mut value = model_json(model);
+            if anthropic {
+                value["id"] = Value::String(format!("claude-joocode/{}", model.id));
+                value["display_name"] = Value::String(model.id.clone());
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    Json(json!({ "object": "list", "data": data }))
 }
 
 fn model_json(model: &ModelInfo) -> Value {

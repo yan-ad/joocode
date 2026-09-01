@@ -1,17 +1,20 @@
 mod app;
 mod autostart;
+mod claude;
 mod cli;
 mod codex;
 mod config;
 mod dashboard;
 mod desktop;
 mod error;
+mod grok;
 mod local_config;
 #[cfg(target_os = "macos")]
 mod macos_keychain;
 mod protocol;
 mod provider;
 mod sources;
+mod target_config;
 mod upgrade;
 mod zed;
 

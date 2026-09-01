@@ -28,7 +28,97 @@ pub enum SourceKind {
     Ocx,
     Hermes,
     Copilot,
+    Antigravity,
     Joocode,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AntigravitySettings {
+    #[serde(default)]
+    model_provider: Option<String>,
+}
+
+async fn discover_antigravity(client: &Client) -> anyhow::Result<DiscoveredCatalog> {
+    let settings_path = env::var_os("ANTIGRAVITY_SETTINGS")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".gemini/antigravity-cli/settings.json")))
+        .context("cannot determine Antigravity settings path")?;
+    if !settings_path.is_file() {
+        return Ok(empty_catalog(
+            "antigravity",
+            format!("{} not found", settings_path.display()),
+        ));
+    }
+    let text = fs::read_to_string(&settings_path)
+        .with_context(|| format!("failed reading {}", settings_path.display()))?;
+    let settings: AntigravitySettings = json5::from_str(&text)
+        .with_context(|| format!("invalid JSON in {}", settings_path.display()))?;
+    if settings.model_provider.as_deref() != Some("gemini") {
+        return Ok(empty_catalog(
+            "antigravity",
+            "only the official Gemini API-key provider is supported; account OAuth stays private",
+        ));
+    }
+    let api_key = env::var("GEMINI_API_KEY")
+        .context("Antigravity uses modelProvider=gemini but GEMINI_API_KEY is not set")?;
+    let response = client
+        .get("https://generativelanguage.googleapis.com/v1beta/models")
+        .query(&[("key", api_key.as_str())])
+        .send()
+        .await
+        .context("failed requesting the Gemini model catalog")?
+        .error_for_status()
+        .context("Gemini rejected Antigravity model discovery")?
+        .json::<Value>()
+        .await
+        .context("Gemini returned an invalid model catalog")?;
+    let model_ids = response
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|model| {
+            model
+                .get("supportedGenerationMethods")
+                .and_then(Value::as_array)
+                .is_none_or(|methods| {
+                    methods
+                        .iter()
+                        .any(|method| method.as_str() == Some("generateContent"))
+                })
+        })
+        .filter_map(|model| model.get("name").and_then(Value::as_str))
+        .filter_map(|name| name.strip_prefix("models/"))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if model_ids.is_empty() {
+        return Ok(empty_catalog(
+            "antigravity",
+            "Gemini returned no generateContent models",
+        ));
+    }
+    let public_provider = "antigravity/gemini";
+    let models = model_ids
+        .into_iter()
+        .map(|model| simple_model(public_provider, &model, &model, None, None))
+        .collect();
+    Ok(DiscoveredCatalog {
+        source: "antigravity".into(),
+        providers: vec![DiscoveredProvider {
+            key: "antigravity:gemini".into(),
+            provider: Provider {
+                base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
+                credential: Credential::Bearer(api_key),
+                headers: HeaderMap::new(),
+            },
+            models,
+        }],
+        detail: Some(format!(
+            "{}; official Gemini API-key mode",
+            settings_path.display()
+        )),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,6 +444,7 @@ impl SourceSelection {
                 SourceKind::Ocx,
                 SourceKind::Hermes,
                 SourceKind::Copilot,
+                SourceKind::Antigravity,
                 SourceKind::Joocode,
             ]);
         }
@@ -412,6 +503,13 @@ pub async fn discover(
             discover_copilot(client)
                 .await
                 .map_err(|error| source_error("copilot", error)),
+        );
+    }
+    if selection.enabled(SourceKind::Antigravity) {
+        catalogs.push(
+            discover_antigravity(client)
+                .await
+                .map_err(|error| source_error("antigravity", error)),
         );
     }
     if selection.enabled(SourceKind::Joocode) {
@@ -1184,6 +1282,7 @@ providers:
         assert!(selection.enabled(SourceKind::Ocx));
         assert!(selection.enabled(SourceKind::Hermes));
         assert!(selection.enabled(SourceKind::Copilot));
+        assert!(selection.enabled(SourceKind::Antigravity));
         assert!(selection.enabled(SourceKind::Joocode));
     }
 

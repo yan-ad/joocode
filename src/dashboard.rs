@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::IsTerminal,
     net::SocketAddr,
     sync::mpsc::{Receiver, TryRecvError},
@@ -19,6 +20,7 @@ use crate::{
     autostart::{self, Status as AutoStartStatus},
     desktop::DesktopTargets,
     provider::Registry,
+    target_config::ProxyTarget,
 };
 
 #[derive(Clone, Debug)]
@@ -29,7 +31,16 @@ pub struct DashboardData {
     pub model_count: usize,
     pub provider_count: usize,
     pub autostart: AutoStartStatus,
+    pub proxy_targets: BTreeMap<ProxyTarget, bool>,
     pub port_warning: Option<String>,
+}
+
+fn selected_style(selected: bool) -> Style {
+    if selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    }
 }
 
 fn draw_update_animation(frame: &mut Frame<'_>, tag: &str, tick: usize) {
@@ -165,11 +176,22 @@ fn draw_update_prompt(frame: &mut Frame<'_>, tag: &str) {
 }
 
 const AUTO_START_ITEM: usize = 0;
-const CONFIG_ITEMS: &[usize] = &[AUTO_START_ITEM];
+const FIRST_PROXY_ITEM: usize = 1;
+
+fn config_items() -> Vec<usize> {
+    (AUTO_START_ITEM..=ProxyTarget::ALL.len()).collect()
+}
+
+fn target_for_config_item(item: usize) -> Option<ProxyTarget> {
+    item.checked_sub(FIRST_PROXY_ITEM)
+        .and_then(|index| ProxyTarget::ALL.get(index))
+        .copied()
+}
 
 fn adjacent_config_item(selected: usize, forward: bool) -> usize {
-    let Some(index) = CONFIG_ITEMS.iter().position(|item| *item == selected) else {
-        return CONFIG_ITEMS.first().copied().unwrap_or_default();
+    let items = config_items();
+    let Some(index) = items.iter().position(|item| *item == selected) else {
+        return items.first().copied().unwrap_or_default();
     };
     let adjacent = if forward {
         index.checked_add(1)
@@ -177,7 +199,7 @@ fn adjacent_config_item(selected: usize, forward: bool) -> usize {
         index.checked_sub(1)
     };
     adjacent
-        .and_then(|index| CONFIG_ITEMS.get(index))
+        .and_then(|index| items.get(index))
         .copied()
         .unwrap_or(selected)
 }
@@ -185,7 +207,7 @@ fn adjacent_config_item(selected: usize, forward: bool) -> usize {
 fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
     let [_, vertical, _] = Layout::vertical([
         Constraint::Percentage(30),
-        Constraint::Length(7),
+        Constraint::Length(15),
         Constraint::Min(0),
     ])
     .areas(frame.area());
@@ -201,7 +223,7 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
     } else {
         "○"
     };
-    let item = Line::from(vec![
+    let auto_start = Line::from(vec![
         Span::styled(
             format!("{marker} "),
             Style::default().fg(if data.autostart.enabled() {
@@ -213,15 +235,52 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
         Span::raw("Auto-start"),
         Span::raw(format!(" ({})", data.autostart.label())),
     ]);
-    let style = if selected == AUTO_START_ITEM {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    };
+    let mut items = vec![
+        ListItem::new(Line::from(Span::styled(
+            "Setting",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        ListItem::new(auto_start).style(selected_style(selected == AUTO_START_ITEM)),
+        ListItem::new(Line::from("")),
+        ListItem::new(Line::from(Span::styled(
+            "Proxy to",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ))),
+    ];
+    for (index, target) in ProxyTarget::ALL.into_iter().enumerate() {
+        let enabled = data.proxy_targets.get(&target).copied().unwrap_or(false);
+        let marker = if enabled { "●" } else { "○" };
+        let mut spans = vec![
+            Span::styled(
+                format!("{marker} "),
+                Style::default().fg(if enabled {
+                    Color::Green
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::raw(target.label()),
+            Span::raw(format!(" ({})", if enabled { "On" } else { "Off" })),
+        ];
+        if let Some(note) = target.support_note() {
+            spans.push(Span::styled(
+                format!(" · {note}"),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        items.push(
+            ListItem::new(Line::from(spans))
+                .style(selected_style(selected == FIRST_PROXY_ITEM + index)),
+        );
+    }
 
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        List::new(vec![ListItem::new(item).style(style)]).block(
+        List::new(items).block(
             Block::default()
                 .title(" ⚙ Configuration ")
                 .title_style(
@@ -410,6 +469,10 @@ impl DashboardData {
             model_count: registry.models().len(),
             provider_count: registry.provider_count(),
             autostart: autostart::status(),
+            proxy_targets: ProxyTarget::ALL
+                .into_iter()
+                .map(|target| (target, targets.enabled(target)))
+                .collect(),
             port_warning,
         }
     }
@@ -419,6 +482,7 @@ impl DashboardData {
 pub enum DashboardCommand {
     AddProvider { base_url: String, api_key: String },
     ToggleAutoStart,
+    ToggleProxyTarget { target: ProxyTarget },
     InstallUpdate { tag: String },
 }
 
@@ -433,6 +497,10 @@ pub enum DashboardEvent {
     },
     ProviderError(String),
     AutoStartUpdated(AutoStartStatus),
+    ProxyTargetUpdated {
+        target: ProxyTarget,
+        enabled: bool,
+    },
     UpdateAvailable(String),
     UpdateInstalled,
 }
@@ -564,6 +632,14 @@ fn receive_events(
             }
             Ok(DashboardEvent::ProviderError(error)) => *screen = Screen::Error(error),
             Ok(DashboardEvent::AutoStartUpdated(status)) => data.autostart = status,
+            Ok(DashboardEvent::ProxyTargetUpdated { target, enabled }) => {
+                data.proxy_targets.insert(target, enabled);
+                data.ide_targets = ProxyTarget::ALL
+                    .into_iter()
+                    .filter(|target| data.proxy_targets.get(target).copied().unwrap_or(false))
+                    .map(|target| target.label().to_owned())
+                    .collect();
+            }
             Ok(DashboardEvent::UpdateAvailable(tag)) => *screen = Screen::UpdateAvailable(tag),
             Ok(DashboardEvent::UpdateInstalled) => return true,
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
@@ -581,6 +657,11 @@ fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<Da
             KeyCode::Down => *selected = adjacent_config_item(*selected, true),
             KeyCode::Char(' ') if *selected == AUTO_START_ITEM => {
                 let _ = command_tx.send(DashboardCommand::ToggleAutoStart);
+            }
+            KeyCode::Char(' ') => {
+                if let Some(target) = target_for_config_item(*selected) {
+                    let _ = command_tx.send(DashboardCommand::ToggleProxyTarget { target });
+                }
             }
             _ => {}
         },
@@ -861,6 +942,7 @@ fn display_source(source: &str) -> String {
         "ocx" => "OpenCodex".into(),
         "hermes" => "Hermes".into(),
         "copilot" => "GitHub Copilot".into(),
+        "antigravity" => "Antigravity".into(),
         "joocode" => "Joocode".into(),
         other => other.to_owned(),
     }
@@ -909,6 +991,47 @@ mod tests {
     }
 
     #[test]
+    fn space_toggles_selected_proxy_target() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = Screen::Config {
+            selected: FIRST_PROXY_ITEM,
+        };
+        handle_key(&mut screen, KeyCode::Char(' '), &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DashboardCommand::ToggleProxyTarget {
+                target: ProxyTarget::Codex
+            })
+        ));
+    }
+
+    #[test]
+    fn proxy_target_event_refreshes_dashboard_targets() {
+        let mut data = DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 0,
+            provider_count: 0,
+            autostart: AutoStartStatus::Off,
+            proxy_targets: BTreeMap::new(),
+            port_warning: None,
+        };
+        let mut screen = Screen::Dashboard;
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(DashboardEvent::ProxyTargetUpdated {
+            target: ProxyTarget::GrokBuild,
+            enabled: true,
+        })
+        .unwrap();
+
+        receive_events(&mut data, &mut screen, &rx);
+
+        assert_eq!(data.ide_targets, vec!["Grok Build"]);
+        assert_eq!(data.proxy_targets.get(&ProxyTarget::GrokBuild), Some(&true));
+    }
+
+    #[test]
     fn autostart_event_refreshes_dashboard_status() {
         let mut data = DashboardData {
             config_sources: vec![],
@@ -917,6 +1040,7 @@ mod tests {
             model_count: 0,
             provider_count: 0,
             autostart: AutoStartStatus::Off,
+            proxy_targets: BTreeMap::new(),
             port_warning: None,
         };
         let mut screen = Screen::Dashboard;
@@ -955,6 +1079,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::Off,
+            proxy_targets: BTreeMap::new(),
             port_warning: None,
         };
         let mut screen = Screen::Dashboard;
@@ -1006,6 +1131,7 @@ mod tests {
             model_count: 0,
             provider_count: 0,
             autostart: AutoStartStatus::Off,
+            proxy_targets: BTreeMap::new(),
             port_warning: None,
         };
         let mut screen = Screen::Dashboard;
@@ -1043,6 +1169,7 @@ mod tests {
             model_count: 0,
             provider_count: 0,
             autostart: AutoStartStatus::Off,
+            proxy_targets: BTreeMap::new(),
             port_warning: None,
         };
         let mut screen = Screen::Updating {
@@ -1066,6 +1193,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::Off,
+            proxy_targets: BTreeMap::new(),
             port_warning: None,
         };
 
@@ -1096,6 +1224,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::Off,
+            proxy_targets: BTreeMap::new(),
             port_warning: None,
         };
 

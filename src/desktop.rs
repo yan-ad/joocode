@@ -1,12 +1,20 @@
 use std::{env, path::PathBuf, process::Command};
 
-use crate::{codex, provider::Registry, zed};
+use crate::{
+    claude, codex, grok,
+    provider::Registry,
+    target_config::{ProxyTarget, TargetPreferences},
+    zed,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DesktopTargets {
     pub codex: bool,
     pub zed: bool,
     pub jetbrains: bool,
+    pub antigravity: bool,
+    pub claude_code: bool,
+    pub grok_build: bool,
 }
 
 fn zed_installed() -> bool {
@@ -37,11 +45,18 @@ fn zed_installed() -> bool {
 
 impl DesktopTargets {
     pub fn detect() -> Self {
-        Self {
+        let detected = Self {
             codex: command_exists("codex") || application_exists(&["Codex.app"]),
             zed: zed_installed(),
             jetbrains: jetbrains_installed(),
-        }
+            antigravity: command_exists("agy")
+                || command_exists("antigravity")
+                || application_exists(&["Antigravity.app"]),
+            claude_code: command_exists("claude") || application_exists(&["Claude.app"]),
+            grok_build: command_exists("grok")
+                || application_exists(&["Grok.app", "Grok Build.app"]),
+        };
+        detected.with_preferences(&TargetPreferences::load().unwrap_or_default())
     }
 
     pub fn all_supported() -> Self {
@@ -49,6 +64,40 @@ impl DesktopTargets {
             codex: true,
             zed: true,
             jetbrains: true,
+            antigravity: true,
+            claude_code: true,
+            grok_build: true,
+        }
+    }
+
+    pub fn with_preferences(mut self, preferences: &TargetPreferences) -> Self {
+        for target in ProxyTarget::ALL {
+            if let Some(enabled) = preferences.override_for(target) {
+                self.set(target, enabled);
+            }
+        }
+        self
+    }
+
+    pub fn enabled(&self, target: ProxyTarget) -> bool {
+        match target {
+            ProxyTarget::Codex => self.codex,
+            ProxyTarget::JetBrains => self.jetbrains,
+            ProxyTarget::Antigravity => self.antigravity,
+            ProxyTarget::Zed => self.zed,
+            ProxyTarget::ClaudeCode => self.claude_code,
+            ProxyTarget::GrokBuild => self.grok_build,
+        }
+    }
+
+    pub fn set(&mut self, target: ProxyTarget, enabled: bool) {
+        match target {
+            ProxyTarget::Codex => self.codex = enabled,
+            ProxyTarget::JetBrains => self.jetbrains = enabled,
+            ProxyTarget::Antigravity => self.antigravity = enabled,
+            ProxyTarget::Zed => self.zed = enabled,
+            ProxyTarget::ClaudeCode => self.claude_code = enabled,
+            ProxyTarget::GrokBuild => self.grok_build = enabled,
         }
     }
 
@@ -63,6 +112,15 @@ impl DesktopTargets {
         if self.jetbrains {
             names.push("JetBrains");
         }
+        if self.antigravity {
+            names.push("Antigravity");
+        }
+        if self.claude_code {
+            names.push("Claude Code");
+        }
+        if self.grok_build {
+            names.push("Grok Build");
+        }
         names
     }
 }
@@ -73,6 +131,35 @@ pub fn configure_detected(registry: &Registry, base_url: &str, targets: &Desktop
     }
     if targets.zed {
         let _ = zed::install(registry, base_url);
+    }
+    if targets.grok_build {
+        let _ = grok::install(registry, base_url);
+    }
+    if targets.claude_code {
+        let _ = claude::install(registry, base_url);
+    }
+}
+
+pub fn configure_target(
+    registry: &Registry,
+    base_url: &str,
+    target: ProxyTarget,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    match (target, enabled) {
+        (ProxyTarget::Codex, true) => codex::install(registry, base_url).map(|_| ()),
+        (ProxyTarget::Codex, false) => codex::uninstall(),
+        (ProxyTarget::Zed, true) => zed::install(registry, base_url).map(|_| ()),
+        (ProxyTarget::Zed, false) => zed::uninstall(),
+        (ProxyTarget::GrokBuild, true) => grok::install(registry, base_url).map(|_| ()),
+        (ProxyTarget::GrokBuild, false) => grok::uninstall(),
+        (ProxyTarget::ClaudeCode, true) => claude::install(registry, base_url).map(|_| ()),
+        (ProxyTarget::ClaudeCode, false) => claude::uninstall(),
+        // JetBrains stores the credential in its managed credential store.
+        // Antigravity does not expose a stable third-party gateway contract,
+        // and Claude Code needs the Anthropic Messages surface. Persist their
+        // opt-in state now without writing unsafe or incomplete configuration.
+        (ProxyTarget::JetBrains | ProxyTarget::Antigravity, _) => Ok(()),
     }
 }
 
@@ -201,13 +288,27 @@ mod tests {
             codex: true,
             zed: true,
             jetbrains: true,
+            antigravity: true,
+            claude_code: true,
+            grok_build: true,
         };
-        assert_eq!(targets.names(), vec!["Codex", "Zed", "JetBrains"]);
+        assert_eq!(
+            targets.names(),
+            vec![
+                "Codex",
+                "Zed",
+                "JetBrains",
+                "Antigravity",
+                "Claude Code",
+                "Grok Build"
+            ]
+        );
     }
 
     #[test]
     fn all_supported_enables_every_target() {
         let targets = DesktopTargets::all_supported();
         assert!(targets.codex && targets.zed && targets.jetbrains);
+        assert!(targets.antigravity && targets.claude_code && targets.grok_build);
     }
 }

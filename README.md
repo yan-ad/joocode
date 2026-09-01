@@ -2,7 +2,7 @@
 <h3 align="center">your AI configs, everywhere.</h3>
 
 <p align="center"><b>The OCX idea, supercharged as one fast native Rust binary.</b><br>
-Reuse OpenCode, OCX, Hermes, Copilot, and OpenAI-compatible providers inside Codex, Zed, and JetBrains.</p>
+Reuse OpenCode, OCX, Hermes, Copilot, Antigravity Gemini, and OpenAI-compatible providers inside Codex, Zed, JetBrains, Claude Code, and Grok Build.</p>
 
 <p align="center">
   <img src="assets/joocode-icon.png" alt="Joocode palm and crab logo" width="180">
@@ -28,7 +28,7 @@ jcx
 ◈ Joocode
 
 ◆ Config: OpenCode, Joocode
-⌘ IDE Target: Codex, Zed, JetBrains
+⌘ IDE Target: Codex, Zed, JetBrains, Claude Code, Grok Build
 ● Listening: http://127.0.0.1:10100
 
 ◉ Models: 30    ◇ Providers: 5
@@ -42,13 +42,15 @@ already have, wire installed desktop clients automatically, and keep the whole
 runtime small enough to disappear into the background.**
 
 No second provider dashboard is required. No upstream key needs to be copied
-into Codex, Zed, or JetBrains. Start `jcx` and keep using the native client UI.
+into Codex, Zed, JetBrains, Claude Code, or Grok Build. Start `jcx` and keep using the native client UI.
 
 ## Why Joocode?
 
 - **Config-first** — discovers OpenCode, OCX profiles, Hermes Agent, GitHub
-  Copilot, and Joocode's own flat OpenAI-compatible provider file.
-- **Desktop-aware** — detects installed Codex, Zed, and JetBrains clients and
+  Copilot, Antigravity Gemini API-key mode, and Joocode's own flat
+  OpenAI-compatible provider file.
+- **Desktop-aware** — detects installed Codex, Zed, JetBrains, Claude Code,
+  Antigravity, and Grok Build clients and
   prepares only the integrations present on the machine.
 - **One native process** — a single Rust binary, one shared proxy, no Node/Bun
   runtime and no browser dashboard required.
@@ -155,8 +157,9 @@ OpenCode ────────┐
 OpenCodex / OCX ─┤
 OCX profiles ────┤
 Hermes ──────────┤                    ┌─ Codex Responses API
-GitHub Copilot ──┼─► Joocode proxy ───┼─ Zed Chat Completions
-providers.json ──┘                    └─ JetBrains OpenAI-compatible
+GitHub Copilot ──┤                    ├─ Zed / JetBrains OpenAI-compatible
+Antigravity ─────┼─► Joocode proxy ───┼─ Claude Code Messages API
+providers.json ──┘                    └─ Grok Build custom models
 ```
 
 Joocode builds one source-aware model registry, exposes it through
@@ -169,8 +172,41 @@ ocx/provider/model
 ocx-profile/provider/model
 hermes/provider/model
 copilot/model
+antigravity/gemini/model
 joocode/provider/model
 ```
+
+## Target support and probability
+
+These probabilities estimate how likely each integration is to remain reliable
+across upstream client releases. They are not uptime guarantees.
+
+| Target | Probability | Current behavior |
+| --- | ---: | --- |
+| Codex | **98%** | Full catalog and Responses API integration |
+| Zed | **95%** | Full OpenAI-compatible model catalog and local credential registration |
+| Claude Code | **85%** | Anthropic Messages gateway, model discovery, JSON/SSE and tools |
+| JetBrains | **80%** | OpenAI-compatible endpoint; credential stays in the IDE-managed store |
+| Grok Build | **90%** | Writes/removes Joocode custom models in `~/.grok/config.toml` |
+| Antigravity | **40% target / 70% source** | Official Gemini API-key source supported; custom proxy target remains experimental |
+
+Press `/` in the dashboard to open the configuration modal:
+
+```text
+Setting
+  Auto-start                 (On/Off)
+
+Proxy to
+  Codex                      (On/Off)
+  JetBrains                  (On/Off)
+  Antigravity                (On/Off · experimental)
+  Zed                        (On/Off)
+  Claude Code                (On/Off · experimental)
+  Grok Build                 (On/Off)
+```
+
+Navigate with `↑/↓` and press `Space` to toggle. Preferences are stored in
+`~/.config/joocode/settings.json`; explicit choices override auto-detection.
 
 ## Run Joocode
 

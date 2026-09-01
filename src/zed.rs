@@ -46,6 +46,26 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+pub fn uninstall() -> anyhow::Result<()> {
+    let path = settings_path()?;
+    if !path.is_file() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(&path)?;
+    let mut root: Value = json5::from_str(&text)
+        .with_context(|| format!("invalid Zed settings JSONC at {}", path.display()))?;
+    if let Some(compatible) = root
+        .pointer_mut("/language_models/openai_compatible")
+        .and_then(Value::as_object_mut)
+    {
+        compatible.remove(PROVIDER_ID);
+        compatible.remove("joc");
+        compatible.remove("crabcodex");
+    }
+    fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&root)?))?;
+    Ok(())
+}
+
 fn install_at(registry: &Registry, base_url: &str, path: PathBuf) -> anyhow::Result<PathBuf> {
     let mut root = match fs::read_to_string(&path) {
         Ok(text) if !text.trim().is_empty() => json5::from_str::<Value>(&text)
