@@ -38,6 +38,16 @@ pub async fn run() -> anyhow::Result<()> {
     if let Some(Command::Upgrade { version }) = &cli.command {
         return upgrade::run(version.as_deref()).await;
     }
+    if matches!(cli.command, Some(Command::Start)) {
+        autostart::start()?;
+        println!("Joocode background proxy started. Auto-start is On.");
+        return Ok(());
+    }
+    if matches!(cli.command, Some(Command::Stop)) {
+        autostart::stop()?;
+        println!("Joocode background proxy stopped. Auto-start is Off.");
+        return Ok(());
+    }
 
     let selection = SourceSelection::new(cli.sources, cli.config, cli.auth)?;
     let registry = Registry::discover(&selection)
@@ -112,5 +122,8 @@ pub async fn run() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Upgrade { .. } => unreachable!("upgrade is handled before config discovery"),
+        Command::Start | Command::Stop => {
+            unreachable!("background lifecycle commands are handled before config discovery")
+        }
     }
 }

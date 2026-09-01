@@ -59,6 +59,7 @@ into Codex, Zed, or JetBrains. Start `jcx` and keep using the native client UI.
   or Windows Startup supervisor. When enabled, Joocode runs headlessly at login
   and is restarted automatically if it exits. Opening the dashboard temporarily
   takes over the proxy port; pressing `Esc` hands it back to the background service.
+  Use `jcx start` to enable/start it and `jcx stop` to stop it and disable Auto-start.
 - **Desktop app launcher** — release installers include the Joocode palm/crab
   icon and install a platform launcher while retaining the `jcx` flagship CLI (`joocode` remains an alias).
 - **Protocol bridge** — Responses API and Chat Completions, JSON and SSE,

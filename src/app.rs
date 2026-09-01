@@ -291,7 +291,16 @@ pub async fn serve_dashboard(
     let _ = shutdown_tx.send(());
     server.await??;
     match dashboard_result? {
-        dashboard::DashboardExit::Quit => Ok(()),
+        dashboard::DashboardExit::Quit => {
+            if autostart::status().enabled() {
+                autostart::resume()?;
+                persistent_proxy.disarm();
+                println!(
+                    "Joocode is still running in the background. You can stop it with `jcx stop`."
+                );
+            }
+            Ok(())
+        }
         dashboard::DashboardExit::Restart => {
             let result = upgrade::restart_current();
             if result.is_ok() {

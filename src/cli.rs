@@ -101,10 +101,26 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn accepts_background_lifecycle_commands() {
+        assert!(matches!(
+            Cli::try_parse_from(["jcx", "start"]).unwrap().command,
+            Some(Command::Start)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["jcx", "stop"]).unwrap().command,
+            Some(Command::Stop)
+        ));
+    }
 }
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
+    /// Start Joocode as a persistent background proxy and enable Auto-start.
+    Start,
+    /// Stop the persistent background proxy and disable Auto-start.
+    Stop,
     /// Start the local Codex-compatible HTTP server.
     Serve {
         #[arg(long, default_value = "127.0.0.1")]

@@ -69,6 +69,19 @@ pub fn resume() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Enable Auto-start and run the persistent background proxy immediately.
+pub fn start() -> anyhow::Result<Status> {
+    enable()?;
+    resume_platform()?;
+    Ok(Status::On)
+}
+
+/// Stop the persistent proxy and disable Auto-start so it stays stopped.
+pub fn stop() -> anyhow::Result<Status> {
+    disable()?;
+    Ok(Status::Off)
+}
+
 impl Status {
     pub fn label(self) -> &'static str {
         match self {
