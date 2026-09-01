@@ -207,9 +207,9 @@ fn replace_binary(executable: &Path, archive: &[u8], target: &str) -> anyhow::Re
     };
     let alias_source = temp_dir.join(format!("joocode-{target}/{alias_name}"));
     let alias_destination = executable.with_file_name(alias_name);
-    if alias_source.is_file() && alias_destination.is_file() {
+    if alias_source.is_file() {
         replace_executable(&alias_destination, &alias_source)
-            .with_context(|| format!("failed to update the {alias_name} compatibility command"))?;
+            .with_context(|| format!("failed to install the {alias_name} command"))?;
     }
 
     let _ = fs::remove_dir_all(temp_dir);
@@ -249,7 +249,49 @@ fn tempfile_dir(executable: &Path) -> anyhow::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{checksum_for, is_newer, normalize_tag};
+    use std::{
+        fs,
+        io::Write,
+        path::{Path, PathBuf},
+    };
+
+    use flate2::{Compression, write::GzEncoder};
+
+    use super::{checksum_for, is_newer, normalize_tag, replace_binary};
+
+    fn test_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "joocode-upgrade-test-{name}-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("thread")
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn release_archive(target: &str) -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for (name, contents) in [
+            ("joocode", b"new-joocode".as_slice()),
+            ("jcx", b"new-jcx".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            archive
+                .append_data(
+                    &mut header,
+                    Path::new(&format!("joocode-{target}/{name}")),
+                    contents,
+                )
+                .unwrap();
+        }
+        let encoder = archive.into_inner().unwrap();
+        encoder.finish().unwrap()
+    }
 
     #[test]
     fn normalizes_release_tags() {
@@ -275,5 +317,24 @@ mod tests {
         assert!(is_newer("v0.2.0", "0.1.10").unwrap());
         assert!(!is_newer("v0.1.10", "0.1.10").unwrap());
         assert!(!is_newer("v0.1.9", "0.1.10").unwrap());
+    }
+
+    #[test]
+    fn legacy_joocode_upgrade_installs_missing_jcx_command() {
+        let directory = test_dir("legacy-alias");
+        let executable = directory.join("joocode");
+        let mut file = fs::File::create(&executable).unwrap();
+        file.write_all(b"old-joocode").unwrap();
+
+        replace_binary(
+            &executable,
+            &release_archive("aarch64-apple-darwin"),
+            "aarch64-apple-darwin",
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&executable).unwrap(), b"new-joocode");
+        assert_eq!(fs::read(directory.join("jcx")).unwrap(), b"new-jcx");
+        fs::remove_dir_all(directory).unwrap();
     }
 }
