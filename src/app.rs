@@ -134,7 +134,11 @@ async fn proxy_openai(
 }
 
 pub async fn serve(host: IpAddr, port: u16, registry: Registry) -> anyhow::Result<()> {
-    let (listener, app, address) = prepare_server(host, port, RegistryStore::new(registry)).await?;
+    let (listener, app, address, port_warning) =
+        prepare_server(host, port, RegistryStore::new(registry)).await?;
+    if let Some(warning) = port_warning {
+        tracing::warn!("{warning}");
+    }
     info!(%address, "joocode listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -151,9 +155,10 @@ pub async fn serve_dashboard(
     base_url: Option<String>,
 ) -> anyhow::Result<()> {
     let registry_store = RegistryStore::new(registry.clone());
-    let (listener, app, address) = prepare_server(host, port, registry_store.clone()).await?;
+    let (listener, app, address, port_warning) =
+        prepare_server(host, port, registry_store.clone()).await?;
     let base_url = base_url.unwrap_or_else(|| desktop_base_url(address));
-    let dashboard_data = DashboardData::new(&registry, &targets, address);
+    let dashboard_data = DashboardData::new(&registry, &targets, address, port_warning);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -262,7 +267,7 @@ async fn prepare_server(
     host: IpAddr,
     port: u16,
     registry: RegistryStore,
-) -> anyhow::Result<(tokio::net::TcpListener, Router, SocketAddr)> {
+) -> anyhow::Result<(tokio::net::TcpListener, Router, SocketAddr, Option<String>)> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/models", get(models))
@@ -271,10 +276,49 @@ async fn prepare_server(
         .with_state(AppState { registry })
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
-    let address = SocketAddr::from((host, port));
-    let listener = tokio::net::TcpListener::bind(address).await?;
+    let (listener, port_warning) = bind_available(host, port).await?;
     let address = listener.local_addr()?;
-    Ok((listener, app, address))
+    Ok((listener, app, address, port_warning))
+}
+
+async fn bind_available(
+    host: IpAddr,
+    requested_port: u16,
+) -> std::io::Result<(tokio::net::TcpListener, Option<String>)> {
+    let requested_address = SocketAddr::from((host, requested_port));
+    match tokio::net::TcpListener::bind(requested_address).await {
+        Ok(listener) => Ok((listener, None)),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            let listener = if requested_port == u16::MAX {
+                tokio::net::TcpListener::bind(SocketAddr::from((host, 0))).await?
+            } else {
+                let mut listener = None;
+                for port in requested_port + 1..=u16::MAX {
+                    match tokio::net::TcpListener::bind(SocketAddr::from((host, port))).await {
+                        Ok(candidate) => {
+                            listener = Some(candidate);
+                            break;
+                        }
+                        Err(candidate_error)
+                            if candidate_error.kind() == std::io::ErrorKind::AddrInUse => {}
+                        Err(candidate_error) => return Err(candidate_error),
+                    }
+                }
+                match listener {
+                    Some(listener) => listener,
+                    None => tokio::net::TcpListener::bind(SocketAddr::from((host, 0))).await?,
+                }
+            };
+            let actual_port = listener.local_addr()?.port();
+            Ok((
+                listener,
+                Some(format!(
+                    "Port {requested_port} already in used, close another process first. Using port {actual_port}."
+                )),
+            ))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn shutdown_signal() {
@@ -426,6 +470,25 @@ mod tests {
         assert_eq!(
             desktop_base_url("0.0.0.0:10100".parse().unwrap()),
             "http://127.0.0.1:10100/v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_port_falls_back_to_the_next_available_port() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let requested_port = occupied.local_addr().unwrap().port();
+        let (listener, warning) = bind_available("127.0.0.1".parse().unwrap(), requested_port)
+            .await
+            .unwrap();
+        let actual_port = listener.local_addr().unwrap().port();
+
+        assert_ne!(actual_port, requested_port);
+        assert_eq!(actual_port, requested_port + 1);
+        assert_eq!(
+            warning.unwrap(),
+            format!(
+                "Port {requested_port} already in used, close another process first. Using port {actual_port}."
+            )
         );
     }
 }

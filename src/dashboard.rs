@@ -29,6 +29,7 @@ pub struct DashboardData {
     pub model_count: usize,
     pub provider_count: usize,
     pub autostart: AutoStartStatus,
+    pub port_warning: Option<String>,
 }
 
 fn draw_update_animation(frame: &mut Frame<'_>, tag: &str, tick: usize) {
@@ -381,7 +382,12 @@ fn handle_paste(screen: &mut Screen, value: &str) {
 }
 
 impl DashboardData {
-    pub fn new(registry: &Registry, targets: &DesktopTargets, address: SocketAddr) -> Self {
+    pub fn new(
+        registry: &Registry,
+        targets: &DesktopTargets,
+        address: SocketAddr,
+        port_warning: Option<String>,
+    ) -> Self {
         Self {
             config_sources: config_sources(registry),
             ide_targets: targets.names().into_iter().map(str::to_owned).collect(),
@@ -389,6 +395,7 @@ impl DashboardData {
             model_count: registry.models().len(),
             provider_count: registry.provider_count(),
             autostart: autostart::status(),
+            port_warning,
         }
     }
 }
@@ -755,6 +762,20 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
         data.ide_targets.join(", ")
     };
     let lines = vec![
+        data.port_warning
+            .as_ref()
+            .map(|warning| {
+                Line::from(vec![
+                    Span::styled("⚠ ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        warning,
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            })
+            .unwrap_or_else(|| Line::from("")),
         Line::from(vec![
             Span::styled("◆ ", Style::default().fg(Color::Cyan)),
             Span::styled("Config: ", Style::default().add_modifier(Modifier::BOLD)),
@@ -885,6 +906,7 @@ mod tests {
             model_count: 0,
             provider_count: 0,
             autostart: AutoStartStatus::Off,
+            port_warning: None,
         };
         let mut screen = Screen::Dashboard;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -922,6 +944,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::Off,
+            port_warning: None,
         };
         let mut screen = Screen::Dashboard;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -972,6 +995,7 @@ mod tests {
             model_count: 0,
             provider_count: 0,
             autostart: AutoStartStatus::Off,
+            port_warning: None,
         };
         let mut screen = Screen::Dashboard;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1008,6 +1032,7 @@ mod tests {
             model_count: 0,
             provider_count: 0,
             autostart: AutoStartStatus::Off,
+            port_warning: None,
         };
         let mut screen = Screen::Updating {
             tag: "v0.2.0".into(),
@@ -1030,6 +1055,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::Off,
+            port_warning: None,
         };
 
         terminal
@@ -1059,6 +1085,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::Off,
+            port_warning: None,
         };
 
         terminal
