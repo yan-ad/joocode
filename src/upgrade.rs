@@ -6,10 +6,11 @@ use std::{
 
 use anyhow::{Context, bail};
 use flate2::read::GzDecoder;
+use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-const DEFAULT_REPOSITORY: &str = "yan-ad/joc";
+const DEFAULT_REPOSITORY: &str = "yan-ad/joocode";
 
 #[derive(Debug, Deserialize)]
 struct LatestRelease {
@@ -17,37 +18,60 @@ struct LatestRelease {
 }
 
 pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
-    let repository = std::env::var("JOOCODE_REPOSITORY")
-        .or_else(|_| std::env::var("JOC_REPOSITORY"))
-        .unwrap_or_else(|_| DEFAULT_REPOSITORY.to_owned());
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("joocode/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("failed to create upgrade client")?;
-
     let tag = match version {
         Some(version) => normalize_tag(version),
-        None => {
-            let release = client
-                .get(format!(
-                    "https://api.github.com/repos/{repository}/releases/latest"
-                ))
-                .send()
-                .await
-                .context("failed to query the latest JustOpenCode release")?
-                .error_for_status()
-                .context("GitHub returned an error while checking for updates")?
-                .json::<LatestRelease>()
-                .await
-                .context("failed to parse the latest JustOpenCode release")?;
-            release.tag_name
-        }
+        None => match check().await? {
+            Some(tag) => tag,
+            None => {
+                println!(
+                    "JustOpenCode {} is already up to date",
+                    normalize_tag(env!("CARGO_PKG_VERSION"))
+                );
+                return Ok(());
+            }
+        },
     };
 
     if tag == normalize_tag(env!("CARGO_PKG_VERSION")) {
         println!("JustOpenCode {tag} is already up to date");
         return Ok(());
     }
+
+    let executable = install(&tag).await?;
+    println!("JustOpenCode {tag} installed at {}", executable.display());
+    Ok(())
+}
+
+pub async fn check() -> anyhow::Result<Option<String>> {
+    if !self_upgrade_supported() {
+        return Ok(None);
+    }
+
+    let repository = repository();
+    let release = client()?
+        .get(format!(
+            "https://api.github.com/repos/{repository}/releases/latest"
+        ))
+        .send()
+        .await
+        .context("failed to query the latest JustOpenCode release")?
+        .error_for_status()
+        .context("GitHub returned an error while checking for updates")?
+        .json::<LatestRelease>()
+        .await
+        .context("failed to parse the latest JustOpenCode release")?;
+
+    if is_newer(&release.tag_name, env!("CARGO_PKG_VERSION"))? {
+        Ok(Some(release.tag_name))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn install(tag: &str) -> anyhow::Result<PathBuf> {
+    let repository = repository();
+    let client = client()?;
+    let tag = normalize_tag(tag);
 
     let target = release_target()?;
     let asset = format!("joocode-{target}.tar.gz");
@@ -82,8 +106,41 @@ pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
 
     let executable = std::env::current_exe().context("failed to locate the running binary")?;
     replace_binary(&executable, &archive, &target)?;
-    println!("JustOpenCode {tag} installed at {}", executable.display());
+    Ok(executable)
+}
+
+pub fn restart_current() -> anyhow::Result<()> {
+    let executable = std::env::current_exe().context("failed to locate the updated binary")?;
+    std::process::Command::new(executable)
+        .args(std::env::args_os().skip(1))
+        .spawn()
+        .context("failed to restart the updated JustOpenCode process")?;
     Ok(())
+}
+
+fn repository() -> String {
+    std::env::var("JOOCODE_REPOSITORY")
+        .or_else(|_| std::env::var("JOC_REPOSITORY"))
+        .unwrap_or_else(|_| DEFAULT_REPOSITORY.to_owned())
+}
+
+fn client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(concat!("joocode/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("failed to create upgrade client")
+}
+
+fn self_upgrade_supported() -> bool {
+    matches!(std::env::consts::OS, "linux" | "macos")
+}
+
+fn is_newer(tag: &str, current: &str) -> anyhow::Result<bool> {
+    let latest = Version::parse(tag.trim_start_matches('v'))
+        .with_context(|| format!("invalid release version: {tag}"))?;
+    let current =
+        Version::parse(current).with_context(|| format!("invalid current version: {current}"))?;
+    Ok(latest > current)
 }
 
 fn normalize_tag(version: &str) -> String {
@@ -169,7 +226,7 @@ fn tempfile_dir(executable: &Path) -> anyhow::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{checksum_for, normalize_tag};
+    use super::{checksum_for, is_newer, normalize_tag};
 
     #[test]
     fn normalizes_release_tags() {
@@ -188,5 +245,12 @@ mod tests {
             checksum_for(checksums, "joocode-b.tar.gz"),
             Some("def".into())
         );
+    }
+
+    #[test]
+    fn only_reports_strictly_newer_semver_releases() {
+        assert!(is_newer("v0.2.0", "0.1.10").unwrap());
+        assert!(!is_newer("v0.1.10", "0.1.10").unwrap());
+        assert!(!is_newer("v0.1.9", "0.1.10").unwrap());
     }
 }

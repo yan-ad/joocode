@@ -28,6 +28,7 @@ use crate::{
     local_config, protocol,
     provider::{ModelInfo, Registry, RegistryStore},
     sources::SourceSelection,
+    upgrade,
 };
 
 #[derive(Clone)]
@@ -179,6 +180,12 @@ pub async fn serve_dashboard(
 
     let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let update_event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        if let Ok(Some(tag)) = upgrade::check().await {
+            let _ = update_event_tx.send(dashboard::DashboardEvent::UpdateAvailable(tag));
+        }
+    });
     let reload_store = registry_store;
     let reload_targets = targets.clone();
     let reload_base_url = base_url.clone();
@@ -227,6 +234,15 @@ pub async fn serve_dashboard(
                     };
                     let _ = event_tx.send(event);
                 }
+                dashboard::DashboardCommand::InstallUpdate { tag } => {
+                    let event = match upgrade::install(&tag).await {
+                        Ok(_) => dashboard::DashboardEvent::UpdateInstalled,
+                        Err(error) => dashboard::DashboardEvent::ProviderError(format!(
+                            "Update failed: {error:#}"
+                        )),
+                    };
+                    let _ = event_tx.send(event);
+                }
             }
         }
     });
@@ -236,7 +252,10 @@ pub async fn serve_dashboard(
     let dashboard_result = dashboard.await?;
     let _ = shutdown_tx.send(());
     server.await??;
-    dashboard_result
+    match dashboard_result? {
+        dashboard::DashboardExit::Quit => Ok(()),
+        dashboard::DashboardExit::Restart => upgrade::restart_current(),
+    }
 }
 
 async fn prepare_server(

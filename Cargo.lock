@@ -1111,6 +1111,7 @@ dependencies = [
  "json5",
  "ratatui",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",

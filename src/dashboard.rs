@@ -31,6 +31,138 @@ pub struct DashboardData {
     pub autostart: AutoStartStatus,
 }
 
+fn draw_update_animation(frame: &mut Frame<'_>, tag: &str, tick: usize) {
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+
+    let palette = [
+        Color::Rgb(255, 75, 118),
+        Color::Rgb(255, 154, 72),
+        Color::Rgb(255, 226, 89),
+        Color::Rgb(75, 216, 146),
+        Color::Rgb(72, 177, 255),
+        Color::Rgb(154, 112, 255),
+    ];
+    let sparkles = [' ', ' ', ' ', '·', '✦', '⋆'];
+    let background = (0..area.height)
+        .map(|row| {
+            let spans = (0..area.width)
+                .map(|column| {
+                    let wave = usize::from(column) / 6 + usize::from(row) / 2 + tick / 2;
+                    let color = palette[wave % palette.len()];
+                    let seed =
+                        usize::from(column) * 19 + usize::from(row) * 29 + tick.saturating_mul(11);
+                    Span::styled(
+                        sparkles[seed % sparkles.len()].to_string(),
+                        Style::default().fg(Color::White).bg(color),
+                    )
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(background), area);
+
+    let width = area.width.saturating_sub(4).min(74);
+    let height = 11_u16.min(area.height.saturating_sub(2));
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let spinner = ["◐", "◓", "◑", "◒"][tick % 4];
+    let bar_width = usize::from(width.saturating_sub(12)).max(8);
+    let shimmer = tick % bar_width;
+    let progress = (0..bar_width)
+        .map(|index| {
+            if index.abs_diff(shimmer) <= 2 {
+                '◆'
+            } else {
+                '─'
+            }
+        })
+        .collect::<String>();
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("{spinner}  Upgrading Joocode to {tag}"),
+                Style::default()
+                    .fg(palette[tick % palette.len()])
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                progress,
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Downloading · verifying · installing",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(Span::styled(
+                "Joocode will restart automatically",
+                Style::default().fg(Color::Gray),
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .title(" ✦ RAINBOW UPGRADE ✦ ")
+                .title_alignment(Alignment::Center)
+                .title_style(
+                    Style::default()
+                        .fg(Color::LightMagenta)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .style(Style::default().bg(Color::Rgb(15, 18, 28)))
+                .borders(Borders::ALL),
+        ),
+        popup,
+    );
+}
+
+fn draw_update_prompt(frame: &mut Frame<'_>, tag: &str) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(72);
+    let height = 9_u16.min(area.height.saturating_sub(2));
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("There's a new version available: {tag}"),
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("Press Enter to update and run immediately after updating."),
+        ])
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .title(" ↑ Joocode update ")
+                .title_style(Style::default().fg(Color::Cyan))
+                .borders(Borders::ALL),
+        ),
+        popup,
+    );
+}
+
 const AUTO_START_ITEM: usize = 0;
 const CONFIG_ITEM_COUNT: usize = 1;
 
@@ -265,6 +397,7 @@ impl DashboardData {
 pub enum DashboardCommand {
     AddProvider { base_url: String, api_key: String },
     ToggleAutoStart,
+    InstallUpdate { tag: String },
 }
 
 #[derive(Debug)]
@@ -278,6 +411,14 @@ pub enum DashboardEvent {
     },
     ProviderError(String),
     AutoStartUpdated(AutoStartStatus),
+    UpdateAvailable(String),
+    UpdateInstalled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DashboardExit {
+    Quit,
+    Restart,
 }
 
 #[derive(Default)]
@@ -298,6 +439,11 @@ enum Screen {
         models: Vec<String>,
     },
     Error(String),
+    UpdateAvailable(String),
+    Updating {
+        tag: String,
+        tick: usize,
+    },
     EasterEgg {
         tick: usize,
     },
@@ -323,21 +469,24 @@ pub fn run(
     mut data: DashboardData,
     command_tx: UnboundedSender<DashboardCommand>,
     event_rx: Receiver<DashboardEvent>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<DashboardExit> {
     let mut screen = Screen::Dashboard;
     let mut secret_input = String::new();
-    ratatui::run(|terminal| {
+    let exit = ratatui::run(|terminal| {
         loop {
-            receive_events(&mut data, &mut screen, &event_rx);
-            if let Screen::EasterEgg { tick } = &mut screen {
+            if receive_events(&mut data, &mut screen, &event_rx) {
+                return Ok::<DashboardExit, std::io::Error>(DashboardExit::Restart);
+            }
+            if let Screen::EasterEgg { tick } | Screen::Updating { tick, .. } = &mut screen {
                 *tick = tick.wrapping_add(1);
             }
             terminal.draw(|frame| draw(frame, &data, &screen))?;
-            let poll_interval = if matches!(screen, Screen::EasterEgg { .. }) {
-                Duration::from_millis(80)
-            } else {
-                Duration::from_millis(100)
-            };
+            let poll_interval =
+                if matches!(screen, Screen::EasterEgg { .. } | Screen::Updating { .. }) {
+                    Duration::from_millis(80)
+                } else {
+                    Duration::from_millis(100)
+                };
             if !event::poll(poll_interval)? {
                 continue;
             }
@@ -351,14 +500,17 @@ pub fn run(
                 continue;
             }
             if key.code == KeyCode::Esc {
+                if matches!(screen, Screen::Updating { .. }) {
+                    continue;
+                }
                 if matches!(screen, Screen::Dashboard) {
-                    return Ok::<(), std::io::Error>(());
+                    return Ok::<DashboardExit, std::io::Error>(DashboardExit::Quit);
                 }
                 screen = Screen::Dashboard;
                 continue;
             }
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                return Ok(());
+                return Ok(DashboardExit::Quit);
             }
             if detect_easter_egg(&mut screen, &mut secret_input, key.code) {
                 continue;
@@ -366,14 +518,14 @@ pub fn run(
             handle_key(&mut screen, key.code, &command_tx);
         }
     })?;
-    Ok(())
+    Ok(exit)
 }
 
 fn receive_events(
     data: &mut DashboardData,
     screen: &mut Screen,
     event_rx: &Receiver<DashboardEvent>,
-) {
+) -> bool {
     loop {
         match event_rx.try_recv() {
             Ok(DashboardEvent::ProviderAdded {
@@ -390,9 +542,12 @@ fn receive_events(
             }
             Ok(DashboardEvent::ProviderError(error)) => *screen = Screen::Error(error),
             Ok(DashboardEvent::AutoStartUpdated(status)) => data.autostart = status,
+            Ok(DashboardEvent::UpdateAvailable(tag)) => *screen = Screen::UpdateAvailable(tag),
+            Ok(DashboardEvent::UpdateInstalled) => return true,
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
         }
     }
+    false
 }
 
 fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<DashboardCommand>) {
@@ -442,6 +597,17 @@ fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<Da
             KeyCode::Char(character) => api_key.push(character),
             _ => {}
         },
+        Screen::UpdateAvailable(tag) if key == KeyCode::Enter => {
+            let tag = tag.clone();
+            if command_tx
+                .send(DashboardCommand::InstallUpdate { tag: tag.clone() })
+                .is_ok()
+            {
+                *screen = Screen::Updating { tag, tick: 0 };
+            } else {
+                *screen = Screen::Error("update channel is unavailable".into());
+            }
+        }
         Screen::Models { .. } | Screen::Error(_) | Screen::EasterEgg { .. }
             if key == KeyCode::Enter =>
         {
@@ -454,6 +620,10 @@ fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<Da
 fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
     if let Screen::EasterEgg { tick } = screen {
         draw_easter_egg(frame, *tick);
+        return;
+    }
+    if let Screen::Updating { tag, tick } = screen {
+        draw_update_animation(frame, tag, *tick);
         return;
     }
 
@@ -489,6 +659,13 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             Paragraph::new("Step 3/3 — Loading /models…").wrap(Wrap { trim: true }),
             body,
         ),
+        Screen::UpdateAvailable(tag) => {
+            draw_dashboard(frame, body, data);
+            draw_update_prompt(frame, tag);
+        }
+        Screen::Updating { .. } => {
+            unreachable!("updating is rendered as a full-screen animated scene")
+        }
         Screen::EasterEgg { .. } => unreachable!("easter egg is rendered as a full-screen scene"),
         Screen::Models { provider, models } => {
             let items = models
@@ -547,6 +724,13 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             Span::raw(" to continue  ·  Esc to cancel"),
         ],
         Screen::Loading => vec![Span::raw("Fetching models…  ·  Esc to cancel")],
+        Screen::UpdateAvailable(_) => vec![
+            Span::styled("Enter", Style::default().fg(Color::Green)),
+            Span::raw(" update & restart  ·  Esc dismiss"),
+        ],
+        Screen::Updating { .. } => {
+            unreachable!("updating has its own full-screen progress scene")
+        }
         Screen::Models { .. } | Screen::Error(_) => vec![
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::raw(" to return  ·  Esc to cancel"),
@@ -780,6 +964,62 @@ mod tests {
     }
 
     #[test]
+    fn update_event_opens_the_update_prompt() {
+        let mut data = DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 0,
+            provider_count: 0,
+            autostart: AutoStartStatus::Off,
+        };
+        let mut screen = Screen::Dashboard;
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(DashboardEvent::UpdateAvailable("v0.2.0".into()))
+            .unwrap();
+
+        assert!(!receive_events(&mut data, &mut screen, &rx));
+        assert!(matches!(screen, Screen::UpdateAvailable(tag) if tag == "v0.2.0"));
+    }
+
+    #[test]
+    fn enter_accepts_an_available_update() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = Screen::UpdateAvailable("v0.2.0".into());
+
+        handle_key(&mut screen, KeyCode::Enter, &tx);
+
+        assert!(matches!(
+            screen,
+            Screen::Updating { tag, tick: 0 } if tag == "v0.2.0"
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DashboardCommand::InstallUpdate { tag }) if tag == "v0.2.0"
+        ));
+    }
+
+    #[test]
+    fn installed_update_requests_process_restart() {
+        let mut data = DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 0,
+            provider_count: 0,
+            autostart: AutoStartStatus::Off,
+        };
+        let mut screen = Screen::Updating {
+            tag: "v0.2.0".into(),
+            tick: 0,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(DashboardEvent::UpdateInstalled).unwrap();
+
+        assert!(receive_events(&mut data, &mut screen, &rx));
+    }
+
+    #[test]
     fn easter_egg_replaces_the_entire_dashboard() {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -804,6 +1044,45 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("JOOCODE SECRET MODE"));
+        assert!(!rendered.contains("Listening:"));
+        assert!(!rendered.contains("Config:"));
+    }
+
+    #[test]
+    fn updating_replaces_the_dashboard_with_rainbow_progress() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = DashboardData {
+            config_sources: vec!["OpenCode".into()],
+            ide_targets: vec!["Codex".into()],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 30,
+            provider_count: 5,
+            autostart: AutoStartStatus::Off,
+        };
+
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &data,
+                    &Screen::Updating {
+                        tag: "v0.2.0".into(),
+                        tick: 5,
+                    },
+                )
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("RAINBOW UPGRADE"));
+        assert!(rendered.contains("Upgrading Joocode to v0.2.0"));
         assert!(!rendered.contains("Listening:"));
         assert!(!rendered.contains("Config:"));
     }
