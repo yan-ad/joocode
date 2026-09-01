@@ -35,6 +35,16 @@ struct AppState {
     registry: RegistryStore,
 }
 
+fn desktop_base_url(address: std::net::SocketAddr) -> String {
+    let host = match address.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_owned(),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        ip => ip.to_string(),
+    };
+    format!("http://{host}:{}/v1", address.port())
+}
+
 /// Zed's OpenAI-compatible provider uses Chat Completions directly. Qualified
 /// models are translated only at routing time; the upstream already speaks this
 /// wire format, so its JSON and SSE response can pass through unchanged.
@@ -137,10 +147,11 @@ pub async fn serve_dashboard(
     registry: Registry,
     selection: SourceSelection,
     targets: DesktopTargets,
-    base_url: String,
+    base_url: Option<String>,
 ) -> anyhow::Result<()> {
     let registry_store = RegistryStore::new(registry.clone());
     let (listener, app, address) = prepare_server(host, port, registry_store.clone()).await?;
+    let base_url = base_url.unwrap_or_else(|| desktop_base_url(address));
     let dashboard_data = DashboardData::new(&registry, &targets, address);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(async move {
@@ -385,5 +396,17 @@ mod tests {
     #[tokio::test]
     async fn health_route_is_available() {
         assert_eq!(healthz().await.into_response().status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn desktop_base_url_follows_the_listener() {
+        assert_eq!(
+            desktop_base_url("127.0.0.1:18125".parse().unwrap()),
+            "http://127.0.0.1:18125/v1"
+        );
+        assert_eq!(
+            desktop_base_url("0.0.0.0:10100".parse().unwrap()),
+            "http://127.0.0.1:10100/v1"
+        );
     }
 }

@@ -34,8 +34,8 @@ pub struct Cli {
     pub all: bool,
 
     /// URL where desktop applications can reach the local API.
-    #[arg(long, default_value = "http://127.0.0.1:10100/v1")]
-    pub base_url: String,
+    #[arg(long)]
+    pub base_url: Option<String>,
 
     /// Interface to bind the shared proxy to.
     #[arg(long, default_value = "127.0.0.1")]
@@ -78,7 +78,7 @@ mod tests {
         assert!(cli.all);
         assert_eq!(cli.host, "0.0.0.0".parse::<IpAddr>().unwrap());
         assert_eq!(cli.port, 1234);
-        assert_eq!(cli.base_url, "http://localhost:1234/v1");
+        assert_eq!(cli.base_url.as_deref(), Some("http://localhost:1234/v1"));
         assert_eq!(cli.sources, vec![SourceKind::Auto]);
     }
 
