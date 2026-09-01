@@ -5,6 +5,10 @@
 Reuse OpenCode, OCX, Hermes, Copilot, and OpenAI-compatible providers inside Codex, Zed, and JetBrains.</p>
 
 <p align="center">
+  <img src="assets/joocode-icon.png" alt="Joocode palm and crab logo" width="180">
+</p>
+
+<p align="center">
   <a href="https://github.com/yan-ad/joocode/releases/latest"><img src="https://img.shields.io/github/v/release/yan-ad/joocode?color=6f42c1&label=release" alt="Latest release"></a>
   <a href="https://github.com/yan-ad/joocode/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/yan-ad/joocode/ci.yml?branch=main&label=build" alt="Build status"></a>
   <a href="https://github.com/yan-ad/joocode/blob/main/LICENSE"><img src="https://img.shields.io/github/license/yan-ad/joocode?color=blue" alt="MIT license"></a>
@@ -27,7 +31,7 @@ joocode
 
 ◉ Models: 30    ◇ Providers: 5
 
-Esc to exit  ·  Tab to add new key  ·  Ctrl+A Auto-start (Off)
+Esc to exit  ·  Tab to add new key  ·  / Config
 ```
 
 Joocode takes the universal local-proxy idea behind projects such as OCX and
@@ -48,7 +52,8 @@ into Codex, Zed, or JetBrains. Start Joocode and keep using the native client UI
   runtime and no browser dashboard required.
 - **Live catalog reload** — press `Tab`, enter a base URL and API key, fetch
   `/models`, and use the new models without restarting Joocode.
-- **Login auto-start** — press `Ctrl+A` to toggle a native macOS LaunchAgent,
+- **Login auto-start** — press `/`, select Auto-start, then press `Space` to toggle
+  the native macOS LaunchAgent,
   Linux systemd user service, or Windows Startup entry. Startup runs headlessly.
 - **Desktop app launcher** — release installers include the Joocode palm/crab
   icon and install a platform launcher while retaining the `joocode` CLI.

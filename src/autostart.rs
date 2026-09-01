@@ -42,7 +42,34 @@ pub fn toggle() -> anyhow::Result<Status> {
 }
 
 fn executable() -> anyhow::Result<PathBuf> {
-    std::env::current_exe().context("failed to locate the Joocode executable")
+    let current = std::env::current_exe().context("failed to locate the Joocode executable")?;
+    if current.to_string_lossy().contains("/Cellar/") {
+        for candidate in stable_executable_candidates() {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn stable_executable_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("/opt/homebrew/bin/joocode"),
+        PathBuf::from("/usr/local/bin/joocode"),
+        PathBuf::from("/home/linuxbrew/.linuxbrew/bin/joocode"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".local/bin/joocode"));
+        candidates.push(home.join(".cargo/bin/joocode"));
+    }
+    candidates
+}
+
+#[cfg(windows)]
+fn stable_executable_candidates() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 #[cfg(target_os = "macos")]

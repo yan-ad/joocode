@@ -31,6 +31,62 @@ pub struct DashboardData {
     pub autostart: AutoStartStatus,
 }
 
+const AUTO_START_ITEM: usize = 0;
+const CONFIG_ITEM_COUNT: usize = 1;
+
+fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
+    let [_, vertical, _] = Layout::vertical([
+        Constraint::Percentage(30),
+        Constraint::Length(7),
+        Constraint::Min(0),
+    ])
+    .areas(frame.area());
+    let [_, popup, _] = Layout::horizontal([
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(20),
+    ])
+    .areas(vertical);
+
+    let marker = if data.autostart.enabled() {
+        "●"
+    } else {
+        "○"
+    };
+    let item = Line::from(vec![
+        Span::styled(
+            format!("{marker} "),
+            Style::default().fg(if data.autostart.enabled() {
+                Color::Green
+            } else {
+                Color::DarkGray
+            }),
+        ),
+        Span::raw("Auto-start"),
+        Span::raw(format!(" ({})", data.autostart.label())),
+    ]);
+    let style = if selected == AUTO_START_ITEM {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        List::new(vec![ListItem::new(item).style(style)]).block(
+            Block::default()
+                .title(" ⚙ Configuration ")
+                .title_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .borders(Borders::ALL),
+        ),
+        popup,
+    );
+}
+
 fn draw_easter_egg(frame: &mut Frame<'_>) {
     let [_, vertical, _] = Layout::vertical([
         Constraint::Percentage(35),
@@ -144,6 +200,9 @@ pub enum DashboardEvent {
 enum Screen {
     #[default]
     Dashboard,
+    Config {
+        selected: usize,
+    },
     BaseUrl(String),
     ApiKey {
         base_url: String,
@@ -207,13 +266,6 @@ pub fn run(
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 return Ok(());
             }
-            if key.code == KeyCode::Char('a')
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && matches!(screen, Screen::Dashboard)
-            {
-                let _ = command_tx.send(DashboardCommand::ToggleAutoStart);
-                continue;
-            }
             if detect_easter_egg(&mut screen, &mut secret_input, key.code) {
                 continue;
             }
@@ -252,6 +304,19 @@ fn receive_events(
 fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<DashboardCommand>) {
     match screen {
         Screen::Dashboard if key == KeyCode::Tab => *screen = Screen::BaseUrl(String::new()),
+        Screen::Dashboard if key == KeyCode::Char('/') => *screen = Screen::Config { selected: 0 },
+        Screen::Config { selected } => match key {
+            KeyCode::Up => {
+                *selected = selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                *selected = (*selected + 1).min(CONFIG_ITEM_COUNT - 1);
+            }
+            KeyCode::Char(' ') if *selected == AUTO_START_ITEM => {
+                let _ = command_tx.send(DashboardCommand::ToggleAutoStart);
+            }
+            _ => {}
+        },
         Screen::BaseUrl(base_url) => match key {
             KeyCode::Enter if !base_url.trim().is_empty() => {
                 *screen = Screen::ApiKey {
@@ -311,6 +376,10 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
 
     match screen {
         Screen::Dashboard => draw_dashboard(frame, body, data),
+        Screen::Config { selected } => {
+            draw_dashboard(frame, body, data);
+            draw_config(frame, data, *selected);
+        }
         Screen::BaseUrl(value) => draw_input(frame, body, "Step 1/3 — Base URL", value, false),
         Screen::ApiKey { api_key, .. } => {
             draw_input(frame, body, "Step 2/3 — API key", api_key, true)
@@ -360,15 +429,20 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" to add new key"),
-            Span::raw("  ·  "),
+            Span::raw(" to add new key  ·  "),
             Span::styled(
-                "Ctrl+A",
+                "/",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(" Auto-start ({})", data.autostart.label())),
+            Span::raw(" Config"),
+        ],
+        Screen::Config { .. } => vec![
+            Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
+            Span::raw(" navigate  ·  "),
+            Span::styled("Space", Style::default().fg(Color::Green)),
+            Span::raw(" toggle  ·  Esc to close"),
         ],
         Screen::BaseUrl(_) | Screen::ApiKey { .. } => vec![
             Span::styled("Enter", Style::default().fg(Color::Green)),
@@ -496,6 +570,25 @@ mod tests {
         let mut screen = Screen::Dashboard;
         handle_key(&mut screen, KeyCode::Tab, &tx);
         assert!(matches!(screen, Screen::BaseUrl(_)));
+    }
+
+    #[test]
+    fn slash_opens_configuration_modal() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = Screen::Dashboard;
+        handle_key(&mut screen, KeyCode::Char('/'), &tx);
+        assert!(matches!(screen, Screen::Config { selected: 0 }));
+    }
+
+    #[test]
+    fn space_toggles_selected_configuration_item() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = Screen::Config { selected: 0 };
+        handle_key(&mut screen, KeyCode::Char(' '), &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DashboardCommand::ToggleAutoStart)
+        ));
     }
 
     #[test]
