@@ -148,11 +148,12 @@ cargo build --release --locked
 ## How it works
 
 ```text
-OpenCode ───────┐
-OCX profiles ───┤
-Hermes ─────────┤                    ┌─ Codex Responses API
-GitHub Copilot ─┼─► Joocode proxy ───┼─ Zed Chat Completions
-providers.json ─┘                    └─ JetBrains OpenAI-compatible
+OpenCode ────────┐
+OpenCodex / OCX ─┤
+OCX profiles ────┤
+Hermes ──────────┤                    ┌─ Codex Responses API
+GitHub Copilot ──┼─► Joocode proxy ───┼─ Zed Chat Completions
+providers.json ──┘                    └─ JetBrains OpenAI-compatible
 ```
 
 Joocode builds one source-aware model registry, exposes it through
@@ -161,6 +162,7 @@ selected model. Model IDs remain explicit:
 
 ```text
 provider/model
+ocx/provider/model
 ocx-profile/provider/model
 hermes/provider/model
 copilot/model
@@ -262,7 +264,40 @@ Legacy `JOC_*` and `CRABCODEX_*` variables remain supported for migration.
 Compatible OpenCode entries currently use `@ai-sdk/openai-compatible`,
 `@ai-sdk/openai`, or no explicit `npm` adapter.
 
-### OCX profiles
+### OpenCodex / OCX
+
+Joocode reads the OpenCodex configuration directory directly:
+
+```text
+$OPENCODEX_HOME
+~/.opencodex
+```
+
+Recognized configuration files include:
+
+```text
+config.json
+catalog-backup.json
+catalog-backup-*.json
+codex-runtime.json
+codex-runtime-clamp.json
+runtime-port.json
+```
+
+`config.json` supplies providers, model lists, aliases, model limits, selection
+rules, and the running OCX port. Catalog backups enrich native Codex model
+metadata. Runtime clamp data is applied to affected model capabilities.
+When present, `runtime-port.json` supplies the active OCX listener without
+loading its private attestation field.
+
+Models use `ocx/provider/model`. Requests are sent through the local OCX proxy,
+so OCX remains authoritative for OAuth refresh, API-key pools, routing, adapter
+translation, and account failover. Joocode does not copy those managed secrets.
+
+Runtime state, usage logs, quota caches, response history, and token files such
+as `admin-api-token` are deliberately not interpreted as model catalogs.
+
+### OCX OpenCode profiles
 
 Every global OpenCode profile under the following path is discovered:
 

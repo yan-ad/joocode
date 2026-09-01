@@ -11,6 +11,7 @@ use reqwest::{
     Client,
     header::{HeaderMap, HeaderName, HeaderValue},
 };
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
@@ -28,6 +29,302 @@ pub enum SourceKind {
     Hermes,
     Copilot,
     Joocode,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenCodexRuntimePort {
+    port: u16,
+    #[serde(default)]
+    hostname: Option<String>,
+}
+
+fn load_opencodex_runtime_port(root: &Path) -> anyhow::Result<Option<OpenCodexRuntimePort>> {
+    let path = root.join("runtime-port.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("failed reading {}", path.display()))?;
+    let parsed: OpenCodexRuntimePort = json5::from_str(&text)
+        .with_context(|| format!("invalid JSON in {}", path.display()))?;
+    Ok((parsed.port > 0).then_some(parsed))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenCodexConfig {
+    #[serde(default = "default_opencodex_port")]
+    port: u16,
+    #[serde(default)]
+    providers: BTreeMap<String, OpenCodexProvider>,
+    #[serde(default)]
+    default_provider: Option<String>,
+    #[serde(default)]
+    subagent_models: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenCodexProvider {
+    #[serde(default)]
+    disabled: bool,
+    #[serde(default)]
+    default_model: Option<String>,
+    #[serde(default)]
+    models: Vec<String>,
+    #[serde(default)]
+    selected_models: Vec<String>,
+    #[serde(default)]
+    model_aliases: BTreeMap<String, String>,
+    #[serde(default)]
+    context_window: Option<u64>,
+    #[serde(default)]
+    model_context_windows: BTreeMap<String, u64>,
+    #[serde(default)]
+    default_max_output_tokens: Option<u64>,
+    #[serde(default)]
+    model_max_output_tokens: BTreeMap<String, u64>,
+    #[serde(default)]
+    reasoning_efforts: Vec<String>,
+    #[serde(default)]
+    model_reasoning_efforts: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct OpenCodexModelMeta {
+    name: Option<String>,
+    reasoning: Option<bool>,
+    context_window: Option<u64>,
+    max_output_tokens: Option<u64>,
+}
+
+fn default_opencodex_port() -> u16 {
+    10_100
+}
+
+fn discover_opencodex_at(root: &Path) -> anyhow::Result<DiscoveredCatalog> {
+    let config_path = root.join("config.json");
+    let text = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed reading {}", config_path.display()))?;
+    let config: OpenCodexConfig = json5::from_str(&text)
+        .with_context(|| format!("invalid JSON in {}", config_path.display()))?;
+    let mut metadata = load_opencodex_catalog_metadata(root)?;
+    let clamp = load_opencodex_clamp(root)?;
+
+    for affected in &clamp.affected_models {
+        let (provider, model) = split_opencodex_model(
+            affected,
+            config.default_provider.as_deref().unwrap_or("openai"),
+        );
+        metadata
+            .entry(provider.to_owned())
+            .or_default()
+            .entry(model.to_owned())
+            .or_default();
+    }
+    if let Some(default_provider) = config.default_provider.as_deref() {
+        for model in &config.subagent_models {
+            metadata
+                .entry(default_provider.to_owned())
+                .or_default()
+                .entry(model.to_owned())
+                .or_default();
+        }
+    }
+
+    let runtime = load_opencodex_runtime_port(root)?;
+    let runtime_port = runtime.as_ref().map(|runtime| runtime.port).unwrap_or(config.port);
+    let runtime_host = runtime
+        .as_ref()
+        .and_then(|runtime| runtime.hostname.as_deref())
+        .filter(|hostname| matches!(*hostname, "127.0.0.1" | "localhost" | "::1"))
+        .unwrap_or("127.0.0.1");
+    let runtime_host = if runtime_host == "::1" {
+        "[::1]"
+    } else {
+        runtime_host
+    };
+    let proxy_base = format!("http://{runtime_host}:{runtime_port}/v1");
+    let mut providers = Vec::new();
+    for (provider_name, configured) in config.providers {
+        if configured.disabled {
+            continue;
+        }
+        let provider_meta = metadata.remove(&provider_name).unwrap_or_default();
+        let mut model_ids = BTreeSet::new();
+        model_ids.extend(configured.models.iter().cloned());
+        model_ids.extend(configured.model_aliases.keys().cloned());
+        model_ids.extend(provider_meta.keys().cloned());
+        if let Some(default_model) = &configured.default_model {
+            model_ids.insert(default_model.clone());
+        }
+        if !configured.selected_models.is_empty() {
+            let selected = configured.selected_models.iter().collect::<BTreeSet<_>>();
+            model_ids.retain(|model| selected.contains(model));
+        }
+        if model_ids.is_empty() {
+            continue;
+        }
+
+        let public_provider = format!("ocx/{provider_name}");
+        let models = model_ids
+            .into_iter()
+            .map(|model| {
+                let meta = provider_meta.get(&model).cloned().unwrap_or_default();
+                let efforts = configured
+                    .model_reasoning_efforts
+                    .get(&model)
+                    .unwrap_or(&configured.reasoning_efforts);
+                let clamped = clamp.matches(&provider_name, &model);
+                let reasoning = meta.reasoning.unwrap_or(!efforts.is_empty())
+                    && !(clamped && clamp.removes_all_reasoning(efforts));
+                DiscoveredModel {
+                    info: ModelInfo {
+                        id: format!("{public_provider}/{model}"),
+                        provider: public_provider.clone(),
+                        upstream_id: format!("{provider_name}/{model}"),
+                        name: meta.name.unwrap_or_else(|| model.clone()),
+                        reasoning,
+                        context_window: configured
+                            .model_context_windows
+                            .get(&model)
+                            .copied()
+                            .or(configured.context_window)
+                            .or(meta.context_window),
+                        max_output_tokens: configured
+                            .model_max_output_tokens
+                            .get(&model)
+                            .copied()
+                            .or(configured.default_max_output_tokens)
+                            .or(meta.max_output_tokens),
+                    },
+                }
+            })
+            .collect();
+        providers.push(DiscoveredProvider {
+            key: format!("ocx:{provider_name}"),
+            provider: Provider {
+                base_url: proxy_base.clone(),
+                credential: Credential::None,
+                headers: HeaderMap::new(),
+            },
+            models,
+        });
+    }
+    let scanned = opencodex_config_files(root)?.len();
+    Ok(DiscoveredCatalog {
+        source: "ocx".into(),
+        providers,
+        detail: Some(format!(
+            "{}; {scanned} recognized config files scanned",
+            config_path.display()
+        )),
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenCodexClamp {
+    #[serde(default)]
+    removed_efforts: BTreeSet<String>,
+    #[serde(default)]
+    affected_models: BTreeSet<String>,
+}
+
+impl OpenCodexClamp {
+    fn matches(&self, provider: &str, model: &str) -> bool {
+        self.affected_models.contains(model)
+            || self
+                .affected_models
+                .contains(&format!("{provider}/{model}"))
+    }
+
+    fn removes_all_reasoning(&self, efforts: &[String]) -> bool {
+        !efforts.is_empty()
+            && efforts
+                .iter()
+                .all(|effort| self.removed_efforts.contains(effort))
+    }
+}
+
+fn load_opencodex_clamp(root: &Path) -> anyhow::Result<OpenCodexClamp> {
+    let path = root.join("codex-runtime-clamp.json");
+    if !path.is_file() {
+        return Ok(OpenCodexClamp::default());
+    }
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed reading {}", path.display()))?;
+    json5::from_str(&text).with_context(|| format!("invalid JSON in {}", path.display()))
+}
+
+fn split_opencodex_model<'a>(value: &'a str, default_provider: &'a str) -> (&'a str, &'a str) {
+    value.split_once('/').unwrap_or((default_provider, value))
+}
+
+fn opencodex_config_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(root).with_context(|| format!("failed reading {}", root.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let recognized = name == "config.json"
+            || name == "codex-runtime.json"
+            || name == "codex-runtime-clamp.json"
+            || name == "runtime-port.json"
+            || (name.starts_with("catalog-backup") && name.ends_with(".json"));
+        if recognized {
+            files.push(entry.path());
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn load_opencodex_catalog_metadata(
+    root: &Path,
+) -> anyhow::Result<BTreeMap<String, BTreeMap<String, OpenCodexModelMeta>>> {
+    let mut result = BTreeMap::<String, BTreeMap<String, OpenCodexModelMeta>>::new();
+    for path in opencodex_config_files(root)? {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("catalog-backup") {
+            continue;
+        }
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("failed reading {}", path.display()))?;
+        let value: Value = json5::from_str(&text)
+            .with_context(|| format!("invalid JSON in {}", path.display()))?;
+        let Some(models) = value.get("models").and_then(Value::as_array) else {
+            continue;
+        };
+        for model in models {
+            let Some(slug) = model.get("slug").and_then(Value::as_str) else {
+                continue;
+            };
+            let entry = result
+                .entry("openai".into())
+                .or_default()
+                .entry(slug.into())
+                .or_default();
+            entry.name = model
+                .get("display_name")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            entry.reasoning = model
+                .get("supported_reasoning_levels")
+                .and_then(Value::as_array)
+                .map(|levels| !levels.is_empty());
+            entry.context_window = model
+                .get("max_context_window")
+                .or_else(|| model.get("context_window"))
+                .and_then(Value::as_u64);
+            entry.max_output_tokens = model.get("max_output_tokens").and_then(Value::as_u64);
+        }
+    }
+    Ok(result)
 }
 
 fn source_error(source: &str, error: anyhow::Error) -> anyhow::Error {
@@ -173,16 +470,46 @@ fn discover_opencode(selection: &SourceSelection) -> anyhow::Result<DiscoveredCa
 }
 
 fn discover_ocx(selection: &SourceSelection) -> anyhow::Result<DiscoveredCatalog> {
+    let opencodex_root = env::var_os("OPENCODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".opencodex"));
     let profiles_root = xdg_config_home()?.join("opencode/profiles");
-    if !profiles_root.is_dir() {
-        return Ok(empty_catalog("ocx", "profiles not found"));
-    }
-    let auth = resolve_opencode_auth(selection.opencode_auth.clone())?;
-    if !auth.is_file() {
-        return Ok(empty_catalog("ocx", "OpenCode auth not found"));
+    discover_ocx_sources(&opencodex_root, &profiles_root, selection)
+}
+
+fn discover_ocx_sources(
+    opencodex_root: &Path,
+    profiles_root: &Path,
+    selection: &SourceSelection,
+) -> anyhow::Result<DiscoveredCatalog> {
+    let mut providers = Vec::new();
+    let mut details = Vec::new();
+
+    if opencodex_root.join("config.json").is_file() {
+        let catalog = discover_opencodex_at(opencodex_root)?;
+        details.push(catalog.detail.unwrap_or_default());
+        providers.extend(catalog.providers);
     }
 
-    discover_ocx_at(&profiles_root, &auth)
+    if profiles_root.is_dir() {
+        let auth = resolve_opencode_auth(selection.opencode_auth.clone())?;
+        if auth.is_file() {
+            let catalog = discover_ocx_at(profiles_root, &auth)?;
+            details.push(catalog.detail.unwrap_or_default());
+            providers.extend(catalog.providers);
+        } else {
+            details.push("profiles found; OpenCode auth missing".into());
+        }
+    }
+
+    if providers.is_empty() && details.is_empty() {
+        return Ok(empty_catalog("ocx", "~/.opencodex and profiles not found"));
+    }
+    Ok(DiscoveredCatalog {
+        source: "ocx".into(),
+        providers,
+        detail: Some(details.join("; ")),
+    })
 }
 
 fn discover_ocx_at(profiles_root: &Path, auth: &Path) -> anyhow::Result<DiscoveredCatalog> {
@@ -874,6 +1201,94 @@ providers:
         let catalog = discover_ocx_at(&profiles, &auth).unwrap();
         assert_eq!(catalog.providers.len(), 1);
         assert_eq!(catalog.providers[0].models[0].info.id, "ocx-work/demo/fast");
+    }
+
+    #[test]
+    fn discovers_opencodex_folder_config_catalog_and_clamp() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "port": 18181,
+                "defaultProvider": "openai",
+                "subagentModels": ["subagent-model"],
+                "providers": {
+                    "openai": {"adapter":"openai-responses", "baseUrl":"https://example.test/v1", "authMode":"forward"},
+                    "custom": {
+                        "adapter":"openai-chat",
+                        "baseUrl":"https://custom.test/v1",
+                        "apiKey":"secret",
+                        "models":["fast", "hidden"],
+                        "selectedModels":["fast"],
+                        "modelContextWindows":{"fast":64000},
+                        "modelReasoningEfforts":{"fast":["max"]}
+                    },
+                    "disabled": {"adapter":"openai-chat", "baseUrl":"https://off.test/v1", "models":["off"], "disabled":true}
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("catalog-backup.json"),
+            r#"{"models":[{"slug":"gpt-test","display_name":"GPT Test","supported_reasoning_levels":[{"effort":"high"}],"max_context_window":128000}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("catalog-backup-deadbeefdeadbeef.json"),
+            r#"{"models":[{"slug":"gpt-extra","display_name":"GPT Extra"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("codex-runtime.json"),
+            r#"{"version":1,"command":"codex","source":"path"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("codex-runtime-clamp.json"),
+            r#"{"version":1,"removedEfforts":["max"],"affectedModels":["custom/fast"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("runtime-port.json"),
+            r#"{"pid":123,"port":19191,"hostname":"localhost","attestationSecret":"ignored"}"#,
+        )
+        .unwrap();
+        // Sensitive/state files must never be interpreted as provider catalogs.
+        fs::write(dir.path().join("admin-api-token"), "do-not-read").unwrap();
+        fs::write(
+            dir.path().join("responses-state.json"),
+            r#"{"models":[{"slug":"leaked-state"}]}"#,
+        )
+        .unwrap();
+
+        let catalog = discover_opencodex_at(dir.path()).unwrap();
+        assert_eq!(catalog.providers.len(), 2);
+        let openai = catalog
+            .providers
+            .iter()
+            .find(|provider| provider.key == "ocx:openai")
+            .unwrap();
+        assert_eq!(openai.provider.base_url, "http://localhost:19191/v1");
+        let ids = openai
+            .models
+            .iter()
+            .map(|model| model.info.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(ids.contains("ocx/openai/gpt-test"));
+        assert!(ids.contains("ocx/openai/gpt-extra"));
+        assert!(ids.contains("ocx/openai/subagent-model"));
+        assert!(!ids.contains("ocx/openai/leaked-state"));
+        let custom = catalog
+            .providers
+            .iter()
+            .find(|provider| provider.key == "ocx:custom")
+            .unwrap();
+        assert_eq!(custom.models.len(), 1);
+        assert_eq!(custom.models[0].info.id, "ocx/custom/fast");
+        assert_eq!(custom.models[0].info.upstream_id, "custom/fast");
+        assert_eq!(custom.models[0].info.context_window, Some(64_000));
+        assert!(!custom.models[0].info.reasoning);
+        assert_eq!(opencodex_config_files(dir.path()).unwrap().len(), 6);
     }
 
     #[test]
