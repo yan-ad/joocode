@@ -267,7 +267,9 @@ Press `Tab` in the dashboard:
 - Press `Enter` to open the new-provider modal.
 - Press `Del` to remove the selected provider.
 - Press `\\` to select its default model. Joocode syncs that model to Zed's
-  default chat model and commit-message generator.
+  default chat model and commit-message generator. Generated commit messages
+  receive scoped [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)
+  instructions; normal Zed chat prompts are unchanged.
 
 The create modal asks for:
 
@@ -465,7 +467,9 @@ When Zed is installed, automatic desktop mode writes the complete discovered
 catalog into Zed's OpenAI-compatible provider settings. On macOS, the system may
 ask for your password to authorize Keychain access for the local tunnel.
 Joocode stores only a harmless local placeholder key—never an upstream provider
-credential.
+credential. When a Joocode default model is selected, Zed's commit-message
+generator is also configured with Conventional Commits 1.0.0 instructions while
+preserving any existing custom commit instructions.
 
 ### JetBrains AI Assistant
 

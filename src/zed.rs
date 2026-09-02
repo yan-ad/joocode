@@ -32,8 +32,68 @@ fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
 }
 
 const PROVIDER_ID: &str = "joocode";
+const COMMIT_INSTRUCTIONS_START: &str = "<!-- joocode:conventional-commits:start -->";
+const COMMIT_INSTRUCTIONS_END: &str = "<!-- joocode:conventional-commits:end -->";
+const CONVENTIONAL_COMMITS_INSTRUCTIONS: &str = r#"<!-- joocode:conventional-commits:start -->
+Follow Conventional Commits 1.0.0 when generating commit messages:
+https://www.conventionalcommits.org/en/v1.0.0/
+
+Use this structure:
+<type>[optional scope][optional !]: <description>
+
+- Use `feat` for a new feature and `fix` for a bug fix.
+- Other suitable types include `build`, `chore`, `ci`, `docs`, `perf`, `refactor`, `revert`, `style`, and `test`.
+- Use an optional lowercase scope when it adds useful context.
+- Keep the description concise, imperative, and without a trailing period.
+- Add a body only when it provides useful context not present in the subject.
+- Mark breaking changes with `!` before `:` or a `BREAKING CHANGE:` footer.
+- Return only the commit message, with no markdown fence or commentary.
+<!-- joocode:conventional-commits:end -->"#;
 #[cfg(target_os = "macos")]
 const LOCAL_API_KEY: &str = "joocode-local";
+
+fn merge_commit_instructions(existing: &str) -> String {
+    let existing = without_commit_instructions(existing);
+    if existing.is_empty() {
+        CONVENTIONAL_COMMITS_INSTRUCTIONS.to_owned()
+    } else {
+        format!("{existing}\n\n{CONVENTIONAL_COMMITS_INSTRUCTIONS}")
+    }
+}
+
+fn without_commit_instructions(value: &str) -> String {
+    let Some(start) = value.find(COMMIT_INSTRUCTIONS_START) else {
+        return value.trim().to_owned();
+    };
+    let Some(relative_end) = value[start..].find(COMMIT_INSTRUCTIONS_END) else {
+        return value.trim().to_owned();
+    };
+    let end = start + relative_end + COMMIT_INSTRUCTIONS_END.len();
+    format!("{}{}", &value[..start], &value[end..])
+        .trim()
+        .to_owned()
+}
+
+fn remove_commit_instructions(root: &mut Value) {
+    let Some(agent) = root.get_mut("agent").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(existing) = agent
+        .get("commit_message_instructions")
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    let remaining = without_commit_instructions(existing);
+    if remaining.is_empty() {
+        agent.remove("commit_message_instructions");
+    } else {
+        agent.insert(
+            "commit_message_instructions".into(),
+            Value::String(remaining),
+        );
+    }
+}
 
 /// Add or replace Joocode's own provider entry without changing unrelated Zed
 /// preferences. On macOS, this also adds a non-secret local placeholder key to
@@ -63,6 +123,7 @@ pub fn uninstall() -> anyhow::Result<()> {
         compatible.remove("joc");
         compatible.remove("crabcodex");
     }
+    remove_commit_instructions(&mut root);
     fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&root)?))?;
     Ok(())
 }
@@ -118,8 +179,16 @@ fn install_at(
     );
     compatible.remove("joc");
     compatible.remove("crabcodex");
+    let agent = object_at(root, "agent")?;
+    let existing_instructions = agent
+        .get("commit_message_instructions")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    agent.insert(
+        "commit_message_instructions".into(),
+        Value::String(merge_commit_instructions(existing_instructions)),
+    );
     if let Some(model) = default_model {
-        let agent = object_at(root, "agent")?;
         let selection = json!({ "provider": PROVIDER_ID, "model": model });
         agent.insert("default_model".into(), selection.clone());
         agent.insert("commit_message_model".into(), selection);
@@ -227,6 +296,38 @@ mod tests {
         let expected = json!({"provider":"joocode","model":"joocode/demo/fast"});
         assert_eq!(result["agent"]["default_model"], expected);
         assert_eq!(result["agent"]["commit_message_model"], expected);
+        let instructions = result["agent"]["commit_message_instructions"]
+            .as_str()
+            .unwrap();
+        assert!(instructions.contains("Conventional Commits 1.0.0"));
+        assert!(instructions.contains("https://www.conventionalcommits.org/en/v1.0.0/"));
+        assert!(instructions.contains("<type>[optional scope][optional !]: <description>"));
+    }
+
+    #[test]
+    fn commit_instructions_are_idempotent_and_preserve_user_context() {
+        let custom = "Use the repository's preferred package scope.";
+        let first = merge_commit_instructions(custom);
+        let second = merge_commit_instructions(&first);
+
+        assert!(second.starts_with(custom));
+        assert_eq!(second.matches(COMMIT_INSTRUCTIONS_START).count(), 1);
+        assert_eq!(second.matches(COMMIT_INSTRUCTIONS_END).count(), 1);
+        assert_eq!(without_commit_instructions(&second), custom);
+    }
+
+    #[test]
+    fn removing_joocode_commit_context_keeps_user_instructions() {
+        let custom = "Mention the issue number when one is available.";
+        let mut root = json!({
+            "agent": {
+                "commit_message_instructions": merge_commit_instructions(custom)
+            }
+        });
+
+        remove_commit_instructions(&mut root);
+
+        assert_eq!(root["agent"]["commit_message_instructions"], custom);
     }
 
     #[test]
