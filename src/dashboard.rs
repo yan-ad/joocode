@@ -13,7 +13,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
         ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
@@ -223,6 +223,14 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: usize) {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    " LOCAL AI ROUTER ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Rgb(91, 208, 200))
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(vec![
                 Span::raw("   "),
@@ -232,10 +240,15 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: usize) {
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" · running", Style::default().fg(Color::DarkGray)),
+                Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("ONLINE", Style::default().fg(Color::Green)),
             ]),
         ])
-        .block(Block::default().borders(Borders::BOTTOM)),
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::Rgb(52, 65, 70))),
+        ),
         area,
     );
 }
@@ -1479,7 +1492,7 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
         data.ide_targets.join(", ")
     };
     let openai_compatible = format!("{}/v1", data.listening.trim_end_matches('/'));
-    let canvas = area.inner(Margin::new(1, 1));
+    let canvas = area.inner(Margin::new(2, 1));
     frame.render_widget(
         Block::default().style(Style::default().bg(Color::Rgb(15, 19, 21))),
         area,
@@ -1516,7 +1529,7 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
         draw_gateway_panel(frame, gateway_area, &data.listening, &openai_compatible);
     } else {
         let [routing_area, gateway_area] =
-            Layout::vertical([Constraint::Length(6), Constraint::Length(8)]).areas(content_area);
+            Layout::vertical([Constraint::Length(7), Constraint::Length(7)]).areas(content_area);
         draw_routing_panel(frame, routing_area, &sources, &targets);
         draw_gateway_panel(frame, gateway_area, &data.listening, &openai_compatible);
     }
@@ -1527,6 +1540,7 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
 fn dashboard_panel(title: &'static str, accent: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(PANEL_BORDER))
         .title(Span::styled(
             title,
@@ -1541,12 +1555,25 @@ fn draw_routing_panel(frame: &mut Frame<'_>, area: Rect, sources: &str, targets:
     frame.render_widget(panel, area);
     frame.render_widget(
         Paragraph::new(vec![
+            Line::from(Span::styled(
+                "SOURCES",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )),
             Line::from(vec![
-                Span::styled("◆  Sources   ", Style::default().fg(MUTED_TEXT)),
+                Span::styled("◆  ", Style::default().fg(Color::Cyan)),
                 Span::styled(sources, Style::default().fg(Color::White)),
             ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "DESKTOP TARGETS",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )),
             Line::from(vec![
-                Span::styled("⌘  Targets   ", Style::default().fg(MUTED_TEXT)),
+                Span::styled("⌘  ", Style::default().fg(Color::LightMagenta)),
                 Span::styled(targets, Style::default().fg(Color::White)),
             ]),
         ])
@@ -1563,21 +1590,29 @@ fn draw_gateway_panel(frame: &mut Frame<'_>, area: Rect, listening: &str, openai
         Paragraph::new(vec![
             Line::from(vec![
                 Span::styled(
-                    "●  ONLINE    ",
+                    "● ONLINE",
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(listening, Style::default().fg(Color::LightGreen)),
+                Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(listening, Style::default().fg(Color::Gray)),
             ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "OpenAI-compatible endpoint",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )),
             Line::from(vec![
-                Span::styled("↗  OpenAI    ", Style::default().fg(MUTED_TEXT)),
+                Span::styled("↗  ", Style::default().fg(Color::LightCyan)),
                 Span::styled(openai_compatible, Style::default().fg(Color::LightCyan)),
             ]),
             Line::from(vec![
-                Span::styled("◇  API key   ", Style::default().fg(MUTED_TEXT)),
+                Span::styled("KEY  ", Style::default().fg(Color::DarkGray)),
                 Span::styled("any non-empty value", Style::default().fg(Color::Gray)),
-                Span::styled("  ·  e.g. joocode", Style::default().fg(Color::DarkGray)),
+                Span::styled("  (e.g. joocode)", Style::default().fg(Color::DarkGray)),
             ]),
         ])
         .wrap(Wrap { trim: true }),
@@ -1615,13 +1650,16 @@ fn draw_stats(frame: &mut Frame<'_>, area: Rect, models: usize, providers: usize
     );
 
     if status_area.width > 0 {
-        let panel = dashboard_panel(" STATUS ", Color::Green);
+        let panel = dashboard_panel(" HEALTH ", Color::Green);
         let inner = panel.inner(status_area);
         frame.render_widget(panel, status_area);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("● ", Style::default().fg(Color::Green)),
-                Span::styled("Ready for connections", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    "Ready for connections",
+                    Style::default().fg(Color::LightGreen),
+                ),
             ]))
             .alignment(Alignment::Center),
             inner,

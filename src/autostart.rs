@@ -10,6 +10,32 @@ pub enum Status {
     Off,
 }
 
+#[cfg(target_os = "macos")]
+fn launchctl_service_loaded(service: &str) -> anyhow::Result<bool> {
+    let output = std::process::Command::new("/bin/launchctl")
+        .args(["print", service])
+        .output()
+        .context("failed to inspect the Joocode background service")?;
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recognizes_launchctl_service_not_loaded_message() {
+        assert!(launchctl_item_not_found(
+            b"Bad request.\nCould not find service \"dev.joocode.proxy\" in domain for user gui: 501"
+        ));
+    }
+    if launchctl_item_not_found(&output.stderr) {
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "failed to inspect the Joocode background service: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
 impl Status {
     pub fn label(self) -> &'static str {
         match self {
@@ -257,16 +283,31 @@ fn pause_platform() -> anyhow::Result<()> {
 #[cfg(target_os = "macos")]
 fn resume_platform() -> anyhow::Result<()> {
     let domain = launchctl_domain()?;
+    let service = format!("{domain}/{LABEL}");
+
+    // `launchctl bootstrap` is not idempotent and may report the opaque
+    // "Bootstrap failed: 5: Input/output error" when the job is already
+    // registered. Query the service first so `jcx start` is safe to run even
+    // when the persistent proxy is already healthy.
+    if launchctl_service_loaded(&service)? {
+        return Ok(());
+    }
+
     let runtime_path = runtime_entry_path()?;
     let output = std::process::Command::new("/bin/launchctl")
         .args(["bootstrap", &domain])
-        .arg(runtime_path)
+        .arg(&runtime_path)
         .output()
         .context("failed to start the Joocode background service")?;
     if output.status.success() {
         // The service has RunAtLoad=true, so a successful bootstrap starts it.
         // Avoid `kickstart -k`: it synchronously tears down and relaunches the
         // process, adding several seconds to dashboard shutdown.
+        return Ok(());
+    }
+    // macOS can return a generic I/O error for a stale/already-loaded job.
+    // Trust the authoritative service query instead of matching only stderr.
+    if launchctl_service_loaded(&service)? {
         return Ok(());
     }
     if !launchctl_already_loaded(&output.stderr) {
@@ -278,7 +319,6 @@ fn resume_platform() -> anyhow::Result<()> {
 
     // Already loaded usually means the KeepAlive service is running. A plain
     // kickstart is a cheap idempotent nudge and does not kill a healthy daemon.
-    let service = format!("{domain}/{LABEL}");
     let output = std::process::Command::new("/bin/launchctl")
         .args(["kickstart", &service])
         .output()
@@ -297,6 +337,7 @@ fn resume_platform() -> anyhow::Result<()> {
 fn launchctl_item_not_found(stderr: &[u8]) -> bool {
     let message = String::from_utf8_lossy(stderr).to_ascii_lowercase();
     message.contains("could not find specified service")
+        || message.contains("could not find service")
         || message.contains("no such process")
         || message.contains("not found")
 }
