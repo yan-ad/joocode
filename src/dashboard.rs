@@ -36,6 +36,7 @@ pub struct DashboardData {
     pub model_count: usize,
     pub provider_count: usize,
     pub autostart: AutoStartStatus,
+    pub run_in_background: bool,
     pub proxy_targets: BTreeMap<ProxyTarget, bool>,
     pub detected_sources: BTreeMap<SourceKind, bool>,
     pub providers: Vec<ProviderSummary>,
@@ -456,7 +457,8 @@ fn draw_update_prompt(frame: &mut Frame<'_>, tag: &str) {
 }
 
 const AUTO_START_ITEM: usize = 0;
-const FIRST_SOURCE_ITEM: usize = 1;
+const RUN_IN_BACKGROUND_ITEM: usize = 1;
+const FIRST_SOURCE_ITEM: usize = 2;
 const FIRST_PROXY_ITEM: usize = FIRST_SOURCE_ITEM + SourceKind::DETECTED.len();
 
 fn config_items() -> Vec<usize> {
@@ -495,13 +497,16 @@ fn config_row_for_item(item: usize) -> usize {
     if item == AUTO_START_ITEM {
         return 1;
     }
+    if item == RUN_IN_BACKGROUND_ITEM {
+        return 2;
+    }
     if let Some(index) = item.checked_sub(FIRST_SOURCE_ITEM)
         && index < SourceKind::DETECTED.len()
     {
-        return 4 + index;
+        return 5 + index;
     }
     item.checked_sub(FIRST_PROXY_ITEM)
-        .map(|index| 6 + SourceKind::DETECTED.len() + index)
+        .map(|index| 7 + SourceKind::DETECTED.len() + index)
         .unwrap_or(1)
 }
 
@@ -536,6 +541,22 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
         Span::raw("Auto-start after login/restart"),
         Span::raw(format!(" ({})", data.autostart.label())),
     ]);
+    let background_marker = if data.run_in_background { "●" } else { "○" };
+    let run_in_background = Line::from(vec![
+        Span::styled(
+            format!("{background_marker} "),
+            Style::default().fg(if data.run_in_background {
+                Color::Green
+            } else {
+                Color::DarkGray
+            }),
+        ),
+        Span::raw("Run in background"),
+        Span::raw(format!(
+            " ({})",
+            if data.run_in_background { "On" } else { "Off" }
+        )),
+    ]);
     let mut items = vec![
         ListItem::new(Line::from(Span::styled(
             "Setting",
@@ -544,6 +565,7 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
                 .add_modifier(Modifier::BOLD),
         ))),
         ListItem::new(auto_start).style(selected_style(selected == AUTO_START_ITEM)),
+        ListItem::new(run_in_background).style(selected_style(selected == RUN_IN_BACKGROUND_ITEM)),
         ListItem::new(Line::from("")),
         ListItem::new(Line::from(Span::styled(
             "Detected Providers",
@@ -624,7 +646,7 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
     draw_modal_scrollbar(
         frame,
         modal.content,
-        8 + SourceKind::DETECTED.len() + ProxyTarget::ALL.len(),
+        9 + SourceKind::DETECTED.len() + ProxyTarget::ALL.len(),
         config_row_for_item(selected),
     );
 }
@@ -835,6 +857,9 @@ impl DashboardData {
             model_count: registry.models().len(),
             provider_count: registry.provider_count(),
             autostart: autostart::status(),
+            run_in_background: crate::target_config::TargetPreferences::load()
+                .unwrap_or_default()
+                .run_in_background,
             proxy_targets: ProxyTarget::ALL
                 .into_iter()
                 .map(|target| (target, targets.enabled(target)))
@@ -854,6 +879,7 @@ pub enum DashboardCommand {
     AddProvider { base_url: String, api_key: String },
     RemoveProvider { name: String },
     ToggleAutoStart,
+    ToggleRunInBackground,
     ToggleSource { source: SourceKind },
     ToggleProxyTarget { target: ProxyTarget },
     InstallUpdate { tag: String },
@@ -876,6 +902,7 @@ pub enum DashboardEvent {
     },
     ProviderError(String),
     AutoStartUpdated(AutoStartStatus),
+    RunInBackgroundUpdated(bool),
     SourceUpdated {
         source: SourceKind,
         enabled: bool,
@@ -1054,6 +1081,9 @@ fn receive_events(
             }
             Ok(DashboardEvent::ProviderError(error)) => *screen = Screen::Error(error),
             Ok(DashboardEvent::AutoStartUpdated(status)) => data.autostart = status,
+            Ok(DashboardEvent::RunInBackgroundUpdated(enabled)) => {
+                data.run_in_background = enabled;
+            }
             Ok(DashboardEvent::SourceUpdated {
                 source,
                 enabled,
@@ -1102,6 +1132,9 @@ fn handle_key_with_providers(
             KeyCode::Down => *selected = adjacent_config_item(*selected, true),
             KeyCode::Char(' ') if *selected == AUTO_START_ITEM => {
                 let _ = command_tx.send(DashboardCommand::ToggleAutoStart);
+            }
+            KeyCode::Char(' ') if *selected == RUN_IN_BACKGROUND_ITEM => {
+                let _ = command_tx.send(DashboardCommand::ToggleRunInBackground);
             }
             KeyCode::Char(' ') => {
                 if let Some(source) = source_for_config_item(*selected) {
@@ -1449,6 +1482,19 @@ mod tests {
     }
 
     #[test]
+    fn space_toggles_run_in_background() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = Screen::Config {
+            selected: RUN_IN_BACKGROUND_ITEM,
+        };
+        handle_key(&mut screen, KeyCode::Char(' '), &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DashboardCommand::ToggleRunInBackground)
+        ));
+    }
+
+    #[test]
     fn space_toggles_selected_detected_provider() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut screen = Screen::Config {
@@ -1472,6 +1518,7 @@ mod tests {
             model_count: 60,
             provider_count: 10,
             autostart: AutoStartStatus::Off,
+            run_in_background: true,
             proxy_targets: BTreeMap::new(),
             detected_sources: SourceKind::DETECTED
                 .into_iter()
@@ -1515,6 +1562,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::Off,
+            run_in_background: true,
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
@@ -1570,6 +1618,7 @@ mod tests {
             model_count: 14,
             provider_count: 2,
             autostart: AutoStartStatus::Off,
+            run_in_background: true,
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![
@@ -1613,6 +1662,7 @@ mod tests {
             model_count: 14,
             provider_count: 2,
             autostart: AutoStartStatus::Off,
+            run_in_background: true,
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![ProviderSummary {
@@ -1679,6 +1729,7 @@ mod tests {
             model_count: 0,
             provider_count: 0,
             autostart: AutoStartStatus::Off,
+            run_in_background: true,
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
@@ -1709,6 +1760,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::On,
+            run_in_background: true,
             proxy_targets: ProxyTarget::ALL
                 .into_iter()
                 .map(|target| (target, target == ProxyTarget::Codex))
@@ -1732,6 +1784,7 @@ mod tests {
             .collect::<String>();
         for label in [
             "Setting",
+            "Run in background",
             "Detected Providers",
             "OpenCode",
             "CrabCode",
@@ -1758,6 +1811,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::On,
+            run_in_background: true,
             proxy_targets: ProxyTarget::ALL
                 .into_iter()
                 .map(|target| (target, true))
@@ -1794,6 +1848,7 @@ mod tests {
             model_count: 0,
             provider_count: 0,
             autostart: AutoStartStatus::Off,
+            run_in_background: true,
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
@@ -1807,6 +1862,31 @@ mod tests {
         receive_events(&mut data, &mut screen, &rx);
 
         assert_eq!(data.autostart, AutoStartStatus::On);
+    }
+
+    #[test]
+    fn background_event_refreshes_dashboard_status() {
+        let mut data = DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 0,
+            provider_count: 0,
+            autostart: AutoStartStatus::Off,
+            run_in_background: true,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
+            providers: vec![],
+            port_warning: None,
+        };
+        let mut screen = Screen::Dashboard;
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(DashboardEvent::RunInBackgroundUpdated(false))
+            .unwrap();
+
+        receive_events(&mut data, &mut screen, &rx);
+
+        assert!(!data.run_in_background);
     }
 
     #[test]
@@ -1841,6 +1921,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::Off,
+            run_in_background: true,
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
@@ -1900,6 +1981,7 @@ mod tests {
             model_count: 0,
             provider_count: 0,
             autostart: AutoStartStatus::Off,
+            run_in_background: true,
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
@@ -1940,6 +2022,7 @@ mod tests {
             model_count: 0,
             provider_count: 0,
             autostart: AutoStartStatus::Off,
+            run_in_background: true,
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
@@ -1969,6 +2052,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::Off,
+            run_in_background: true,
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
@@ -2002,6 +2086,7 @@ mod tests {
             model_count: 30,
             provider_count: 5,
             autostart: AutoStartStatus::Off,
+            run_in_background: true,
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],

@@ -233,8 +233,13 @@ impl PersistentProxyHandoff {
 
 impl Drop for PersistentProxyHandoff {
     fn drop(&mut self) {
-        if self.active {
+        let run_in_background = TargetPreferences::load()
+            .map(|preferences| preferences.run_in_background)
+            .unwrap_or(true);
+        if self.active && run_in_background {
             let _ = autostart::resume_detached();
+        } else if self.active {
+            let _ = autostart::stop();
         }
     }
 }
@@ -459,6 +464,16 @@ pub async fn serve_dashboard(
                     };
                     let _ = event_tx.send(event);
                 }
+                dashboard::DashboardCommand::ToggleRunInBackground => {
+                    let enabled = !TargetPreferences::load()
+                        .unwrap_or_default()
+                        .run_in_background;
+                    let event = match TargetPreferences::set_run_in_background(enabled) {
+                        Ok(_) => dashboard::DashboardEvent::RunInBackgroundUpdated(enabled),
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
                 dashboard::DashboardCommand::RemoveProvider { name } => {
                     let result = async {
                         local_config::remove(&name)?;
@@ -590,11 +605,20 @@ pub async fn serve_dashboard(
     }
     match dashboard_result? {
         dashboard::DashboardExit::Quit => {
-            autostart::resume_detached()?;
+            let run_in_background = TargetPreferences::load()
+                .unwrap_or_default()
+                .run_in_background;
+            if run_in_background {
+                autostart::resume_detached()?;
+            } else {
+                autostart::stop()?;
+            }
             persistent_proxy.disarm();
-            println!(
-                "Joocode is still running in the background. You can stop it with `jcx stop`."
-            );
+            if run_in_background {
+                println!(
+                    "Joocode is still running in the background. You can stop it with `jcx stop`."
+                );
+            }
             Ok(())
         }
         dashboard::DashboardExit::Restart => {

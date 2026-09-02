@@ -51,12 +51,28 @@ impl ProxyTarget {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TargetPreferences {
+    #[serde(default = "default_run_in_background")]
+    pub run_in_background: bool,
     #[serde(default)]
     pub proxy_to: BTreeMap<ProxyTarget, bool>,
     #[serde(default)]
     pub detected_providers: BTreeMap<String, bool>,
+}
+
+const fn default_run_in_background() -> bool {
+    true
+}
+
+impl Default for TargetPreferences {
+    fn default() -> Self {
+        Self {
+            run_in_background: true,
+            proxy_to: BTreeMap::new(),
+            detected_providers: BTreeMap::new(),
+        }
+    }
 }
 
 impl TargetPreferences {
@@ -72,6 +88,14 @@ impl TargetPreferences {
         let path = path()?;
         let mut preferences = load_from(&path)?;
         preferences.proxy_to.insert(target, enabled);
+        save_to(&path, &preferences)?;
+        Ok(preferences)
+    }
+
+    pub fn set_run_in_background(enabled: bool) -> anyhow::Result<Self> {
+        let path = path()?;
+        let mut preferences = load_from(&path)?;
+        preferences.run_in_background = enabled;
         save_to(&path, &preferences)?;
         Ok(preferences)
     }
@@ -147,7 +171,10 @@ mod tests {
     fn preferences_round_trip() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
-        let mut preferences = TargetPreferences::default();
+        let mut preferences = TargetPreferences {
+            run_in_background: false,
+            ..TargetPreferences::default()
+        };
         preferences.proxy_to.insert(ProxyTarget::Codex, false);
         preferences.proxy_to.insert(ProxyTarget::GrokBuild, true);
         preferences
@@ -156,11 +183,21 @@ mod tests {
         save_to(&path, &preferences).unwrap();
 
         let loaded = load_from(&path).unwrap();
+        assert!(!loaded.run_in_background);
         assert_eq!(loaded.override_for(ProxyTarget::Codex), Some(false));
         assert_eq!(loaded.override_for(ProxyTarget::GrokBuild), Some(true));
         assert_eq!(loaded.override_for(ProxyTarget::Zed), None);
         assert_eq!(loaded.source_override(SourceKind::OpenCode), Some(false));
         assert_eq!(loaded.source_override(SourceKind::CrabCode), None);
+    }
+
+    #[test]
+    fn missing_background_preference_defaults_on() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(&path, "{}").unwrap();
+
+        assert!(load_from(&path).unwrap().run_in_background);
     }
 
     #[test]

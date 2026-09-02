@@ -58,12 +58,11 @@ into Codex, Zed, JetBrains, Claude Code, or Grok Build. Start `jcx` and keep usi
 - **Provider manager** — press `Tab` to browse saved providers, add a new
   OpenAI-compatible endpoint in a modal, or remove the selected provider. The
   catalog reloads without restarting Joocode.
-- **Persistent background proxy** — running `jcx` always hands the proxy to a
-  supervised background service after the dashboard closes, even when Auto-start
-  is Off. Press `/`, select **Auto-start after login/restart**, then press `Space`
-  to control whether that service returns automatically after signing in or
-  restarting the device. Use `jcx start` and `jcx stop` to control the current
-  background session without changing the Auto-start preference.
+- **Optional background proxy** — press `/` and toggle **Run in background** to
+  choose whether closing the dashboard hands the proxy to a supervised service or
+  releases the port immediately. **Auto-start after login/restart** independently
+  controls whether that service returns after signing in or restarting the
+  device. Use `jcx start` and `jcx stop` to control the current background session.
 - **Desktop app launcher** — release installers include the Joocode palm/crab
   icon and install a platform launcher while retaining the `jcx` flagship CLI (`joocode` remains an alias).
 - **Protocol bridge** — Responses API and Chat Completions, JSON and SSE,
@@ -207,6 +206,7 @@ Press `/` in the dashboard to open the configuration modal:
 ```text
 Setting
   Auto-start after login/restart (On/Off)
+  Run in background              (On/Off)
 
 Detected Providers
   OpenCode                    (On/Off)
