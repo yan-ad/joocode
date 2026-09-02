@@ -347,7 +347,7 @@ pub async fn serve(host: IpAddr, port: u16, registry: Registry) -> anyhow::Resul
         app,
         address,
         port_warning,
-    } = prepare_server(host, port, RegistryStore::new(registry)).await?
+    } = prepare_server(host, port, RegistryStore::new(registry), false).await?
     else {
         tracing::info!(port, "Joocode is already running in the background");
         return Ok(());
@@ -378,7 +378,7 @@ pub async fn serve_dashboard(
         app,
         address,
         port_warning,
-    } = prepare_server(host, port, registry_store.clone()).await?
+    } = prepare_server(host, port, registry_store.clone(), interactive).await?
     else {
         persistent_proxy.disarm();
         println!("Joocode is already running in the background at http://{host}:{port}.");
@@ -652,6 +652,7 @@ async fn prepare_server(
     host: IpAddr,
     port: u16,
     registry: RegistryStore,
+    reclaim_requested_port: bool,
 ) -> anyhow::Result<PreparedServer> {
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -664,7 +665,7 @@ async fn prepare_server(
         .with_state(AppState { registry })
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
-    match bind_available(host, port).await? {
+    match bind_available(host, port, reclaim_requested_port).await? {
         BindResult::Bound {
             listener,
             port_warning,
@@ -699,7 +700,11 @@ enum BindResult {
     ExistingJoocode,
 }
 
-async fn bind_available(host: IpAddr, requested_port: u16) -> std::io::Result<BindResult> {
+async fn bind_available(
+    host: IpAddr,
+    requested_port: u16,
+    reclaim_requested_port: bool,
+) -> std::io::Result<BindResult> {
     let requested_address = SocketAddr::from((host, requested_port));
     match tokio::net::TcpListener::bind(requested_address).await {
         Ok(listener) => Ok(BindResult::Bound {
@@ -707,6 +712,26 @@ async fn bind_available(host: IpAddr, requested_port: u16) -> std::io::Result<Bi
             port_warning: None,
         }),
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            // The interactive dashboard pauses the persistent Joocode daemon
+            // immediately before binding. Service managers can finish the stop
+            // operation a few milliseconds before the process releases its
+            // socket, so briefly wait for our original port before falling back.
+            if reclaim_requested_port {
+                for _ in 0..20 {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    match tokio::net::TcpListener::bind(requested_address).await {
+                        Ok(listener) => {
+                            return Ok(BindResult::Bound {
+                                listener,
+                                port_warning: None,
+                            });
+                        }
+                        Err(retry_error) if retry_error.kind() == std::io::ErrorKind::AddrInUse => {
+                        }
+                        Err(retry_error) => return Err(retry_error),
+                    }
+                }
+            }
             if joocode_is_running(host, requested_port).await {
                 return Ok(BindResult::ExistingJoocode);
             }
@@ -965,7 +990,7 @@ mod tests {
         let BindResult::Bound {
             listener,
             port_warning: warning,
-        } = bind_available("127.0.0.1".parse().unwrap(), requested_port)
+        } = bind_available("127.0.0.1".parse().unwrap(), requested_port, false)
             .await
             .unwrap()
         else {
@@ -990,11 +1015,34 @@ mod tests {
         let app = Router::new().route("/api/hello", get(healthz));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let result = bind_available("127.0.0.1".parse().unwrap(), port)
+        let result = bind_available("127.0.0.1".parse().unwrap(), port, false)
             .await
             .unwrap();
 
         assert!(matches!(result, BindResult::ExistingJoocode));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn dashboard_reclaims_port_after_the_background_daemon_releases_it() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let requested_port = occupied.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            drop(occupied);
+        });
+
+        let BindResult::Bound {
+            listener,
+            port_warning,
+        } = bind_available("127.0.0.1".parse().unwrap(), requested_port, true)
+            .await
+            .unwrap()
+        else {
+            panic!("the dashboard should reclaim the daemon's original port");
+        };
+
+        assert_eq!(listener.local_addr().unwrap().port(), requested_port);
+        assert!(port_warning.is_none());
     }
 }

@@ -93,6 +93,9 @@ fn draw_provider_models(frame: &mut Frame<'_>, provider: &ProviderSummary, selec
 const MODAL_BACKGROUND: Color = Color::Rgb(24, 42, 59);
 const MODAL_OVERLAY: Color = Color::Rgb(13, 17, 19);
 const MODAL_ACCENT: Color = Color::Rgb(62, 139, 255);
+const PANEL_BACKGROUND: Color = Color::Rgb(19, 25, 28);
+const PANEL_BORDER: Color = Color::Rgb(48, 61, 66);
+const MUTED_TEXT: Color = Color::Rgb(120, 132, 136);
 
 #[derive(Clone, Copy)]
 struct ModalAreas {
@@ -1421,26 +1424,29 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
     let help = match screen {
         Screen::Dashboard => vec![
             Span::styled(
-                "Esc",
+                " esc ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" to exit  ·  "),
+            Span::styled("  Exit    ", Style::default().fg(MUTED_TEXT)),
             Span::styled(
-                "Tab",
+                " tab ",
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(Color::Black)
+                    .bg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" Providers  ·  "),
+            Span::styled("  Providers    ", Style::default().fg(MUTED_TEXT)),
             Span::styled(
-                "/",
+                " / ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" Config"),
+            Span::styled("  Config", Style::default().fg(MUTED_TEXT)),
         ],
         Screen::Config { .. }
         | Screen::Providers { .. }
@@ -1456,8 +1462,8 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
         Screen::EasterEgg { .. } => unreachable!("easter egg has its own full-screen controls"),
     };
     frame.render_widget(
-        Paragraph::new(Line::from(help)).block(Block::default().borders(Borders::TOP)),
-        footer,
+        Paragraph::new(Line::from(help)),
+        footer.inner(Margin::new(1, 1)),
     );
 }
 
@@ -1473,69 +1479,169 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
         data.ide_targets.join(", ")
     };
     let openai_compatible = format!("{}/v1", data.listening.trim_end_matches('/'));
-    let lines = vec![
-        data.port_warning
-            .as_ref()
-            .map(|warning| {
-                Line::from(vec![
-                    Span::styled("⚠ ", Style::default().fg(Color::Yellow)),
-                    Span::styled(
-                        warning,
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ])
-            })
-            .unwrap_or_else(|| Line::from("")),
-        Line::from(vec![
-            Span::styled("◆ ", Style::default().fg(Color::Cyan)),
-            Span::styled("Config: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(sources),
-        ]),
-        Line::from(vec![
-            Span::styled("⌘ ", Style::default().fg(Color::Magenta)),
-            Span::styled(
-                "IDE Target: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(targets),
-        ]),
-        Line::from(vec![
+    let canvas = area.inner(Margin::new(1, 1));
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Rgb(15, 19, 21))),
+        area,
+    );
+
+    let warning_height = u16::from(data.port_warning.is_some()) * 3;
+    let [warning_area, content_area, stats_area] = Layout::vertical([
+        Constraint::Length(warning_height),
+        Constraint::Length(if canvas.width >= 76 { 8 } else { 14 }),
+        Constraint::Length(5),
+    ])
+    .areas(canvas);
+
+    if let Some(warning) = &data.port_warning {
+        let panel = dashboard_panel(" PORT CONFLICT ", Color::Yellow);
+        let inner = panel.inner(warning_area);
+        frame.render_widget(panel, warning_area);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("⚠  ", Style::default().fg(Color::Yellow)),
+                Span::styled(warning, Style::default().fg(Color::LightYellow)),
+            ]))
+            .wrap(Wrap { trim: true }),
+            inner,
+        );
+    }
+
+    if canvas.width >= 76 {
+        let [routing_area, gateway_area] =
+            Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
+                .spacing(1)
+                .areas(content_area);
+        draw_routing_panel(frame, routing_area, &sources, &targets);
+        draw_gateway_panel(frame, gateway_area, &data.listening, &openai_compatible);
+    } else {
+        let [routing_area, gateway_area] =
+            Layout::vertical([Constraint::Length(6), Constraint::Length(8)]).areas(content_area);
+        draw_routing_panel(frame, routing_area, &sources, &targets);
+        draw_gateway_panel(frame, gateway_area, &data.listening, &openai_compatible);
+    }
+
+    draw_stats(frame, stats_area, data.model_count, data.provider_count);
+}
+
+fn dashboard_panel(title: &'static str, accent: Color) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(PANEL_BORDER))
+        .title(Span::styled(
+            title,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(PANEL_BACKGROUND))
+}
+
+fn draw_routing_panel(frame: &mut Frame<'_>, area: Rect, sources: &str, targets: &str) {
+    let panel = dashboard_panel(" ROUTING ", Color::Cyan);
+    let inner = panel.inner(area);
+    frame.render_widget(panel, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("◆  Sources   ", Style::default().fg(MUTED_TEXT)),
+                Span::styled(sources, Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled("⌘  Targets   ", Style::default().fg(MUTED_TEXT)),
+                Span::styled(targets, Style::default().fg(Color::White)),
+            ]),
+        ])
+        .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn draw_gateway_panel(frame: &mut Frame<'_>, area: Rect, listening: &str, openai_compatible: &str) {
+    let panel = dashboard_panel(" LOCAL GATEWAY ", Color::Green);
+    let inner = panel.inner(area);
+    frame.render_widget(panel, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    "●  ONLINE    ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(listening, Style::default().fg(Color::LightGreen)),
+            ]),
+            Line::from(vec![
+                Span::styled("↗  OpenAI    ", Style::default().fg(MUTED_TEXT)),
+                Span::styled(openai_compatible, Style::default().fg(Color::LightCyan)),
+            ]),
+            Line::from(vec![
+                Span::styled("◇  API key   ", Style::default().fg(MUTED_TEXT)),
+                Span::styled("any non-empty value", Style::default().fg(Color::Gray)),
+                Span::styled("  ·  e.g. joocode", Style::default().fg(Color::DarkGray)),
+            ]),
+        ])
+        .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn draw_stats(frame: &mut Frame<'_>, area: Rect, models: usize, providers: usize) {
+    let [models_area, providers_area, status_area] = Layout::horizontal([
+        Constraint::Percentage(32),
+        Constraint::Percentage(32),
+        Constraint::Percentage(36),
+    ])
+    .spacing(1)
+    .areas(area);
+
+    draw_stat_card(frame, models_area, "MODELS", models, Color::Yellow, "◉");
+    draw_stat_card(
+        frame,
+        providers_area,
+        "PROVIDERS",
+        providers,
+        Color::Blue,
+        "◇",
+    );
+
+    let panel = dashboard_panel(" STATUS ", Color::Green);
+    let inner = panel.inner(status_area);
+    frame.render_widget(panel, status_area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
             Span::styled("● ", Style::default().fg(Color::Green)),
-            Span::styled("Listening: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(&data.listening, Style::default().fg(Color::Green)),
-        ]),
-        Line::from(vec![
-            Span::styled("● ", Style::default().fg(Color::Cyan)),
-            Span::styled(
-                "OpenAI Compatible: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(openai_compatible, Style::default().fg(Color::Cyan)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("◉ ", Style::default().fg(Color::Yellow)),
-            Span::styled("Models: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                data.model_count.to_string(),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("    "),
-            Span::styled("◇ ", Style::default().fg(Color::Blue)),
-            Span::styled("Providers: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                data.provider_count.to_string(),
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-    ];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
+            Span::styled("Ready for connections", Style::default().fg(Color::Gray)),
+        ]))
+        .alignment(Alignment::Center),
+        inner,
+    );
+}
+
+fn draw_stat_card(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &'static str,
+    value: usize,
+    accent: Color,
+    icon: &'static str,
+) {
+    let panel = dashboard_panel("", accent);
+    let inner = panel.inner(area);
+    frame.render_widget(panel, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(label, Style::default().fg(MUTED_TEXT))),
+            Line::from(vec![
+                Span::styled(format!("{icon} "), Style::default().fg(accent)),
+                Span::styled(
+                    value.to_string(),
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        ])
+        .alignment(Alignment::Center),
+        inner,
+    );
 }
 
 fn display_source(source: &str) -> String {
@@ -1751,6 +1857,8 @@ mod tests {
 
         assert!(rendered.contains("OpenAI Compatible:"));
         assert!(rendered.contains("http://127.0.0.1:10123/v1"));
+        assert!(rendered.contains("API Key:"));
+        assert!(rendered.contains("any non-empty value"));
     }
 
     #[test]
