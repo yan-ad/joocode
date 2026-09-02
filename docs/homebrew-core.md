@@ -1,21 +1,9 @@
-# Homebrew Packaging
+# Future Homebrew tap checklist
 
-Joocode is distributed through its official Homebrew tap. Users should install
-it with:
+The Joocode Homebrew tap is not currently published. Users should install with
+the verified release installer documented in the main README.
 
-```bash
-brew tap yan-ad/tap
-brew install joocode
-jcx --version
-```
-
-Or use the fully qualified one-command form:
-
-```bash
-brew install yan-ad/tap/joocode
-```
-
-## Maintainer checklist
+This document is only a maintainer checklist for enabling the tap later.
 
 1. Keep GitHub releases public, immutable, and available without
    authentication. The formula downloads release archives directly.
@@ -35,6 +23,14 @@ brew install yan-ad/tap/joocode
    brew audit --strict --online ./joocode.rb
    ```
 
-5. Configure `HOMEBREW_TAP_TOKEN` in the Joocode repository with write access
-   to `yan-ad/homebrew-tap`. Each tagged release will then update
-   `Formula/joocode.rb` in the tap automatically.
+5. Create the public `yan-ad/homebrew-tap` repository with a
+   `Formula/joocode.rb` path.
+6. Configure `HOMEBREW_TAP_TOKEN` in the Joocode repository with write access
+   to that repository. Tagged releases can then update the formula
+   automatically.
+7. Only after the first formula is published, document these commands as active:
+
+   ```bash
+   brew tap yan-ad/tap
+   brew install joocode
+   ```

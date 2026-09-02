@@ -17,8 +17,8 @@ Reuse OpenCode, CrabCode, OCX, Hermes, Copilot, Antigravity Gemini, and OpenAI-c
 </p>
 
 ```bash
-brew tap yan-ad/tap
-brew install joocode
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/yan-ad/joocode/main/install.bash | bash
 jcx
 ```
 
@@ -94,21 +94,7 @@ host environment.
 
 ## Quick start
 
-### macOS with Homebrew
-
-```bash
-brew tap yan-ad/tap
-brew install joocode
-jcx
-```
-
-Or install directly from the tap in one command:
-
-```bash
-brew install yan-ad/tap/joocode
-```
-
-### macOS, Linux, WSL, or Git Bash
+### macOS, Linux, WSL, or Git Bash (recommended)
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -123,6 +109,27 @@ The installer detects the platform, verifies `SHA256SUMS`, and installs to
 curl -LsSf https://raw.githubusercontent.com/yan-ad/joocode/main/install.bash -o install.bash
 JOOCODE_VERSION=0.1.9 JOOCODE_INSTALL_DIR=/usr/local/bin bash install.bash
 ```
+
+If `jcx` is not found after installation, add the default installation directory
+to your shell `PATH` and open a new terminal:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Homebrew status
+
+The `yan-ad/tap` Homebrew tap is **not published yet**, so these commands do not
+currently work:
+
+```bash
+brew tap yan-ad/tap
+brew install joocode
+```
+
+Use the verified installer above until the tap repository is available. Release
+artifacts and checksums are published at
+[GitHub Releases](https://github.com/yan-ad/joocode/releases).
 
 ### Windows PowerShell
 
@@ -492,14 +499,6 @@ release ZIP or PowerShell installer for upgrades.
 
 ### Uninstall
 
-Homebrew:
-
-```bash
-brew uninstall joocode
-```
-
-Standalone installation:
-
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://raw.githubusercontent.com/yan-ad/joocode/main/uninstall.sh | sh
@@ -539,8 +538,9 @@ make release VERSION=1.2.3
 make release DRY_RUN=1
 ```
 
-Release CI builds Linux, macOS, and Windows archives, publishes checksums and a
-Homebrew formula, and updates `yan-ad/homebrew-tap` when its token is configured.
+Release CI builds Linux, macOS, and Windows archives and publishes checksums plus
+a generated Homebrew formula. Publishing `yan-ad/tap` additionally requires the
+`yan-ad/homebrew-tap` repository and a configured `HOMEBREW_TAP_TOKEN`.
 
 ## License
 
