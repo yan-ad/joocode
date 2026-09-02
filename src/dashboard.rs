@@ -3,7 +3,7 @@ use std::{
     io::IsTerminal,
     net::SocketAddr,
     sync::mpsc::{Receiver, TryRecvError},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -35,6 +35,54 @@ pub struct DashboardData {
     pub proxy_targets: BTreeMap<ProxyTarget, bool>,
     pub providers: Vec<ProviderSummary>,
     pub port_warning: Option<String>,
+}
+
+fn header_animation_tick() -> usize {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    (elapsed.as_millis() / 450) as usize
+}
+
+fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: usize) {
+    let icons = ["🦀", "🌴", "🦀", "🌴"];
+    let colors = [
+        Color::LightRed,
+        Color::LightGreen,
+        Color::LightMagenta,
+        Color::LightCyan,
+    ];
+    let frame_index = tick % icons.len();
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", icons[frame_index]),
+                    Style::default()
+                        .fg(colors[frame_index])
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Joocode",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("   "),
+                Span::styled(
+                    format!("v{}", env!("CARGO_PKG_VERSION")),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" · running", Style::default().fg(Color::DarkGray)),
+            ]),
+        ])
+        .block(Block::default().borders(Borders::BOTTOM)),
+        area,
+    );
 }
 
 fn draw_providers(
@@ -924,16 +972,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
     ])
     .areas(frame.area());
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "◈ Joocode",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]))
-        .block(Block::default().borders(Borders::BOTTOM)),
-        header,
-    );
+    draw_header(frame, header, header_animation_tick());
 
     match screen {
         Screen::Dashboard => draw_dashboard(frame, body, data),
@@ -1118,6 +1157,38 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
+
+    #[test]
+    fn header_shows_running_version_and_animated_icons() {
+        let backend = TestBackend::new(80, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), 0))
+            .unwrap();
+        let first = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(first.contains("🦀"));
+        assert!(first.contains("Joocode"));
+        assert!(first.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
+        assert!(first.contains("running"));
+
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), 1))
+            .unwrap();
+        let second = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(second.contains("🌴"));
+    }
 
     #[test]
     fn source_labels_are_human_readable() {
