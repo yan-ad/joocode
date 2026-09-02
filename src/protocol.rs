@@ -162,12 +162,29 @@ pub fn call_id() -> String {
     format!("call_{}", Uuid::new_v4().simple())
 }
 
-pub fn to_chat_request(request: &Value, upstream_model: &str) -> Result<Value, ApiError> {
+#[derive(Clone, Debug, Default)]
+pub struct ToolNamespaces {
+    tools: BTreeMap<String, NamespacedTool>,
+}
+
+#[derive(Clone, Debug)]
+struct NamespacedTool {
+    namespace: String,
+    name: String,
+}
+
+pub struct ChatRequest {
+    pub body: Value,
+    pub tool_namespaces: ToolNamespaces,
+}
+
+pub fn to_chat_request(request: &Value, upstream_model: &str) -> Result<ChatRequest, ApiError> {
+    let (tools, tool_namespaces) = convert_tools(request.get("tools").and_then(Value::as_array));
     let mut messages = Vec::new();
     if let Some(instructions) = request.get("instructions").and_then(Value::as_str) {
         messages.push(json!({ "role": "system", "content": instructions }));
     }
-    convert_input(request.get("input"), &mut messages)?;
+    convert_input(request.get("input"), &mut messages, &tool_namespaces)?;
 
     let mut output = json!({
         "model": upstream_model,
@@ -185,21 +202,24 @@ pub fn to_chat_request(request: &Value, upstream_model: &str) -> Result<Value, A
         "parallel_tool_calls",
     );
     copy_field(request, object, "user", "user");
-    if let Some(tools) = request.get("tools").and_then(Value::as_array) {
-        object.insert(
-            "tools".into(),
-            Value::Array(tools.iter().filter_map(convert_tool).collect()),
-        );
+    if !tools.is_empty() {
+        object.insert("tools".into(), Value::Array(tools));
     }
     if let Some(choice) = request.get("tool_choice") {
-        object.insert("tool_choice".into(), convert_tool_choice(choice));
+        object.insert(
+            "tool_choice".into(),
+            convert_tool_choice(choice, &tool_namespaces),
+        );
     }
     if let Some(reasoning) = request.get("reasoning")
         && let Some(effort) = reasoning.get("effort")
     {
         object.insert("reasoning_effort".into(), effort.clone());
     }
-    Ok(output)
+    Ok(ChatRequest {
+        body: output,
+        tool_namespaces,
+    })
 }
 
 fn copy_field(source: &Value, target: &mut serde_json::Map<String, Value>, from: &str, to: &str) {
@@ -208,7 +228,11 @@ fn copy_field(source: &Value, target: &mut serde_json::Map<String, Value>, from:
     }
 }
 
-fn convert_input(input: Option<&Value>, messages: &mut Vec<Value>) -> Result<(), ApiError> {
+fn convert_input(
+    input: Option<&Value>,
+    messages: &mut Vec<Value>,
+    tool_namespaces: &ToolNamespaces,
+) -> Result<(), ApiError> {
     match input {
         None => Err(ApiError::bad_request("missing 'input'")),
         Some(Value::String(text)) => {
@@ -217,19 +241,31 @@ fn convert_input(input: Option<&Value>, messages: &mut Vec<Value>) -> Result<(),
         }
         Some(Value::Array(items)) => {
             for item in items {
-                match item.get("type").and_then(Value::as_str).unwrap_or("message") {
+                match item
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("message")
+                {
                     "message" => messages.push(convert_message(item)?),
-                    "function_call" => messages.push(json!({
-                        "role": "assistant",
-                        "tool_calls": [{
-                            "id": item.get("call_id").or_else(|| item.get("id")).cloned().unwrap_or_else(|| Value::String(call_id())),
-                            "type": "function",
-                            "function": {
-                                "name": item.get("name").cloned().unwrap_or(Value::String("tool".into())),
-                                "arguments": item.get("arguments").cloned().unwrap_or(Value::String("{}".into()))
-                            }
-                        }]
-                    })),
+                    "function_call" => {
+                        let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        let name = item
+                            .get("namespace")
+                            .and_then(Value::as_str)
+                            .and_then(|namespace| tool_namespaces.flattened(namespace, name))
+                            .unwrap_or(name);
+                        messages.push(json!({
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": item.get("call_id").or_else(|| item.get("id")).cloned().unwrap_or_else(|| Value::String(call_id())),
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": item.get("arguments").cloned().unwrap_or(Value::String("{}".into()))
+                                }
+                            }]
+                        }));
+                    }
                     "function_call_output" => messages.push(json!({
                         "role": "tool",
                         "tool_call_id": item.get("call_id").cloned().unwrap_or(Value::Null),
@@ -307,23 +343,104 @@ fn content_item_to_text(value: &Value) -> String {
         .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
 }
 
-fn convert_tool(tool: &Value) -> Option<Value> {
+fn convert_function_tool(tool: &Value, name: &str) -> Option<Value> {
     if tool.get("type").and_then(Value::as_str) != Some("function") {
         return None;
     }
     if let Some(function) = tool.get("function") {
+        let mut function = function.clone();
+        function["name"] = Value::String(name.to_owned());
         return Some(json!({ "type": "function", "function": function }));
     }
     Some(json!({ "type": "function", "function": {
-        "name": tool.get("name")?,
+        "name": name,
         "description": tool.get("description").cloned().unwrap_or(Value::Null),
         "parameters": tool.get("parameters").cloned().unwrap_or_else(|| json!({"type":"object","properties":{}})),
         "strict": tool.get("strict").cloned().unwrap_or(Value::Bool(false))
     }}))
 }
 
-fn convert_tool_choice(choice: &Value) -> Value {
+fn convert_tools(tools: Option<&Vec<Value>>) -> (Vec<Value>, ToolNamespaces) {
+    let mut converted = Vec::new();
+    let mut namespaces = ToolNamespaces::default();
+    let Some(tools) = tools else {
+        return (converted, namespaces);
+    };
+    for tool in tools {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("function") => {
+                if let Some(name) = tool
+                    .get("name")
+                    .or_else(|| tool.pointer("/function/name"))
+                    .and_then(Value::as_str)
+                    && let Some(tool) = convert_function_tool(tool, name)
+                {
+                    converted.push(tool);
+                }
+            }
+            Some("namespace") => {
+                let Some(namespace) = tool.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                for child in tool
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if child.get("type").and_then(Value::as_str) != Some("function") {
+                        continue;
+                    }
+                    let Some(name) = child.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let flattened = format!("{namespace}__{name}");
+                    namespaces.tools.insert(
+                        flattened.clone(),
+                        NamespacedTool {
+                            namespace: namespace.to_owned(),
+                            name: name.to_owned(),
+                        },
+                    );
+                    if let Some(tool) = convert_function_tool(child, &flattened) {
+                        converted.push(tool);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (converted, namespaces)
+}
+
+impl ToolNamespaces {
+    fn flattened(&self, namespace: &str, name: &str) -> Option<&str> {
+        self.tools.iter().find_map(|(flattened, tool)| {
+            (tool.namespace == namespace && tool.name == name).then_some(flattened.as_str())
+        })
+    }
+
+    fn identity<'a>(&'a self, flattened: &'a str) -> (Option<&'a str>, &'a str) {
+        self.tools.get(flattened).map_or((None, flattened), |tool| {
+            (Some(tool.namespace.as_str()), tool.name.as_str())
+        })
+    }
+
+    fn may_be_partial(&self, name: &str) -> bool {
+        self.tools
+            .keys()
+            .any(|candidate| candidate.starts_with(name) && candidate != name)
+    }
+}
+
+fn convert_tool_choice(choice: &Value, namespaces: &ToolNamespaces) -> Value {
     if let Some(name) = choice.get("name") {
+        let name = name.as_str().unwrap_or_default();
+        let name = choice
+            .get("namespace")
+            .and_then(Value::as_str)
+            .and_then(|namespace| namespaces.flattened(namespace, name))
+            .unwrap_or(name);
         json!({ "type": "function", "function": { "name": name } })
     } else {
         choice.clone()
@@ -334,6 +451,7 @@ pub fn from_chat_response(
     chat: Value,
     requested_model: &str,
     id: String,
+    tool_namespaces: &ToolNamespaces,
 ) -> Result<Value, ApiError> {
     let choice = chat
         .get("choices")
@@ -359,12 +477,21 @@ pub fn from_chat_response(
     }
     if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
         for call in calls {
-            output.push(json!({
+            let flattened = call
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            let (namespace, name) = tool_namespaces.identity(flattened);
+            let mut item = json!({
                 "id": format!("fc_{}", Uuid::new_v4().simple()), "type": "function_call", "status": "completed",
                 "call_id": call.get("id").cloned().unwrap_or_else(|| Value::String(call_id())),
-                "name": call.pointer("/function/name").cloned().unwrap_or(Value::String("tool".into())),
+                "name": name,
                 "arguments": call.pointer("/function/arguments").cloned().unwrap_or(Value::String("{}".into()))
-            }));
+            });
+            if let Some(namespace) = namespace {
+                item["namespace"] = Value::String(namespace.to_owned());
+            }
+            output.push(item);
         }
     }
     let usage = chat.get("usage").cloned().unwrap_or_else(|| json!({}));
@@ -394,6 +521,7 @@ pub struct StreamState {
     pub text: String,
     pub calls: BTreeMap<usize, ToolCallState>,
     pub usage: Value,
+    pub tool_namespaces: ToolNamespaces,
 }
 
 #[derive(Default)]
@@ -406,11 +534,16 @@ pub struct ToolCallState {
 }
 
 impl StreamState {
-    pub fn new(response_id: String, requested_model: String) -> Self {
+    pub fn new(
+        response_id: String,
+        requested_model: String,
+        tool_namespaces: ToolNamespaces,
+    ) -> Self {
         Self {
             response_id,
             requested_model,
             message_id: message_id(),
+            tool_namespaces,
             ..Default::default()
         }
     }
@@ -470,16 +603,24 @@ impl StreamState {
                 if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
                     state.name.push_str(name);
                 }
-                if !state.announced && (!state.call_id.is_empty() || !state.name.is_empty()) {
+                if !state.announced
+                    && !self.tool_namespaces.may_be_partial(&state.name)
+                    && (!state.call_id.is_empty() || !state.name.is_empty())
+                {
                     if state.call_id.is_empty() {
                         state.call_id = call_id();
                     }
+                    let (namespace, name) = self.tool_namespaces.identity(&state.name);
+                    let mut item = json!({
+                        "id": state.item_id, "type": "function_call", "status": "in_progress",
+                        "call_id": state.call_id, "name": name, "arguments": ""
+                    });
+                    if let Some(namespace) = namespace {
+                        item["namespace"] = Value::String(namespace.to_owned());
+                    }
                     events.push(event(
                         "response.output_item.added",
-                        json!({ "output_index": index + 1, "item": {
-                            "id": state.item_id, "type": "function_call", "status": "in_progress",
-                            "call_id": state.call_id, "name": state.name, "arguments": ""
-                        }}),
+                        json!({ "output_index": index + 1, "item": item }),
                     ));
                     state.announced = true;
                 }
@@ -525,10 +666,18 @@ impl StreamState {
                     "item_id": call.item_id, "output_index": index + 1, "arguments": call.arguments
                 }),
             ));
-            events.push(event("response.output_item.done", json!({ "output_index": index + 1, "item": {
+            let (namespace, name) = self.tool_namespaces.identity(&call.name);
+            let mut item = json!({
                 "id": call.item_id, "type": "function_call", "status": "completed", "call_id": call.call_id,
-                "name": call.name, "arguments": call.arguments
-            }})));
+                "name": name, "arguments": call.arguments
+            });
+            if let Some(namespace) = namespace {
+                item["namespace"] = Value::String(namespace.to_owned());
+            }
+            events.push(event(
+                "response.output_item.done",
+                json!({ "output_index": index + 1, "item": item }),
+            ));
         }
         events.push(event(
             "response.completed",
@@ -544,8 +693,13 @@ impl StreamState {
             "content": [{ "type": "output_text", "text": self.text, "annotations": [] }] }),
         ];
         for call in self.calls.values() {
-            output.push(json!({ "id": call.item_id, "type": "function_call", "status": "completed", "call_id": call.call_id,
-                "name": call.name, "arguments": call.arguments }));
+            let (namespace, name) = self.tool_namespaces.identity(&call.name);
+            let mut item = json!({ "id": call.item_id, "type": "function_call", "status": "completed", "call_id": call.call_id,
+                "name": name, "arguments": call.arguments });
+            if let Some(namespace) = namespace {
+                item["namespace"] = Value::String(namespace.to_owned());
+            }
+            output.push(item);
         }
         output
     }
@@ -599,9 +753,9 @@ mod tests {
             "tools": [{"type":"function","name":"read","description":"Read","parameters":{"type":"object"}}]
         });
         let chat = to_chat_request(&request, "code").unwrap();
-        assert_eq!(chat["messages"][0]["role"], "system");
-        assert_eq!(chat["messages"][1]["content"][0]["text"], "hello");
-        assert_eq!(chat["tools"][0]["function"]["name"], "read");
+        assert_eq!(chat.body["messages"][0]["role"], "system");
+        assert_eq!(chat.body["messages"][1]["content"][0]["text"], "hello");
+        assert_eq!(chat.body["tools"][0]["function"]["name"], "read");
     }
 
     #[test]
@@ -618,7 +772,7 @@ mod tests {
             }]
         });
         let chat = to_chat_request(&request, "code").unwrap();
-        let output = chat["messages"][0]["content"].as_str().unwrap();
+        let output = chat.body["messages"][0]["content"].as_str().unwrap();
         assert!(output.contains("page title: Joocode"));
         assert!(output.contains("execution_duration_ms"));
         assert!(output.contains("cursor"));
@@ -633,10 +787,86 @@ mod tests {
             }),
             "demo/code",
             "resp_test".into(),
+            &ToolNamespaces::default(),
         )
         .unwrap();
         assert_eq!(result["output"][0]["content"][0]["text"], "done");
         assert_eq!(result["usage"]["total_tokens"], 3);
+    }
+
+    #[test]
+    fn flattens_and_restores_codex_app_namespace_tools() {
+        let request = json!({
+            "model": "demo/code",
+            "input": "scroll the browser",
+            "tools": [{
+                "type": "namespace",
+                "name": "mcp__codex_apps__browser",
+                "description": "Control the in-app browser",
+                "tools": [{
+                    "type": "function",
+                    "name": "scroll",
+                    "description": "Scroll the current page",
+                    "strict": false,
+                    "parameters": {"type":"object","properties":{"direction":{"type":"string"}}}
+                }]
+            }]
+        });
+        let chat = to_chat_request(&request, "code").unwrap();
+        assert_eq!(
+            chat.body["tools"][0]["function"]["name"],
+            "mcp__codex_apps__browser__scroll"
+        );
+
+        let response = from_chat_response(
+            json!({"choices":[{"message":{"tool_calls":[{
+                "id":"call_browser",
+                "type":"function",
+                "function":{"name":"mcp__codex_apps__browser__scroll","arguments":"{\"direction\":\"down\"}"}
+            }]}}]}),
+            "demo/code",
+            "resp_browser".into(),
+            &chat.tool_namespaces,
+        )
+        .unwrap();
+        assert_eq!(
+            response["output"][0]["namespace"],
+            "mcp__codex_apps__browser"
+        );
+        assert_eq!(response["output"][0]["name"], "scroll");
+    }
+
+    #[test]
+    fn streaming_restores_fragmented_namespace_tool_name() {
+        let request = json!({
+            "model":"demo/code",
+            "input":"scroll",
+            "tools":[{"type":"namespace","name":"browser","tools":[{
+                "type":"function","name":"scroll","parameters":{"type":"object"}
+            }]}]
+        });
+        let chat = to_chat_request(&request, "code").unwrap();
+        let mut state = StreamState::new(
+            "resp_browser".into(),
+            "demo/code".into(),
+            chat.tool_namespaces,
+        );
+        let first = state.consume_chunk(&json!({"choices":[{"delta":{"tool_calls":[{
+            "index":0,"id":"call_1","function":{"name":"browser__scr"}
+        }]}}]}));
+        assert!(
+            first
+                .iter()
+                .all(|event| !event.contains("output_item.added"))
+        );
+        let second = state.consume_chunk(&json!({"choices":[{"delta":{"tool_calls":[{
+            "index":0,"function":{"name":"oll","arguments":"{}"}
+        }]}}]}));
+        assert!(second.iter().any(|event| {
+            event.contains("response.output_item.added")
+                && event.contains("\"namespace\":\"browser\"")
+                && event.contains("\"name\":\"scroll\"")
+        }));
     }
 
     #[test]

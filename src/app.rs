@@ -869,6 +869,7 @@ async fn responses(
         .resolve(&requested_model)
         .map_err(|e| ApiError::not_found(e.to_string()))?;
     let chat_request = protocol::to_chat_request(&request, &upstream_model)?;
+    let tool_namespaces = chat_request.tool_namespaces.clone();
     let (base_url, mut upstream_headers) = provider
         .request_parts(registry.client())
         .await
@@ -887,7 +888,7 @@ async fn responses(
             base_url.trim_end_matches('/')
         ))
         .headers(upstream_headers)
-        .json(&chat_request)
+        .json(&chat_request.body)
         .send()
         .await
         .map_err(|e| ApiError::upstream(StatusCode::BAD_GATEWAY, e.to_string()))?;
@@ -910,6 +911,7 @@ async fn responses(
         Ok(ResponseBody::Stream(stream_response(
             response.bytes_stream(),
             requested_model,
+            tool_namespaces,
         )))
     } else {
         let chat: Value = response
@@ -920,6 +922,7 @@ async fn responses(
             chat,
             &requested_model,
             protocol::response_id(),
+            &tool_namespaces,
         )?)))
     }
 }
@@ -938,12 +941,16 @@ impl IntoResponse for ResponseBody {
     }
 }
 
-fn stream_response<S>(upstream: S, requested_model: String) -> Response
+fn stream_response<S>(
+    upstream: S,
+    requested_model: String,
+    tool_namespaces: protocol::ToolNamespaces,
+) -> Response
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
 {
     let events = stream! {
-        let mut state = protocol::StreamState::new(protocol::response_id(), requested_model);
+        let mut state = protocol::StreamState::new(protocol::response_id(), requested_model, tool_namespaces);
         for frame in state.created_events() { yield Ok::<Bytes, Infallible>(Bytes::from(frame)); }
         let reader = StreamReader::new(upstream.map_err(std::io::Error::other));
         let mut lines = reader.lines();
