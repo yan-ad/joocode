@@ -20,13 +20,6 @@ fn launchctl_service_loaded(service: &str) -> anyhow::Result<bool> {
         return Ok(true);
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn recognizes_launchctl_service_not_loaded_message() {
-        assert!(launchctl_item_not_found(
-            b"Bad request.\nCould not find service \"dev.joocode.proxy\" in domain for user gui: 501"
-        ));
-    }
     if launchctl_item_not_found(&output.stderr) {
         return Ok(false);
     }
@@ -568,6 +561,14 @@ mod tests {
         assert_ne!(runtime, boot);
         assert!(boot.ends_with("Library/LaunchAgents/dev.joocode.proxy.plist"));
         assert!(runtime.ends_with("joocode/dev.joocode.proxy.plist"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recognizes_launchctl_service_not_loaded_message() {
+        assert!(launchctl_item_not_found(
+            b"Bad request.\nCould not find service \"dev.joocode.proxy\" in domain for user gui: 501"
+        ));
     }
 
     #[cfg(target_os = "linux")]

@@ -1758,7 +1758,7 @@ mod tests {
         assert!(first.contains("🦀"));
         assert!(first.contains("Joocode"));
         assert!(first.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
-        assert!(first.contains("running"));
+        assert!(first.contains("ONLINE"));
 
         terminal
             .draw(|frame| draw_header(frame, frame.area(), 1))
@@ -1909,7 +1909,7 @@ mod tests {
         assert!(rendered.contains("ONLINE"));
         assert!(rendered.contains("OpenAI"));
         assert!(rendered.contains("http://127.0.0.1:10123/v1"));
-        assert!(rendered.contains("API key"));
+        assert!(rendered.contains("KEY"));
         assert!(rendered.contains("any non-empty value"));
     }
 
