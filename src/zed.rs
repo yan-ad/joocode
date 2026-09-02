@@ -9,9 +9,38 @@ fn settings_path() -> anyhow::Result<PathBuf> {
     if let Some(path) = env::var_os("ZED_SETTINGS_PATH").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(path));
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        let roaming = env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(dirs::config_dir)
+            .context("could not resolve the Windows RoamingAppData directory")?;
+        return Ok(windows_settings_path(&roaming));
+    }
+
+    #[cfg(not(target_os = "windows"))]
     Ok(dirs::home_dir()
         .context("could not resolve the user home directory")?
         .join(".config/zed/settings.json"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_settings_path(roaming: &std::path::Path) -> PathBuf {
+    roaming.join("Zed/settings.json")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_credential_target(base_url: &str) -> String {
+    format!("zed:url={base_url}")
+}
+
+#[cfg(target_os = "windows")]
+fn remove_local_api_key(base_url: &str) {
+    let target = windows_credential_target(base_url);
+    let _ = std::process::Command::new("cmdkey")
+        .arg(format!("/delete:{target}"))
+        .output();
 }
 
 fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
@@ -23,7 +52,34 @@ fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
         crate::macos_keychain::ensure_internet_password(PROVIDER_ID, base_url, LOCAL_API_KEY)?;
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // Zed stores Windows credentials under the Generic Credential Manager
+        // target `zed:url=<api_url>`. Register only a non-secret local
+        // placeholder; upstream credentials remain owned by Joocode sources.
+        let target = windows_credential_target(base_url);
+        let output = std::process::Command::new("cmdkey")
+            .args([
+                format!("/generic:{target}"),
+                format!("/user:{PROVIDER_ID}"),
+                format!("/pass:{LOCAL_API_KEY}"),
+            ])
+            .output()
+            .context("failed to run Windows Credential Manager command 'cmdkey'")?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            anyhow::bail!(
+                "failed to register the local Zed credential in Windows Credential Manager{}",
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {detail}")
+                }
+            );
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = base_url;
     }
@@ -49,7 +105,7 @@ Use this structure:
 - Mark breaking changes with `!` before `:` or a `BREAKING CHANGE:` footer.
 - Return only the commit message, with no markdown fence or commentary.
 <!-- joocode:conventional-commits:end -->"#;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const LOCAL_API_KEY: &str = "joocode-local";
 
 fn merge_commit_instructions(existing: &str) -> String {
@@ -115,6 +171,11 @@ pub fn uninstall() -> anyhow::Result<()> {
     let text = fs::read_to_string(&path)?;
     let mut root: Value = json5::from_str(&text)
         .with_context(|| format!("invalid Zed settings JSONC at {}", path.display()))?;
+    #[cfg(target_os = "windows")]
+    let local_api_url = root
+        .pointer("/language_models/openai_compatible/joocode/api_url")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     if let Some(compatible) = root
         .pointer_mut("/language_models/openai_compatible")
         .and_then(Value::as_object_mut)
@@ -125,6 +186,10 @@ pub fn uninstall() -> anyhow::Result<()> {
     }
     remove_commit_instructions(&mut root);
     fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&root)?))?;
+    #[cfg(target_os = "windows")]
+    if let Some(base_url) = local_api_url {
+        remove_local_api_key(&base_url);
+    }
     Ok(())
 }
 
@@ -222,6 +287,19 @@ mod tests {
     fn object_at_rejects_non_objects() {
         let mut root = Map::from_iter([("language_models".into(), json!(false))]);
         assert!(object_at(&mut root, "language_models").is_err());
+    }
+
+    #[test]
+    fn windows_paths_and_credentials_match_zed_contract() {
+        let roaming = PathBuf::from(r"C:\Users\demo\AppData\Roaming");
+        assert_eq!(
+            windows_settings_path(&roaming),
+            roaming.join("Zed/settings.json")
+        );
+        assert_eq!(
+            windows_credential_target("http://127.0.0.1:10100/v1"),
+            "zed:url=http://127.0.0.1:10100/v1"
+        );
     }
 
     #[test]
@@ -335,5 +413,83 @@ mod tests {
     fn local_api_key_is_a_non_secret_placeholder() {
         assert_eq!(PROVIDER_ID, "joocode");
         assert_eq!(LOCAL_API_KEY, "joocode-local");
+    }
+
+    #[test]
+    fn preserves_existing_windows_style_zed_configuration_and_default_model() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("opencode.jsonc");
+        let auth = dir.path().join("auth.json");
+        let settings = dir.path().join("AppData/Roaming/Zed/settings.json");
+        fs::write(
+            &config,
+            r#"{ provider: { hermes: { options: { baseURL: "https://upstream.test/v1" }, models: { "claude-sonnet": {}, "gpt-fast": {} } } } }"#,
+        )
+        .unwrap();
+        fs::write(&auth, "{}").unwrap();
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            r#"
+            // Existing Zed settings must remain authoritative.
+            {
+              "telemetry": { "diagnostics": false },
+              "agent": {
+                "default_model": {
+                  "provider": "9router",
+                  "model": "kr/claude-sonnet-4.5",
+                  "enable_thinking": false,
+                },
+                "favorite_models": [],
+              },
+              "language_models": {
+                "openai_compatible": {
+                  "9router": {
+                    "api_url": "http://localhost:20128/v1",
+                    "available_models": [{ "name": "kr/claude-sonnet-4.5" }],
+                  },
+                },
+              },
+              "theme": { "dark": "Aura Dark" },
+            }
+            "#,
+        )
+        .unwrap();
+        let registry = Registry::load(&ConfigPaths { config, auth }).unwrap();
+
+        install_at(
+            &registry,
+            "http://127.0.0.1:10100/v1",
+            settings.clone(),
+            None,
+        )
+        .unwrap();
+
+        let result: Value = serde_json::from_str(&fs::read_to_string(settings).unwrap()).unwrap();
+        assert_eq!(result["telemetry"]["diagnostics"], false);
+        assert_eq!(result["theme"]["dark"], "Aura Dark");
+        assert_eq!(result["agent"]["default_model"]["provider"], "9router");
+        assert_eq!(
+            result["agent"]["default_model"]["model"],
+            "kr/claude-sonnet-4.5"
+        );
+        assert_eq!(
+            result["language_models"]["openai_compatible"]["9router"]["api_url"],
+            "http://localhost:20128/v1"
+        );
+        let models = result["language_models"]["openai_compatible"]["joocode"]["available_models"]
+            .as_array()
+            .unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(
+            models
+                .iter()
+                .any(|model| model["name"] == "hermes/claude-sonnet")
+        );
+        assert!(
+            models
+                .iter()
+                .any(|model| model["name"] == "hermes/gpt-fast")
+        );
     }
 }
