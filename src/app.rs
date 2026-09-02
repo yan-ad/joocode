@@ -216,7 +216,7 @@ struct PersistentProxyHandoff {
 
 impl PersistentProxyHandoff {
     fn begin(interactive: bool) -> anyhow::Result<Self> {
-        if interactive && autostart::status().enabled() {
+        if interactive {
             autostart::prepare_dashboard_handoff()
                 .context("failed to prepare the persistent Joocode proxy handoff")?;
         }
@@ -425,10 +425,39 @@ pub async fn serve_dashboard(
                     let event = match result {
                         Ok((provider, registry)) => dashboard::DashboardEvent::ProviderAdded {
                             provider: provider.name,
-                            models: provider.models,
                             config_sources: dashboard::config_sources(&registry),
                             model_count: registry.models().len(),
                             provider_count: registry.provider_count(),
+                            providers: local_config::summaries().unwrap_or_default(),
+                        },
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::RemoveProvider { name } => {
+                    let result = async {
+                        local_config::remove(&name)?;
+                        let registry = Registry::discover(&selection).await?;
+                        reload_store.replace(registry.clone());
+                        let setup_registry = registry.clone();
+                        let setup_targets = active_targets.clone();
+                        let setup_base_url = reload_base_url.clone();
+                        std::thread::spawn(move || {
+                            desktop::configure_detected(
+                                &setup_registry,
+                                &setup_base_url,
+                                &setup_targets,
+                            );
+                        });
+                        Ok::<_, anyhow::Error>(registry)
+                    }
+                    .await;
+                    let event = match result {
+                        Ok(registry) => dashboard::DashboardEvent::ProviderRemoved {
+                            config_sources: dashboard::config_sources(&registry),
+                            model_count: registry.models().len(),
+                            provider_count: registry.provider_count(),
+                            providers: local_config::summaries().unwrap_or_default(),
                         },
                         Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
                     };
@@ -490,13 +519,11 @@ pub async fn serve_dashboard(
     server.await??;
     match dashboard_result? {
         dashboard::DashboardExit::Quit => {
-            if autostart::status().enabled() {
-                autostart::resume()?;
-                persistent_proxy.disarm();
-                println!(
-                    "Joocode is still running in the background. You can stop it with `jcx stop`."
-                );
-            }
+            autostart::resume()?;
+            persistent_proxy.disarm();
+            println!(
+                "Joocode is still running in the background. You can stop it with `jcx stop`."
+            );
             Ok(())
         }
         dashboard::DashboardExit::Restart => {

@@ -43,12 +43,12 @@ pub async fn run() -> anyhow::Result<()> {
     }
     if matches!(cli.command, Some(Command::Start)) {
         autostart::start()?;
-        println!("Joocode background proxy started. Auto-start is On.");
+        println!("Joocode background proxy started.");
         return Ok(());
     }
     if matches!(cli.command, Some(Command::Stop)) {
         autostart::stop()?;
-        println!("Joocode background proxy stopped. Auto-start is Off.");
+        println!("Joocode background proxy stopped.");
         return Ok(());
     }
 

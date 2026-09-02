@@ -117,9 +117,9 @@ mod tests {
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
-    /// Start Joocode as a persistent background proxy and enable Auto-start.
+    /// Start Joocode as a persistent background proxy now.
     Start,
-    /// Stop the persistent background proxy and disable Auto-start.
+    /// Stop the currently running background proxy.
     Stop,
     /// Start the local Codex-compatible HTTP server.
     Serve {

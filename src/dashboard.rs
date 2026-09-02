@@ -19,6 +19,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     autostart::{self, Status as AutoStartStatus},
     desktop::DesktopTargets,
+    local_config::{self, ProviderSummary},
     provider::Registry,
     target_config::ProxyTarget,
 };
@@ -32,7 +33,115 @@ pub struct DashboardData {
     pub provider_count: usize,
     pub autostart: AutoStartStatus,
     pub proxy_targets: BTreeMap<ProxyTarget, bool>,
+    pub providers: Vec<ProviderSummary>,
     pub port_warning: Option<String>,
+}
+
+fn draw_providers(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    providers: &[ProviderSummary],
+    selected: usize,
+) {
+    let items = if providers.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "No providers configured. Press Enter to add one.",
+            Style::default().fg(Color::DarkGray),
+        )))]
+    } else {
+        providers
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        if index == selected { "◆ " } else { "◇ " },
+                        Style::default().fg(if index == selected {
+                            Color::Green
+                        } else {
+                            Color::DarkGray
+                        }),
+                    ),
+                    Span::styled(
+                        &provider.label,
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {} models", provider.model_count),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+                .style(selected_style(index == selected))
+            })
+            .collect()
+    };
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(" Providers ")
+                .title_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .borders(Borders::ALL),
+        ),
+        area,
+    );
+}
+
+fn draw_provider_input(frame: &mut Frame<'_>, title: &str, value: &str, secret: bool) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(72);
+    let height = 7_u16.min(area.height.saturating_sub(2));
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    let shown = if secret {
+        "•".repeat(value.chars().count())
+    } else {
+        value.to_owned()
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(""), Line::from(shown)])
+            .block(
+                Block::default()
+                    .title(format!(" New provider · {title} "))
+                    .title_style(Style::default().fg(Color::Green))
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn draw_provider_loading(frame: &mut Frame<'_>) {
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(60);
+    let height = 7_u16.min(area.height.saturating_sub(2));
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new("Fetching /models and reloading Joocode…")
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .title(" New provider · Step 3/3 ")
+                    .title_style(Style::default().fg(Color::Yellow))
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
 }
 
 fn selected_style(selected: bool) -> Style {
@@ -232,7 +341,7 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
                 Color::DarkGray
             }),
         ),
-        Span::raw("Auto-start"),
+        Span::raw("Auto-start after login/restart"),
         Span::raw(format!(" ({})", data.autostart.label())),
     ]);
     let mut items = vec![
@@ -449,8 +558,10 @@ fn detect_easter_egg(screen: &mut Screen, input: &mut String, key: KeyCode) -> b
 fn handle_paste(screen: &mut Screen, value: &str) {
     let value = value.replace(['\r', '\n'], "");
     match screen {
-        Screen::BaseUrl(base_url) => base_url.push_str(&value),
-        Screen::ApiKey { api_key, .. } => api_key.push_str(&value),
+        Screen::ProviderBaseUrl {
+            value: base_url, ..
+        } => base_url.push_str(&value),
+        Screen::ProviderApiKey { api_key, .. } => api_key.push_str(&value),
         _ => {}
     }
 }
@@ -473,6 +584,7 @@ impl DashboardData {
                 .into_iter()
                 .map(|target| (target, targets.enabled(target)))
                 .collect(),
+            providers: local_config::summaries().unwrap_or_default(),
             port_warning,
         }
     }
@@ -481,6 +593,7 @@ impl DashboardData {
 #[derive(Debug)]
 pub enum DashboardCommand {
     AddProvider { base_url: String, api_key: String },
+    RemoveProvider { name: String },
     ToggleAutoStart,
     ToggleProxyTarget { target: ProxyTarget },
     InstallUpdate { tag: String },
@@ -490,10 +603,16 @@ pub enum DashboardCommand {
 pub enum DashboardEvent {
     ProviderAdded {
         provider: String,
-        models: Vec<String>,
         config_sources: Vec<String>,
         model_count: usize,
         provider_count: usize,
+        providers: Vec<ProviderSummary>,
+    },
+    ProviderRemoved {
+        config_sources: Vec<String>,
+        model_count: usize,
+        provider_count: usize,
+        providers: Vec<ProviderSummary>,
     },
     ProviderError(String),
     AutoStartUpdated(AutoStartStatus),
@@ -518,15 +637,20 @@ enum Screen {
     Config {
         selected: usize,
     },
-    BaseUrl(String),
-    ApiKey {
+    Providers {
+        selected: usize,
+    },
+    ProviderBaseUrl {
+        selected: usize,
+        value: String,
+    },
+    ProviderApiKey {
+        selected: usize,
         base_url: String,
         api_key: String,
     },
-    Loading,
-    Models {
-        provider: String,
-        models: Vec<String>,
+    ProviderLoading {
+        selected: usize,
     },
     Error(String),
     UpdateAvailable(String),
@@ -596,7 +720,11 @@ pub fn run(
                 if matches!(screen, Screen::Dashboard) {
                     return Ok::<DashboardExit, std::io::Error>(DashboardExit::Quit);
                 }
-                screen = Screen::Dashboard;
+                screen = match screen {
+                    Screen::ProviderBaseUrl { selected, .. }
+                    | Screen::ProviderApiKey { selected, .. } => Screen::Providers { selected },
+                    _ => Screen::Dashboard,
+                };
                 continue;
             }
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -605,7 +733,7 @@ pub fn run(
             if detect_easter_egg(&mut screen, &mut secret_input, key.code) {
                 continue;
             }
-            handle_key(&mut screen, key.code, &command_tx);
+            handle_key_with_providers(&mut screen, key.code, &command_tx, &data.providers);
         }
     })?;
     Ok(exit)
@@ -620,15 +748,41 @@ fn receive_events(
         match event_rx.try_recv() {
             Ok(DashboardEvent::ProviderAdded {
                 provider,
-                models,
                 config_sources,
                 model_count,
                 provider_count,
+                providers,
             }) => {
                 data.config_sources = config_sources;
                 data.model_count = model_count;
                 data.provider_count = provider_count;
-                *screen = Screen::Models { provider, models };
+                data.providers = providers;
+                let selected = data
+                    .providers
+                    .iter()
+                    .position(|entry| entry.name == provider)
+                    .unwrap_or_default();
+                *screen = Screen::Providers { selected };
+            }
+            Ok(DashboardEvent::ProviderRemoved {
+                config_sources,
+                model_count,
+                provider_count,
+                providers,
+            }) => {
+                data.config_sources = config_sources;
+                data.model_count = model_count;
+                data.provider_count = provider_count;
+                data.providers = providers;
+                let selected = match screen {
+                    Screen::Providers { selected }
+                    | Screen::ProviderBaseUrl { selected, .. }
+                    | Screen::ProviderApiKey { selected, .. } => *selected,
+                    _ => 0,
+                };
+                *screen = Screen::Providers {
+                    selected: selected.min(data.providers.len().saturating_sub(1)),
+                };
             }
             Ok(DashboardEvent::ProviderError(error)) => *screen = Screen::Error(error),
             Ok(DashboardEvent::AutoStartUpdated(status)) => data.autostart = status,
@@ -648,9 +802,19 @@ fn receive_events(
     false
 }
 
+#[cfg(test)]
 fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<DashboardCommand>) {
+    handle_key_with_providers(screen, key, command_tx, &[]);
+}
+
+fn handle_key_with_providers(
+    screen: &mut Screen,
+    key: KeyCode,
+    command_tx: &UnboundedSender<DashboardCommand>,
+    providers: &[ProviderSummary],
+) {
     match screen {
-        Screen::Dashboard if key == KeyCode::Tab => *screen = Screen::BaseUrl(String::new()),
+        Screen::Dashboard if key == KeyCode::Tab => *screen = Screen::Providers { selected: 0 },
         Screen::Dashboard if key == KeyCode::Char('/') => *screen = Screen::Config { selected: 0 },
         Screen::Config { selected } => match key {
             KeyCode::Up => *selected = adjacent_config_item(*selected, false),
@@ -665,27 +829,56 @@ fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<Da
             }
             _ => {}
         },
-        Screen::BaseUrl(base_url) => match key {
-            KeyCode::Enter if !base_url.trim().is_empty() => {
-                *screen = Screen::ApiKey {
-                    base_url: base_url.trim().to_owned(),
+        Screen::Providers { selected } => match key {
+            KeyCode::Up => *selected = selected.saturating_sub(1),
+            KeyCode::Down => {
+                *selected = selected
+                    .saturating_add(1)
+                    .min(providers.len().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                *screen = Screen::ProviderBaseUrl {
+                    selected: *selected,
+                    value: String::new(),
+                };
+            }
+            KeyCode::Delete | KeyCode::Backspace => {
+                if let Some(provider) = providers.get(*selected) {
+                    let _ = command_tx.send(DashboardCommand::RemoveProvider {
+                        name: provider.name.clone(),
+                    });
+                }
+            }
+            _ => {}
+        },
+        Screen::ProviderBaseUrl { selected, value } => match key {
+            KeyCode::Enter if !value.trim().is_empty() => {
+                *screen = Screen::ProviderApiKey {
+                    selected: *selected,
+                    base_url: value.trim().to_owned(),
                     api_key: String::new(),
                 };
             }
             KeyCode::Backspace => {
-                base_url.pop();
+                value.pop();
             }
-            KeyCode::Char(character) => base_url.push(character),
+            KeyCode::Char(character) => value.push(character),
             _ => {}
         },
-        Screen::ApiKey { base_url, api_key } => match key {
+        Screen::ProviderApiKey {
+            selected,
+            base_url,
+            api_key,
+        } => match key {
             KeyCode::Enter => {
                 let command = DashboardCommand::AddProvider {
                     base_url: base_url.clone(),
                     api_key: api_key.clone(),
                 };
                 if command_tx.send(command).is_ok() {
-                    *screen = Screen::Loading;
+                    *screen = Screen::ProviderLoading {
+                        selected: *selected,
+                    };
                 } else {
                     *screen = Screen::Error("provider reload channel is unavailable".into());
                 }
@@ -707,9 +900,7 @@ fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<Da
                 *screen = Screen::Error("update channel is unavailable".into());
             }
         }
-        Screen::Models { .. } | Screen::Error(_) | Screen::EasterEgg { .. }
-            if key == KeyCode::Enter =>
-        {
+        Screen::Error(_) | Screen::EasterEgg { .. } if key == KeyCode::Enter => {
             *screen = Screen::Dashboard;
         }
         _ => {}
@@ -750,14 +941,21 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             draw_dashboard(frame, body, data);
             draw_config(frame, data, *selected);
         }
-        Screen::BaseUrl(value) => draw_input(frame, body, "Step 1/3 — Base URL", value, false),
-        Screen::ApiKey { api_key, .. } => {
-            draw_input(frame, body, "Step 2/3 — API key", api_key, true)
+        Screen::Providers { selected } => draw_providers(frame, body, &data.providers, *selected),
+        Screen::ProviderBaseUrl { selected, value } => {
+            draw_providers(frame, body, &data.providers, *selected);
+            draw_provider_input(frame, "Step 1/3 — Base URL", value, false);
         }
-        Screen::Loading => frame.render_widget(
-            Paragraph::new("Step 3/3 — Loading /models…").wrap(Wrap { trim: true }),
-            body,
-        ),
+        Screen::ProviderApiKey {
+            selected, api_key, ..
+        } => {
+            draw_providers(frame, body, &data.providers, *selected);
+            draw_provider_input(frame, "Step 2/3 — API key", api_key, true);
+        }
+        Screen::ProviderLoading { selected } => {
+            draw_providers(frame, body, &data.providers, *selected);
+            draw_provider_loading(frame);
+        }
         Screen::UpdateAvailable(tag) => {
             draw_dashboard(frame, body, data);
             draw_update_prompt(frame, tag);
@@ -766,20 +964,6 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             unreachable!("updating is rendered as a full-screen animated scene")
         }
         Screen::EasterEgg { .. } => unreachable!("easter egg is rendered as a full-screen scene"),
-        Screen::Models { provider, models } => {
-            let items = models
-                .iter()
-                .map(|model| ListItem::new(format!("joocode/{provider}/{model}")))
-                .collect::<Vec<_>>();
-            frame.render_widget(
-                List::new(items).block(
-                    Block::default()
-                        .title(format!("Step 3/3 — {} models", models.len()))
-                        .borders(Borders::ALL),
-                ),
-                body,
-            );
-        }
         Screen::Error(error) => frame.render_widget(
             Paragraph::new(error.as_str())
                 .style(Style::default().fg(Color::Red))
@@ -803,7 +987,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" to add new key  ·  "),
+            Span::raw(" Providers  ·  "),
             Span::styled(
                 "/",
                 Style::default()
@@ -818,11 +1002,17 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             Span::styled("Space", Style::default().fg(Color::Green)),
             Span::raw(" toggle  ·  Esc to close"),
         ],
-        Screen::BaseUrl(_) | Screen::ApiKey { .. } => vec![
+        Screen::Providers { .. } => vec![
+            Span::styled("Enter", Style::default().fg(Color::Green)),
+            Span::raw(" new provider  ·  "),
+            Span::styled("Del", Style::default().fg(Color::Red)),
+            Span::raw(" remove selected provider  ·  Esc close"),
+        ],
+        Screen::ProviderBaseUrl { .. } | Screen::ProviderApiKey { .. } => vec![
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::raw(" to continue  ·  Esc to cancel"),
         ],
-        Screen::Loading => vec![Span::raw("Fetching models…  ·  Esc to cancel")],
+        Screen::ProviderLoading { .. } => vec![Span::raw("Fetching /models…")],
         Screen::UpdateAvailable(_) => vec![
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::raw(" update & restart  ·  Esc dismiss"),
@@ -830,7 +1020,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
         Screen::Updating { .. } => {
             unreachable!("updating has its own full-screen progress scene")
         }
-        Screen::Models { .. } | Screen::Error(_) => vec![
+        Screen::Error(_) => vec![
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::raw(" to return  ·  Esc to cancel"),
         ],
@@ -910,32 +1100,6 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
-fn draw_input(
-    frame: &mut Frame<'_>,
-    area: ratatui::layout::Rect,
-    title: &str,
-    value: &str,
-    secret: bool,
-) {
-    let rendered = if secret {
-        "•".repeat(value.chars().count())
-    } else {
-        value.to_owned()
-    };
-    frame.render_widget(
-        Paragraph::new(rendered)
-            .block(Block::default().title(title).borders(Borders::ALL))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-    let x = area
-        .x
-        .saturating_add(1)
-        .saturating_add(value.chars().count() as u16);
-    let y = area.y.saturating_add(1);
-    frame.set_cursor_position((x.min(area.right().saturating_sub(1)), y));
-}
-
 fn display_source(source: &str) -> String {
     match source {
         "opencode" => "OpenCode".into(),
@@ -960,15 +1124,95 @@ mod tests {
         assert_eq!(display_source("ocx"), "OpenCodex");
         assert_eq!(display_source("hermes"), "Hermes");
         assert_eq!(display_source("copilot"), "GitHub Copilot");
+        assert_eq!(display_source("antigravity"), "Antigravity");
         assert_eq!(display_source("joocode"), "Joocode");
     }
 
     #[test]
-    fn tab_opens_provider_wizard() {
+    fn tab_opens_provider_manager() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut screen = Screen::Dashboard;
         handle_key(&mut screen, KeyCode::Tab, &tx);
-        assert!(matches!(screen, Screen::BaseUrl(_)));
+        assert!(matches!(screen, Screen::Providers { selected: 0 }));
+    }
+
+    #[test]
+    fn enter_opens_new_provider_modal() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = Screen::Providers { selected: 1 };
+        handle_key_with_providers(&mut screen, KeyCode::Enter, &tx, &[]);
+        assert!(matches!(
+            screen,
+            Screen::ProviderBaseUrl {
+                selected: 1,
+                value
+            } if value.is_empty()
+        ));
+    }
+
+    #[test]
+    fn delete_removes_selected_provider() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let providers = vec![
+            ProviderSummary {
+                name: "gunamaya".into(),
+                label: "gunamaya.id".into(),
+                model_count: 10,
+            },
+            ProviderSummary {
+                name: "openai".into(),
+                label: "openai.com".into(),
+                model_count: 4,
+            },
+        ];
+        let mut screen = Screen::Providers { selected: 1 };
+        handle_key_with_providers(&mut screen, KeyCode::Delete, &tx, &providers);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DashboardCommand::RemoveProvider { name }) if name == "openai"
+        ));
+    }
+
+    #[test]
+    fn provider_manager_renders_domains() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = DashboardData {
+            config_sources: vec!["Joocode".into()],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 14,
+            provider_count: 2,
+            autostart: AutoStartStatus::Off,
+            proxy_targets: BTreeMap::new(),
+            providers: vec![
+                ProviderSummary {
+                    name: "gunamaya".into(),
+                    label: "gunamaya.id".into(),
+                    model_count: 10,
+                },
+                ProviderSummary {
+                    name: "openai".into(),
+                    label: "openai.com".into(),
+                    model_count: 4,
+                },
+            ],
+            port_warning: None,
+        };
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Providers { selected: 0 }))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Providers"));
+        assert!(rendered.contains("gunamaya.id"));
+        assert!(rendered.contains("openai.com"));
+        assert!(!rendered.contains("secret"));
     }
 
     #[test]
@@ -1015,6 +1259,7 @@ mod tests {
             provider_count: 0,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            providers: vec![],
             port_warning: None,
         };
         let mut screen = Screen::Dashboard;
@@ -1032,6 +1277,48 @@ mod tests {
     }
 
     #[test]
+    fn configuration_modal_renders_grouped_targets() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = DashboardData {
+            config_sources: vec!["OpenCode".into()],
+            ide_targets: vec!["Codex".into()],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 30,
+            provider_count: 5,
+            autostart: AutoStartStatus::On,
+            proxy_targets: ProxyTarget::ALL
+                .into_iter()
+                .map(|target| (target, target == ProxyTarget::Codex))
+                .collect(),
+            providers: vec![],
+            port_warning: None,
+        };
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Config { selected: 1 }))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for label in [
+            "Setting",
+            "Proxy to",
+            "Codex",
+            "JetBrains",
+            "Antigravity",
+            "Zed",
+            "Claude Code",
+            "Grok Build",
+        ] {
+            assert!(rendered.contains(label), "missing {label}");
+        }
+    }
+
+    #[test]
     fn autostart_event_refreshes_dashboard_status() {
         let mut data = DashboardData {
             config_sources: vec![],
@@ -1041,6 +1328,7 @@ mod tests {
             provider_count: 0,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            providers: vec![],
             port_warning: None,
         };
         let mut screen = Screen::Dashboard;
@@ -1065,9 +1353,15 @@ mod tests {
 
     #[test]
     fn paste_populates_wizard_fields_without_newlines() {
-        let mut screen = Screen::BaseUrl(String::new());
+        let mut screen = Screen::ProviderBaseUrl {
+            selected: 0,
+            value: String::new(),
+        };
         handle_paste(&mut screen, "https://example.test/v1\n");
-        assert!(matches!(screen, Screen::BaseUrl(value) if value == "https://example.test/v1"));
+        assert!(matches!(
+            screen,
+            Screen::ProviderBaseUrl { value, .. } if value == "https://example.test/v1"
+        ));
     }
 
     #[test]
@@ -1080,16 +1374,21 @@ mod tests {
             provider_count: 5,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            providers: vec![],
             port_warning: None,
         };
         let mut screen = Screen::Dashboard;
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(DashboardEvent::ProviderAdded {
             provider: "local".into(),
-            models: vec!["model-a".into()],
             config_sources: vec!["OpenCode".into(), "Joocode".into()],
             model_count: 31,
             provider_count: 6,
+            providers: vec![ProviderSummary {
+                name: "local".into(),
+                label: "example.test".into(),
+                model_count: 1,
+            }],
         })
         .unwrap();
 
@@ -1098,6 +1397,7 @@ mod tests {
         assert_eq!(data.model_count, 31);
         assert_eq!(data.provider_count, 6);
         assert_eq!(data.config_sources, vec!["OpenCode", "Joocode"]);
+        assert_eq!(data.providers[0].label, "example.test");
     }
 
     #[test]
@@ -1132,6 +1432,7 @@ mod tests {
             provider_count: 0,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            providers: vec![],
             port_warning: None,
         };
         let mut screen = Screen::Dashboard;
@@ -1170,6 +1471,7 @@ mod tests {
             provider_count: 0,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            providers: vec![],
             port_warning: None,
         };
         let mut screen = Screen::Updating {
@@ -1194,6 +1496,7 @@ mod tests {
             provider_count: 5,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            providers: vec![],
             port_warning: None,
         };
 
@@ -1225,6 +1528,7 @@ mod tests {
             provider_count: 5,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            providers: vec![],
             port_warning: None,
         };
 

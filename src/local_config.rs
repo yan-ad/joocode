@@ -13,6 +13,23 @@ pub struct LocalProvider {
     pub models: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderSummary {
+    pub name: String,
+    pub label: String,
+    pub model_count: usize,
+}
+
+impl LocalProvider {
+    pub fn summary(&self) -> ProviderSummary {
+        ProviderSummary {
+            name: self.name.clone(),
+            label: provider_label(&self.base_url).unwrap_or_else(|_| self.name.clone()),
+            model_count: self.models.len(),
+        }
+    }
+}
+
 pub fn path() -> anyhow::Result<PathBuf> {
     if let Some(path) = std::env::var_os("JOOCODE_PROVIDERS") {
         return Ok(PathBuf::from(path));
@@ -26,6 +43,10 @@ pub fn path() -> anyhow::Result<PathBuf> {
 
 pub fn load() -> anyhow::Result<Vec<LocalProvider>> {
     load_from(&path()?)
+}
+
+pub fn summaries() -> anyhow::Result<Vec<ProviderSummary>> {
+    Ok(load()?.iter().map(LocalProvider::summary).collect())
 }
 
 fn load_from(path: &std::path::Path) -> anyhow::Result<Vec<LocalProvider>> {
@@ -83,17 +104,38 @@ pub fn save(provider: LocalProvider) -> anyhow::Result<PathBuf> {
         providers.push(provider);
         providers.sort_by(|a, b| a.name.cmp(&b.name));
     }
+    write_providers(&path, &providers)?;
+    Ok(path)
+}
+
+pub fn remove(name: &str) -> anyhow::Result<PathBuf> {
+    let path = path()?;
+    remove_from(&path, name)?;
+    Ok(path)
+}
+
+fn remove_from(path: &std::path::Path, name: &str) -> anyhow::Result<()> {
+    let mut providers = load_from(path)?;
+    let original_len = providers.len();
+    providers.retain(|provider| provider.name != name);
+    if providers.len() == original_len {
+        bail!("provider `{name}` was not found");
+    }
+    write_providers(path, &providers)?;
+    Ok(())
+}
+
+fn write_providers(path: &std::path::Path, providers: &[LocalProvider]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed creating {}", parent.display()))?;
     }
     let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(&providers)?)
+    fs::write(&temporary, serde_json::to_vec_pretty(providers)?)
         .with_context(|| format!("failed writing {}", temporary.display()))?;
     set_private_permissions(&temporary)?;
-    fs::rename(&temporary, &path)
-        .with_context(|| format!("failed replacing {}", path.display()))?;
-    Ok(path)
+    fs::rename(&temporary, path).with_context(|| format!("failed replacing {}", path.display()))?;
+    Ok(())
 }
 
 fn normalize_base_url(value: &str) -> anyhow::Result<String> {
@@ -133,6 +175,21 @@ fn provider_name(base_url: &str) -> anyhow::Result<String> {
         bail!("cannot derive a provider name from the base URL");
     }
     Ok(name)
+}
+
+fn provider_label(base_url: &str) -> anyhow::Result<String> {
+    let url = Url::parse(base_url)?;
+    let host = url.host_str().context("base URL has no host")?;
+    let host = host
+        .strip_prefix("api.")
+        .or_else(|| host.strip_prefix("www."))
+        .unwrap_or(host);
+    Ok(match url.port() {
+        Some(port) if !matches!((url.scheme(), port), ("http", 80) | ("https", 443)) => {
+            format!("{host}:{port}")
+        }
+        _ => host.to_owned(),
+    })
 }
 
 fn parse_models(value: &Value) -> Vec<String> {
@@ -196,6 +253,14 @@ mod tests {
             provider_name("http://localhost:11434/v1").unwrap(),
             "localhost-11434"
         );
+        assert_eq!(
+            provider_label("https://api.openai.com/v1").unwrap(),
+            "openai.com"
+        );
+        assert_eq!(
+            provider_label("https://gunamaya.id/v1").unwrap(),
+            "gunamaya.id"
+        );
     }
 
     #[test]
@@ -212,6 +277,32 @@ mod tests {
         let loaded = load_from(&path).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].models, vec!["model-a"]);
+    }
+
+    #[test]
+    fn removes_provider_without_exposing_other_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("providers.json");
+        let providers = vec![
+            LocalProvider {
+                name: "gunamaya".into(),
+                base_url: "https://gunamaya.id/v1".into(),
+                api_key: "secret-a".into(),
+                models: vec!["model-a".into()],
+            },
+            LocalProvider {
+                name: "openai".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key: "secret-b".into(),
+                models: vec!["model-b".into()],
+            },
+        ];
+        write_providers(&path, &providers).unwrap();
+        remove_from(&path, "gunamaya").unwrap();
+        let remaining = load_from(&path).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].name, "openai");
+        assert_eq!(remaining[0].api_key, "secret-b");
     }
 
     #[tokio::test]

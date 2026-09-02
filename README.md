@@ -33,7 +33,7 @@ jcx
 
 ◉ Models: 30    ◇ Providers: 5
 
-Esc to exit  ·  Tab to add new key  ·  / Config
+Esc to exit  ·  Tab Providers  ·  / Config
 ```
 
 Joocode takes the universal local-proxy idea behind projects such as OCX and
@@ -54,14 +54,15 @@ into Codex, Zed, JetBrains, Claude Code, or Grok Build. Start `jcx` and keep usi
   prepares only the integrations present on the machine.
 - **One native process** — a single Rust binary, one shared proxy, no Node/Bun
   runtime and no browser dashboard required.
-- **Live catalog reload** — press `Tab`, enter a base URL and API key, fetch
-  `/models`, and use the new models without restarting Joocode.
-- **Persistent background proxy** — press `/`, select Auto-start, then press
-  `Space` to toggle the native macOS LaunchAgent, Linux systemd user service,
-  or Windows Startup supervisor. When enabled, Joocode runs headlessly at login
-  and is restarted automatically if it exits. Opening the dashboard temporarily
-  takes over the proxy port; pressing `Esc` hands it back to the background service.
-  Use `jcx start` to enable/start it and `jcx stop` to stop it and disable Auto-start.
+- **Provider manager** — press `Tab` to browse saved providers, add a new
+  OpenAI-compatible endpoint in a modal, or remove the selected provider. The
+  catalog reloads without restarting Joocode.
+- **Persistent background proxy** — running `jcx` always hands the proxy to a
+  supervised background service after the dashboard closes, even when Auto-start
+  is Off. Press `/`, select **Auto-start after login/restart**, then press `Space`
+  to control whether that service returns automatically after signing in or
+  restarting the device. Use `jcx start` and `jcx stop` to control the current
+  background session without changing the Auto-start preference.
 - **Desktop app launcher** — release installers include the Joocode palm/crab
   icon and install a platform launcher while retaining the `jcx` flagship CLI (`joocode` remains an alias).
 - **Protocol bridge** — Responses API and Chat Completions, JSON and SSE,
@@ -194,7 +195,7 @@ Press `/` in the dashboard to open the configuration modal:
 
 ```text
 Setting
-  Auto-start                 (On/Off)
+  Auto-start after login/restart (On/Off)
 
 Proxy to
   Codex                      (On/Off)
@@ -237,13 +238,19 @@ jcx --host 127.0.0.1 --port 10200 \
 Binding beyond loopback can expose access to every configured provider. Only do
 so behind trusted network controls.
 
-## Add any OpenAI-compatible provider
+## Manage OpenAI-compatible providers
 
 Press `Tab` in the dashboard:
 
-1. Enter the OpenAI-compatible base URL, including `/v1` when required.
-2. Enter the API key. It remains masked in the terminal.
-3. Joocode requests `GET /models` and previews the discovered catalog.
+- Use `↑` and `↓` to select a saved provider.
+- Press `Enter` to open the new-provider modal.
+- Press `Del` to remove the selected provider.
+
+The create modal asks for:
+
+1. The OpenAI-compatible base URL, including `/v1` when required.
+2. The API key. It remains masked in the terminal.
+3. Joocode requests `GET /models`, saves the provider, and reloads the catalog.
 
 The provider is saved with private file permissions to:
 
@@ -485,7 +492,7 @@ Codex/Zed settings by default.
 - `provider` — merged registry, source-aware routes, headers, and credentials.
 - `protocol` — Responses ↔ Chat Completions conversion and streaming state.
 - `desktop` — installed-client detection and catalog synchronization.
-- `dashboard` — Ratatui status UI and live provider wizard.
+- `dashboard` — Ratatui status UI, provider manager, and modal provider setup.
 - `app` — Axum routes, upstream transport, and hot-reloadable registry.
 
 This separation keeps the proxy core small while allowing additional config
