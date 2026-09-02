@@ -234,7 +234,7 @@ impl PersistentProxyHandoff {
 impl Drop for PersistentProxyHandoff {
     fn drop(&mut self) {
         if self.active {
-            let _ = autostart::resume();
+            let _ = autostart::resume_detached();
         }
     }
 }
@@ -547,7 +547,7 @@ pub async fn serve_dashboard(
     }
     match dashboard_result? {
         dashboard::DashboardExit::Quit => {
-            autostart::resume()?;
+            autostart::resume_detached()?;
             persistent_proxy.disarm();
             println!(
                 "Joocode is still running in the background. You can stop it with `jcx stop`."

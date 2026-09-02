@@ -55,10 +55,26 @@ pub fn stop() -> anyhow::Result<()> {
     pause_platform()
 }
 
-/// Resume the background proxy after the dashboard releases its listener.
-pub fn resume() -> anyhow::Result<()> {
-    ensure_runtime_service()?;
-    resume_platform()
+/// Resume the persistent proxy without holding the interactive terminal open.
+/// The child owns the service-manager wait while the dashboard process can
+/// restore the terminal and exit immediately.
+pub fn resume_detached() -> anyhow::Result<()> {
+    let executable = executable()?;
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("start")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .spawn()
+        .context("failed to hand the Joocode proxy back to the background")?;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
