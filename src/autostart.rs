@@ -458,6 +458,7 @@ fn resume_platform() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn remove_file(path: PathBuf) -> anyhow::Result<()> {
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
