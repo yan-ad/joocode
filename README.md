@@ -2,7 +2,7 @@
 <h3 align="center">your AI configs, everywhere.</h3>
 
 <p align="center"><b>The OCX idea, supercharged as one fast native Rust binary.</b><br>
-Reuse OpenCode, OCX, Hermes, Copilot, Antigravity Gemini, and OpenAI-compatible providers inside Codex, Zed, JetBrains, Claude Code, and Grok Build.</p>
+Reuse OpenCode, CrabCode, OCX, Hermes, Copilot, Antigravity Gemini, and OpenAI-compatible providers inside Codex, Zed, JetBrains, Claude Code, and Grok Build.</p>
 
 <p align="center">
   <img src="assets/joocode-icon.png" alt="Joocode palm and crab logo" width="180">
@@ -280,12 +280,13 @@ All available sources are enabled by default. Restrict discovery with repeated
 or comma-separated `--source` values:
 
 ```bash
-jcx --source opencode,hermes models
+jcx --source opencode,crabcode,hermes models
 jcx --source copilot doctor
 jcx --source ocx serve
 ```
 
-Supported values are `auto`, `opencode`, `ocx`, `hermes`, and `copilot`.
+Supported values include `auto`, `opencode`, `crabcode`, `ocx`, `hermes`,
+`copilot`, `antigravity`, and `joocode`.
 Joocode's local `providers.json` source remains available for live additions.
 
 ### OpenCode
@@ -309,6 +310,27 @@ Legacy `JOC_*` and `CRABCODEX_*` variables remain supported for migration.
 
 Compatible OpenCode entries currently use `@ai-sdk/openai-compatible`,
 `@ai-sdk/openai`, or no explicit `npm` adapter.
+
+### CrabCode
+
+CrabCode reuses the normal OpenCode provider configuration but keeps its own
+credential store. Joocode combines:
+
+```text
+$XDG_CONFIG_HOME/opencode/opencode.jsonc
+$XDG_STATE_HOME/crabcode/auth.json
+```
+
+With the usual fallbacks:
+
+```text
+~/.config/opencode/opencode.jsonc
+~/.local/state/crabcode/auth.json
+```
+
+Override the CrabCode auth path with `CRABCODE_AUTH`. Models use
+`crabcode/provider/model`, allowing OpenCode and CrabCode to expose the same
+provider with separate credentials without collisions.
 
 ### OpenCodex / OCX
 

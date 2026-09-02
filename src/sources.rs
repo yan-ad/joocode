@@ -25,11 +25,44 @@ pub enum SourceKind {
     Auto,
     #[value(name = "opencode")]
     OpenCode,
+    #[value(name = "crabcode")]
+    CrabCode,
     Ocx,
     Hermes,
     Copilot,
     Antigravity,
     Joocode,
+}
+
+fn resolve_opencode_config(override_path: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    if let Some(path) = override_path {
+        return Ok(path);
+    }
+    for name in [
+        "JOOCODE_CONFIG",
+        "JOC_CONFIG",
+        "CRABCODEX_CONFIG",
+        "OPEN_INITIATIVE_CONFIG",
+    ] {
+        if let Some(path) = env::var_os(name).filter(|value| !value.is_empty()) {
+            return Ok(PathBuf::from(path));
+        }
+    }
+    Ok(xdg_config_home()?.join("opencode/opencode.jsonc"))
+}
+
+fn resolve_crabcode_auth() -> anyhow::Result<PathBuf> {
+    if let Some(path) = env::var_os("CRABCODE_AUTH").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or(
+            dirs::home_dir()
+                .context("could not resolve home directory")?
+                .join(".local/state"),
+        )
+        .join("crabcode/auth.json"))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -441,6 +474,7 @@ impl SourceSelection {
         if enabled.is_empty() || enabled.remove(&SourceKind::Auto) {
             enabled.extend([
                 SourceKind::OpenCode,
+                SourceKind::CrabCode,
                 SourceKind::Ocx,
                 SourceKind::Hermes,
                 SourceKind::Copilot,
@@ -491,6 +525,10 @@ pub async fn discover(
     if selection.enabled(SourceKind::OpenCode) {
         catalogs
             .push(discover_opencode(selection).map_err(|error| source_error("opencode", error)));
+    }
+    if selection.enabled(SourceKind::CrabCode) {
+        catalogs
+            .push(discover_crabcode(selection).map_err(|error| source_error("crabcode", error)));
     }
     if selection.enabled(SourceKind::Ocx) {
         catalogs.push(discover_ocx(selection).map_err(|error| source_error("ocx", error)));
@@ -568,6 +606,24 @@ fn discover_opencode(selection: &SourceSelection) -> anyhow::Result<DiscoveredCa
         return Ok(empty_catalog("opencode", "config not found"));
     };
     load_opencode_catalog("opencode", None, &paths)
+}
+
+fn discover_crabcode(selection: &SourceSelection) -> anyhow::Result<DiscoveredCatalog> {
+    let config = resolve_opencode_config(selection.opencode_config.clone())?;
+    let auth = resolve_crabcode_auth()?;
+    if !config.is_file() {
+        return Ok(empty_catalog(
+            "crabcode",
+            format!("OpenCode config not found at {}", config.display()),
+        ));
+    }
+    if !auth.is_file() {
+        return Ok(empty_catalog(
+            "crabcode",
+            format!("CrabCode auth not found at {}", auth.display()),
+        ));
+    }
+    load_opencode_catalog("crabcode", Some("crabcode"), &ConfigPaths { config, auth })
 }
 
 fn discover_ocx(selection: &SourceSelection) -> anyhow::Result<DiscoveredCatalog> {
@@ -1279,11 +1335,45 @@ providers:
     fn auto_selection_enables_every_source() {
         let selection = SourceSelection::new(vec![SourceKind::Auto], None, None).unwrap();
         assert!(selection.enabled(SourceKind::OpenCode));
+        assert!(selection.enabled(SourceKind::CrabCode));
         assert!(selection.enabled(SourceKind::Ocx));
         assert!(selection.enabled(SourceKind::Hermes));
         assert!(selection.enabled(SourceKind::Copilot));
         assert!(selection.enabled(SourceKind::Antigravity));
         assert!(selection.enabled(SourceKind::Joocode));
+    }
+
+    #[test]
+    fn discovers_crabcode_with_opencode_config_and_separate_auth() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("opencode.jsonc");
+        let auth = dir.path().join("crabcode-auth.json");
+        fs::write(
+            &config,
+            r#"{
+                provider: {
+                    demo: {
+                        npm: "@ai-sdk/openai-compatible",
+                        options: { baseURL: "https://example.test/v1" },
+                        models: { fast: {} }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(&auth, r#"{"demo":{"type":"api","key":"crab-secret"}}"#).unwrap();
+
+        let catalog =
+            load_opencode_catalog("crabcode", Some("crabcode"), &ConfigPaths { config, auth })
+                .unwrap();
+
+        assert_eq!(catalog.source, "crabcode");
+        assert_eq!(catalog.providers.len(), 1);
+        assert_eq!(catalog.providers[0].models[0].info.id, "crabcode/demo/fast");
+        assert!(matches!(
+            &catalog.providers[0].provider.credential,
+            Credential::Bearer(value) if value == "crab-secret"
+        ));
     }
 
     #[test]

@@ -90,12 +90,18 @@ mod tests {
 
     #[test]
     fn accepts_multiple_provider_sources() {
-        let cli =
-            Cli::try_parse_from(["jcx", "--source", "opencode,hermes,copilot", "models"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "jcx",
+            "--source",
+            "opencode,crabcode,hermes,copilot",
+            "models",
+        ])
+        .unwrap();
         assert_eq!(
             cli.sources,
             vec![
                 SourceKind::OpenCode,
+                SourceKind::CrabCode,
                 SourceKind::Hermes,
                 SourceKind::Copilot
             ]

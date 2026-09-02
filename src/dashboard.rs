@@ -1103,6 +1103,7 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
 fn display_source(source: &str) -> String {
     match source {
         "opencode" => "OpenCode".into(),
+        "crabcode" => "CrabCode".into(),
         "ocx" => "OpenCodex".into(),
         "hermes" => "Hermes".into(),
         "copilot" => "GitHub Copilot".into(),
@@ -1121,6 +1122,7 @@ mod tests {
     #[test]
     fn source_labels_are_human_readable() {
         assert_eq!(display_source("opencode"), "OpenCode");
+        assert_eq!(display_source("crabcode"), "CrabCode");
         assert_eq!(display_source("ocx"), "OpenCodex");
         assert_eq!(display_source("hermes"), "Hermes");
         assert_eq!(display_source("copilot"), "GitHub Copilot");
