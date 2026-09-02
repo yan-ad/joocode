@@ -1586,13 +1586,23 @@ fn draw_gateway_panel(frame: &mut Frame<'_>, area: Rect, listening: &str, openai
 }
 
 fn draw_stats(frame: &mut Frame<'_>, area: Rect, models: usize, providers: usize) {
-    let [models_area, providers_area, status_area] = Layout::horizontal([
-        Constraint::Percentage(32),
-        Constraint::Percentage(32),
-        Constraint::Percentage(36),
-    ])
-    .spacing(1)
-    .areas(area);
+    let [models_area, providers_area, status_area] = if area.width >= 64 {
+        Layout::horizontal([
+            Constraint::Percentage(32),
+            Constraint::Percentage(32),
+            Constraint::Percentage(36),
+        ])
+        .spacing(1)
+        .areas(area)
+    } else {
+        Layout::horizontal([
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+            Constraint::Length(0),
+        ])
+        .spacing(1)
+        .areas(area)
+    };
 
     draw_stat_card(frame, models_area, "MODELS", models, Color::Yellow, "◉");
     draw_stat_card(
@@ -1604,17 +1614,19 @@ fn draw_stats(frame: &mut Frame<'_>, area: Rect, models: usize, providers: usize
         "◇",
     );
 
-    let panel = dashboard_panel(" STATUS ", Color::Green);
-    let inner = panel.inner(status_area);
-    frame.render_widget(panel, status_area);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("● ", Style::default().fg(Color::Green)),
-            Span::styled("Ready for connections", Style::default().fg(Color::Gray)),
-        ]))
-        .alignment(Alignment::Center),
-        inner,
-    );
+    if status_area.width > 0 {
+        let panel = dashboard_panel(" STATUS ", Color::Green);
+        let inner = panel.inner(status_area);
+        frame.render_widget(panel, status_area);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("● ", Style::default().fg(Color::Green)),
+                Span::styled("Ready for connections", Style::default().fg(Color::Gray)),
+            ]))
+            .alignment(Alignment::Center),
+            inner,
+        );
+    }
 }
 
 fn draw_stat_card(
@@ -1855,10 +1867,48 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(rendered.contains("OpenAI Compatible:"));
+        assert!(rendered.contains("LOCAL GATEWAY"));
+        assert!(rendered.contains("ONLINE"));
+        assert!(rendered.contains("OpenAI"));
         assert!(rendered.contains("http://127.0.0.1:10123/v1"));
-        assert!(rendered.contains("API Key:"));
+        assert!(rendered.contains("API key"));
         assert!(rendered.contains("any non-empty value"));
+    }
+
+    #[test]
+    fn dashboard_stacks_panels_on_narrow_terminals() {
+        let backend = TestBackend::new(58, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = DashboardData {
+            config_sources: vec!["OpenCode".into(), "Joocode".into()],
+            ide_targets: vec!["Codex".into(), "Zed".into()],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 30,
+            provider_count: 5,
+            autostart: AutoStartStatus::Off,
+            run_in_background: true,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
+            providers: vec![],
+            port_warning: None,
+        };
+
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Dashboard))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("ROUTING"));
+        assert!(rendered.contains("LOCAL GATEWAY"));
+        assert!(rendered.contains("http://127.0.0.1:10100/v1"));
+        assert!(rendered.contains("MODELS"));
+        assert!(rendered.contains("PROVIDERS"));
     }
 
     #[test]
