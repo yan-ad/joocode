@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -370,19 +370,30 @@ fn adjacent_config_item(selected: usize, forward: bool) -> usize {
         .unwrap_or(selected)
 }
 
+fn config_row_for_item(item: usize) -> usize {
+    if item == AUTO_START_ITEM {
+        return 1;
+    }
+    if let Some(index) = item.checked_sub(FIRST_SOURCE_ITEM)
+        && index < SourceKind::DETECTED.len()
+    {
+        return 4 + index;
+    }
+    item.checked_sub(FIRST_PROXY_ITEM)
+        .map(|index| 6 + SourceKind::DETECTED.len() + index)
+        .unwrap_or(1)
+}
+
 fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
-    let [_, vertical, _] = Layout::vertical([
-        Constraint::Percentage(30),
-        Constraint::Length(23),
-        Constraint::Min(0),
-    ])
-    .areas(frame.area());
-    let [_, popup, _] = Layout::horizontal([
-        Constraint::Percentage(20),
-        Constraint::Percentage(60),
-        Constraint::Percentage(20),
-    ])
-    .areas(vertical);
+    let area = frame.area();
+    let width = area.width.saturating_sub(2).min(76);
+    let height = area.height.saturating_sub(2).min(23);
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
 
     let marker = if data.autostart.enabled() {
         "●"
@@ -473,7 +484,8 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
     }
 
     frame.render_widget(Clear, popup);
-    frame.render_widget(
+    let mut state = ListState::default().with_selected(Some(config_row_for_item(selected)));
+    frame.render_stateful_widget(
         List::new(items).block(
             Block::default()
                 .title(" ⚙ Configuration ")
@@ -485,6 +497,7 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
                 .borders(Borders::ALL),
         ),
         popup,
+        &mut state,
     );
 }
 
@@ -1561,6 +1574,44 @@ mod tests {
         ] {
             assert!(rendered.contains(label), "missing {label}");
         }
+    }
+
+    #[test]
+    fn configuration_modal_scrolls_to_selected_item_in_small_terminal() {
+        let backend = TestBackend::new(52, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = DashboardData {
+            config_sources: vec!["OpenCode".into()],
+            ide_targets: vec!["Codex".into()],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 30,
+            provider_count: 5,
+            autostart: AutoStartStatus::On,
+            proxy_targets: ProxyTarget::ALL
+                .into_iter()
+                .map(|target| (target, true))
+                .collect(),
+            detected_sources: SourceKind::DETECTED
+                .into_iter()
+                .map(|source| (source, true))
+                .collect(),
+            providers: vec![],
+            port_warning: None,
+        };
+        let selected = FIRST_PROXY_ITEM + ProxyTarget::ALL.len() - 1;
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Config { selected }))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Grok Build"));
+        assert!(!rendered.contains("Setting"));
     }
 
     #[test]
