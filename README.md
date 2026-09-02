@@ -204,6 +204,14 @@ Press `/` in the dashboard to open the configuration modal:
 Setting
   Auto-start after login/restart (On/Off)
 
+Detected Providers
+  OpenCode                    (On/Off)
+  CrabCode                    (On/Off)
+  OpenCodex                   (On/Off)
+  Hermes                      (On/Off)
+  GitHub Copilot              (On/Off)
+  Antigravity                 (On/Off)
+
 Proxy to
   Codex                      (On/Off)
   JetBrains                  (On/Off)
@@ -213,8 +221,10 @@ Proxy to
   Grok Build                 (On/Off)
 ```
 
-Navigate with `↑/↓` and press `Space` to toggle. Preferences are stored in
-`~/.config/joocode/settings.json`; explicit choices override auto-detection.
+Navigate with `↑/↓` and press `Space` to toggle. Detected-provider changes reload
+the model registry and desktop catalogs immediately. Preferences are stored in
+`~/.config/joocode/settings.json`; explicit `--source` flags override the saved
+detected-provider choices for scripting.
 
 ## Run Joocode
 
@@ -283,8 +293,9 @@ the path with `JOOCODE_PROVIDERS=/custom/providers.json`.
 
 ## Provider discovery
 
-All available sources are enabled by default. Restrict discovery with repeated
-or comma-separated `--source` values:
+All detected sources are enabled by default. Disable individual sources from
+`/ Config` → **Detected Providers**, or restrict one invocation with repeated or
+comma-separated `--source` values:
 
 ```bash
 jcx --source opencode,crabcode,hermes models

@@ -380,7 +380,7 @@ pub async fn serve_dashboard(
         return Ok(());
     };
     let base_url = base_url.unwrap_or_else(|| desktop_base_url(address));
-    let dashboard_data = DashboardData::new(&registry, &targets, address, port_warning);
+    let dashboard_data = DashboardData::new(&registry, &targets, &selection, address, port_warning);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let mut server = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -424,6 +424,7 @@ pub async fn serve_dashboard(
     let reload_base_url = base_url.clone();
     tokio::spawn(async move {
         let mut active_targets = reload_targets;
+        let mut active_selection = selection;
         while let Some(command) = command_rx.recv().await {
             match command {
                 dashboard::DashboardCommand::AddProvider { base_url, api_key } => {
@@ -431,7 +432,7 @@ pub async fn serve_dashboard(
                         let client = reload_store.snapshot().client().clone();
                         let provider = local_config::probe(&client, &base_url, &api_key).await?;
                         local_config::save(provider.clone())?;
-                        let registry = Registry::discover(&selection).await?;
+                        let registry = Registry::discover(&active_selection).await?;
                         reload_store.replace(registry.clone());
                         let setup_registry = registry.clone();
                         let setup_targets = active_targets.clone();
@@ -461,7 +462,7 @@ pub async fn serve_dashboard(
                 dashboard::DashboardCommand::RemoveProvider { name } => {
                     let result = async {
                         local_config::remove(&name)?;
-                        let registry = Registry::discover(&selection).await?;
+                        let registry = Registry::discover(&active_selection).await?;
                         reload_store.replace(registry.clone());
                         let setup_registry = registry.clone();
                         let setup_targets = active_targets.clone();
@@ -494,6 +495,42 @@ pub async fn serve_dashboard(
                         Ok(Ok(status)) => dashboard::DashboardEvent::AutoStartUpdated(status),
                         Ok(Err(error)) => {
                             dashboard::DashboardEvent::ProviderError(error.to_string())
+                        }
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::ToggleSource { source } => {
+                    let enabled = !active_selection.enabled(source);
+                    let result = async {
+                        let mut selection = active_selection.clone();
+                        selection.set_enabled(source, enabled);
+                        let registry = Registry::discover(&selection).await?;
+                        TargetPreferences::set_source(source, enabled)?;
+                        reload_store.replace(registry.clone());
+                        let setup_registry = registry.clone();
+                        let setup_targets = active_targets.clone();
+                        let setup_base_url = reload_base_url.clone();
+                        std::thread::spawn(move || {
+                            desktop::configure_detected(
+                                &setup_registry,
+                                &setup_base_url,
+                                &setup_targets,
+                            );
+                        });
+                        Ok::<_, anyhow::Error>((selection, registry))
+                    }
+                    .await;
+                    let event = match result {
+                        Ok((selection, registry)) => {
+                            active_selection = selection;
+                            dashboard::DashboardEvent::SourceUpdated {
+                                source,
+                                enabled,
+                                config_sources: dashboard::config_sources(&registry),
+                                model_count: registry.models().len(),
+                                provider_count: registry.provider_count(),
+                            }
                         }
                         Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
                     };

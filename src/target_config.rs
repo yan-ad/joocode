@@ -7,6 +7,8 @@ use std::{
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::sources::SourceKind;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyTarget {
@@ -53,6 +55,8 @@ impl ProxyTarget {
 pub struct TargetPreferences {
     #[serde(default)]
     pub proxy_to: BTreeMap<ProxyTarget, bool>,
+    #[serde(default)]
+    pub detected_providers: BTreeMap<String, bool>,
 }
 
 impl TargetPreferences {
@@ -68,6 +72,20 @@ impl TargetPreferences {
         let path = path()?;
         let mut preferences = load_from(&path)?;
         preferences.proxy_to.insert(target, enabled);
+        save_to(&path, &preferences)?;
+        Ok(preferences)
+    }
+
+    pub fn source_override(&self, source: SourceKind) -> Option<bool> {
+        self.detected_providers.get(source.key()).copied()
+    }
+
+    pub fn set_source(source: SourceKind, enabled: bool) -> anyhow::Result<Self> {
+        let path = path()?;
+        let mut preferences = load_from(&path)?;
+        preferences
+            .detected_providers
+            .insert(source.key().to_owned(), enabled);
         save_to(&path, &preferences)?;
         Ok(preferences)
     }
@@ -132,12 +150,17 @@ mod tests {
         let mut preferences = TargetPreferences::default();
         preferences.proxy_to.insert(ProxyTarget::Codex, false);
         preferences.proxy_to.insert(ProxyTarget::GrokBuild, true);
+        preferences
+            .detected_providers
+            .insert(SourceKind::OpenCode.key().into(), false);
         save_to(&path, &preferences).unwrap();
 
         let loaded = load_from(&path).unwrap();
         assert_eq!(loaded.override_for(ProxyTarget::Codex), Some(false));
         assert_eq!(loaded.override_for(ProxyTarget::GrokBuild), Some(true));
         assert_eq!(loaded.override_for(ProxyTarget::Zed), None);
+        assert_eq!(loaded.source_override(SourceKind::OpenCode), Some(false));
+        assert_eq!(loaded.source_override(SourceKind::CrabCode), None);
     }
 
     #[test]

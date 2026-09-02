@@ -21,6 +21,7 @@ use crate::{
     desktop::DesktopTargets,
     local_config::{self, ProviderSummary},
     provider::Registry,
+    sources::{SourceKind, SourceSelection},
     target_config::ProxyTarget,
 };
 
@@ -33,6 +34,7 @@ pub struct DashboardData {
     pub provider_count: usize,
     pub autostart: AutoStartStatus,
     pub proxy_targets: BTreeMap<ProxyTarget, bool>,
+    pub detected_sources: BTreeMap<SourceKind, bool>,
     pub providers: Vec<ProviderSummary>,
     pub port_warning: Option<String>,
 }
@@ -333,10 +335,17 @@ fn draw_update_prompt(frame: &mut Frame<'_>, tag: &str) {
 }
 
 const AUTO_START_ITEM: usize = 0;
-const FIRST_PROXY_ITEM: usize = 1;
+const FIRST_SOURCE_ITEM: usize = 1;
+const FIRST_PROXY_ITEM: usize = FIRST_SOURCE_ITEM + SourceKind::DETECTED.len();
 
 fn config_items() -> Vec<usize> {
-    (AUTO_START_ITEM..=ProxyTarget::ALL.len()).collect()
+    (AUTO_START_ITEM..FIRST_PROXY_ITEM + ProxyTarget::ALL.len()).collect()
+}
+
+fn source_for_config_item(item: usize) -> Option<SourceKind> {
+    item.checked_sub(FIRST_SOURCE_ITEM)
+        .and_then(|index| SourceKind::DETECTED.get(index))
+        .copied()
 }
 
 fn target_for_config_item(item: usize) -> Option<ProxyTarget> {
@@ -364,7 +373,7 @@ fn adjacent_config_item(selected: usize, forward: bool) -> usize {
 fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
     let [_, vertical, _] = Layout::vertical([
         Constraint::Percentage(30),
-        Constraint::Length(15),
+        Constraint::Length(23),
         Constraint::Min(0),
     ])
     .areas(frame.area());
@@ -402,12 +411,40 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
         ListItem::new(auto_start).style(selected_style(selected == AUTO_START_ITEM)),
         ListItem::new(Line::from("")),
         ListItem::new(Line::from(Span::styled(
+            "Detected Providers",
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ))),
+    ];
+    for (index, source) in SourceKind::DETECTED.into_iter().enumerate() {
+        let enabled = data.detected_sources.get(&source).copied().unwrap_or(false);
+        let marker = if enabled { "●" } else { "○" };
+        items.push(
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{marker} "),
+                    Style::default().fg(if enabled {
+                        Color::Green
+                    } else {
+                        Color::DarkGray
+                    }),
+                ),
+                Span::raw(source.label()),
+                Span::raw(format!(" ({})", if enabled { "On" } else { "Off" })),
+            ]))
+            .style(selected_style(selected == FIRST_SOURCE_ITEM + index)),
+        );
+    }
+    items.extend([
+        ListItem::new(Line::from("")),
+        ListItem::new(Line::from(Span::styled(
             "Proxy to",
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ))),
-    ];
+    ]);
     for (index, target) in ProxyTarget::ALL.into_iter().enumerate() {
         let enabled = data.proxy_targets.get(&target).copied().unwrap_or(false);
         let marker = if enabled { "●" } else { "○" };
@@ -618,6 +655,7 @@ impl DashboardData {
     pub fn new(
         registry: &Registry,
         targets: &DesktopTargets,
+        selection: &SourceSelection,
         address: SocketAddr,
         port_warning: Option<String>,
     ) -> Self {
@@ -632,6 +670,10 @@ impl DashboardData {
                 .into_iter()
                 .map(|target| (target, targets.enabled(target)))
                 .collect(),
+            detected_sources: SourceKind::DETECTED
+                .into_iter()
+                .map(|source| (source, selection.enabled(source)))
+                .collect(),
             providers: local_config::summaries().unwrap_or_default(),
             port_warning,
         }
@@ -643,6 +685,7 @@ pub enum DashboardCommand {
     AddProvider { base_url: String, api_key: String },
     RemoveProvider { name: String },
     ToggleAutoStart,
+    ToggleSource { source: SourceKind },
     ToggleProxyTarget { target: ProxyTarget },
     InstallUpdate { tag: String },
 }
@@ -664,6 +707,13 @@ pub enum DashboardEvent {
     },
     ProviderError(String),
     AutoStartUpdated(AutoStartStatus),
+    SourceUpdated {
+        source: SourceKind,
+        enabled: bool,
+        config_sources: Vec<String>,
+        model_count: usize,
+        provider_count: usize,
+    },
     ProxyTargetUpdated {
         target: ProxyTarget,
         enabled: bool,
@@ -835,6 +885,18 @@ fn receive_events(
             }
             Ok(DashboardEvent::ProviderError(error)) => *screen = Screen::Error(error),
             Ok(DashboardEvent::AutoStartUpdated(status)) => data.autostart = status,
+            Ok(DashboardEvent::SourceUpdated {
+                source,
+                enabled,
+                config_sources,
+                model_count,
+                provider_count,
+            }) => {
+                data.detected_sources.insert(source, enabled);
+                data.config_sources = config_sources;
+                data.model_count = model_count;
+                data.provider_count = provider_count;
+            }
             Ok(DashboardEvent::ProxyTargetUpdated { target, enabled }) => {
                 data.proxy_targets.insert(target, enabled);
                 data.ide_targets = ProxyTarget::ALL
@@ -873,7 +935,9 @@ fn handle_key_with_providers(
                 let _ = command_tx.send(DashboardCommand::ToggleAutoStart);
             }
             KeyCode::Char(' ') => {
-                if let Some(target) = target_for_config_item(*selected) {
+                if let Some(source) = source_for_config_item(*selected) {
+                    let _ = command_tx.send(DashboardCommand::ToggleSource { source });
+                } else if let Some(target) = target_for_config_item(*selected) {
                     let _ = command_tx.send(DashboardCommand::ToggleProxyTarget { target });
                 }
             }
@@ -1226,6 +1290,62 @@ mod tests {
     }
 
     #[test]
+    fn space_toggles_selected_detected_provider() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = Screen::Config {
+            selected: FIRST_SOURCE_ITEM,
+        };
+        handle_key(&mut screen, KeyCode::Char(' '), &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DashboardCommand::ToggleSource {
+                source: SourceKind::OpenCode
+            })
+        ));
+    }
+
+    #[test]
+    fn source_event_refreshes_dashboard_catalog() {
+        let mut data = DashboardData {
+            config_sources: vec!["OpenCode".into(), "CrabCode".into()],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 60,
+            provider_count: 10,
+            autostart: AutoStartStatus::Off,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: SourceKind::DETECTED
+                .into_iter()
+                .map(|source| (source, true))
+                .collect(),
+            providers: vec![],
+            port_warning: None,
+        };
+        let mut screen = Screen::Config {
+            selected: FIRST_SOURCE_ITEM,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(DashboardEvent::SourceUpdated {
+            source: SourceKind::OpenCode,
+            enabled: false,
+            config_sources: vec!["CrabCode".into()],
+            model_count: 30,
+            provider_count: 5,
+        })
+        .unwrap();
+
+        receive_events(&mut data, &mut screen, &rx);
+
+        assert_eq!(
+            data.detected_sources.get(&SourceKind::OpenCode),
+            Some(&false)
+        );
+        assert_eq!(data.config_sources, vec!["CrabCode"]);
+        assert_eq!(data.model_count, 30);
+        assert_eq!(data.provider_count, 5);
+    }
+
+    #[test]
     fn delete_removes_selected_provider() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let providers = vec![
@@ -1260,6 +1380,7 @@ mod tests {
             provider_count: 2,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
             providers: vec![
                 ProviderSummary {
                     name: "gunamaya".into(),
@@ -1334,6 +1455,7 @@ mod tests {
             provider_count: 0,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
             providers: vec![],
             port_warning: None,
         };
@@ -1366,6 +1488,10 @@ mod tests {
                 .into_iter()
                 .map(|target| (target, target == ProxyTarget::Codex))
                 .collect(),
+            detected_sources: SourceKind::DETECTED
+                .into_iter()
+                .map(|source| (source, source == SourceKind::OpenCode))
+                .collect(),
             providers: vec![],
             port_warning: None,
         };
@@ -1381,6 +1507,9 @@ mod tests {
             .collect::<String>();
         for label in [
             "Setting",
+            "Detected Providers",
+            "OpenCode",
+            "CrabCode",
             "Proxy to",
             "Codex",
             "JetBrains",
@@ -1403,6 +1532,7 @@ mod tests {
             provider_count: 0,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
             providers: vec![],
             port_warning: None,
         };
@@ -1449,6 +1579,7 @@ mod tests {
             provider_count: 5,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
             providers: vec![],
             port_warning: None,
         };
@@ -1507,6 +1638,7 @@ mod tests {
             provider_count: 0,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
             providers: vec![],
             port_warning: None,
         };
@@ -1546,6 +1678,7 @@ mod tests {
             provider_count: 0,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
             providers: vec![],
             port_warning: None,
         };
@@ -1574,6 +1707,7 @@ mod tests {
             provider_count: 5,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
             providers: vec![],
             port_warning: None,
         };
@@ -1606,6 +1740,7 @@ mod tests {
             provider_count: 5,
             autostart: AutoStartStatus::Off,
             proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
             providers: vec![],
             port_warning: None,
         };

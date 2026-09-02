@@ -34,6 +34,43 @@ pub enum SourceKind {
     Joocode,
 }
 
+impl SourceKind {
+    pub const DETECTED: [Self; 6] = [
+        Self::OpenCode,
+        Self::CrabCode,
+        Self::Ocx,
+        Self::Hermes,
+        Self::Copilot,
+        Self::Antigravity,
+    ];
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::OpenCode => "opencode",
+            Self::CrabCode => "crabcode",
+            Self::Ocx => "ocx",
+            Self::Hermes => "hermes",
+            Self::Copilot => "copilot",
+            Self::Antigravity => "antigravity",
+            Self::Joocode => "joocode",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::OpenCode => "OpenCode",
+            Self::CrabCode => "CrabCode",
+            Self::Ocx => "OpenCodex",
+            Self::Hermes => "Hermes",
+            Self::Copilot => "GitHub Copilot",
+            Self::Antigravity => "Antigravity",
+            Self::Joocode => "Joocode",
+        }
+    }
+}
+
 fn resolve_opencode_config(override_path: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     if let Some(path) = override_path {
         return Ok(path);
@@ -470,17 +507,25 @@ impl SourceSelection {
         opencode_config: Option<PathBuf>,
         opencode_auth: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
+        let preferences = crate::target_config::TargetPreferences::load()?;
+        Self::new_with_preferences(requested, opencode_config, opencode_auth, &preferences)
+    }
+
+    fn new_with_preferences(
+        requested: Vec<SourceKind>,
+        opencode_config: Option<PathBuf>,
+        opencode_auth: Option<PathBuf>,
+        preferences: &crate::target_config::TargetPreferences,
+    ) -> anyhow::Result<Self> {
         let mut enabled = requested.into_iter().collect::<BTreeSet<_>>();
-        if enabled.is_empty() || enabled.remove(&SourceKind::Auto) {
-            enabled.extend([
-                SourceKind::OpenCode,
-                SourceKind::CrabCode,
-                SourceKind::Ocx,
-                SourceKind::Hermes,
-                SourceKind::Copilot,
-                SourceKind::Antigravity,
-                SourceKind::Joocode,
-            ]);
+        let automatic = enabled.is_empty() || enabled.remove(&SourceKind::Auto);
+        if automatic {
+            enabled.extend(SourceKind::DETECTED);
+            for source in SourceKind::DETECTED {
+                if preferences.source_override(source) == Some(false) {
+                    enabled.remove(&source);
+                }
+            }
         }
         enabled.insert(SourceKind::Joocode);
         if enabled.is_empty() {
@@ -493,8 +538,19 @@ impl SourceSelection {
         })
     }
 
-    fn enabled(&self, source: SourceKind) -> bool {
+    pub fn enabled(&self, source: SourceKind) -> bool {
         self.enabled.contains(&source)
+    }
+
+    pub fn set_enabled(&mut self, source: SourceKind, enabled: bool) {
+        if source == SourceKind::Joocode {
+            return;
+        }
+        if enabled {
+            self.enabled.insert(source);
+        } else {
+            self.enabled.remove(&source);
+        }
     }
 }
 
@@ -1333,13 +1389,41 @@ providers:
 
     #[test]
     fn auto_selection_enables_every_source() {
-        let selection = SourceSelection::new(vec![SourceKind::Auto], None, None).unwrap();
+        let selection = SourceSelection::new_with_preferences(
+            vec![SourceKind::Auto],
+            None,
+            None,
+            &crate::target_config::TargetPreferences::default(),
+        )
+        .unwrap();
         assert!(selection.enabled(SourceKind::OpenCode));
         assert!(selection.enabled(SourceKind::CrabCode));
         assert!(selection.enabled(SourceKind::Ocx));
         assert!(selection.enabled(SourceKind::Hermes));
         assert!(selection.enabled(SourceKind::Copilot));
         assert!(selection.enabled(SourceKind::Antigravity));
+        assert!(selection.enabled(SourceKind::Joocode));
+    }
+
+    #[test]
+    fn explicit_selection_ignores_detected_provider_preferences() {
+        let mut preferences = crate::target_config::TargetPreferences::default();
+        preferences
+            .detected_providers
+            .insert(SourceKind::OpenCode.key().into(), false);
+        preferences
+            .detected_providers
+            .insert(SourceKind::CrabCode.key().into(), false);
+        let selection = SourceSelection::new_with_preferences(
+            vec![SourceKind::OpenCode],
+            None,
+            None,
+            &preferences,
+        )
+        .unwrap();
+
+        assert!(selection.enabled(SourceKind::OpenCode));
+        assert!(!selection.enabled(SourceKind::CrabCode));
         assert!(selection.enabled(SourceKind::Joocode));
     }
 
