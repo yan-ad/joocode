@@ -466,8 +466,12 @@ requires_openai_auth = true
 When Zed is installed, automatic desktop mode writes the complete discovered
 catalog into Zed's OpenAI-compatible provider settings. On macOS, the system may
 ask for your password to authorize Keychain access for the local tunnel.
+On Windows, Joocode updates `%APPDATA%\Zed\settings.json` and registers the same
+placeholder in Windows Credential Manager so Zed marks the provider as connected.
 Joocode stores only a harmless local placeholder key—never an upstream provider
-credential. When a Joocode default model is selected, Zed's commit-message
+credential. Existing providers, themes, telemetry settings, and an existing Zed
+default model remain unchanged. Restart Zed once after the first install or model
+catalog sync. When a Joocode default model is selected, Zed's commit-message
 generator is also configured with Conventional Commits 1.0.0 instructions while
 preserving any existing custom commit instructions.
 
