@@ -235,6 +235,8 @@ fn model_preset(model: &ModelInfo, is_default: bool) -> Value {
         "base_instructions": "You are Codex, a coding agent. Follow the user's instructions and use the supplied tools to work in their repository.",
         "model_messages": null,
         "include_skills_usage_instructions": false,
+        "include_plugin_usage_instructions": true,
+        "include_apps_usage_instructions": true,
         "supports_reasoning_summaries": model.reasoning,
         "supports_reasoning_summary_parameter": false,
         "default_reasoning_summary": "auto",
@@ -253,7 +255,13 @@ fn model_preset(model: &ModelInfo, is_default: bool) -> Value {
         "experimental_supported_tools": [],
         "input_modalities": ["text", "image"],
         "prefer_websockets": false,
-        "supports_search_tool": false
+        // Custom providers do not receive Codex's hosted tool_search runtime.
+        // Direct mode exposes Browser/Computer Use plugin tools as ordinary
+        // functions, allowing compatible routed models to invoke them.
+        "supports_search_tool": false,
+        "use_responses_lite": false,
+        "node_repl_disabled": false,
+        "tool_mode": "direct"
     })
 }
 
@@ -280,6 +288,12 @@ mod tests {
         assert_eq!(model["description"], "Model A (demo)");
         assert_eq!(model["visibility"], "list");
         assert_eq!(model["default_reasoning_level"], "medium");
+        assert_eq!(model["supports_search_tool"], false);
+        assert_eq!(model["use_responses_lite"], false);
+        assert_eq!(model["node_repl_disabled"], false);
+        assert_eq!(model["tool_mode"], "direct");
+        assert_eq!(model["include_plugin_usage_instructions"], true);
+        assert_eq!(model["include_apps_usage_instructions"], true);
     }
 
     #[test]

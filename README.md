@@ -435,6 +435,18 @@ OpenAI models with discovered entries, registers the local Responses provider,
 and writes `~/.codex/joocode-models.json`. Native OpenAI requests keep using the
 authorization managed by Codex.
 
+Joocode also marks routed models for **direct tool exposure**. When Codex's
+Browser or Computer Use plugin is installed and enabled, its local MCP tools are
+sent to compatible non-OpenAI models as ordinary function tools instead of being
+hidden behind OpenAI-only dynamic tool search. Model identities are not spoofed:
+the selected `provider/model` remains visible and is routed normally.
+
+Tool availability does not guarantee model quality. The upstream model must
+reliably support function calling, and Computer Use works best with a model that
+can reason over image inputs. Codex still owns tool execution, permissions,
+browser isolation, cursor movement, and user confirmations; Joocode only carries
+the model request and tool-call/result payloads.
+
 Manual provider configuration:
 
 ```toml

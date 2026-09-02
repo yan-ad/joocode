@@ -274,8 +274,37 @@ fn convert_message(item: &Value) -> Result<Value, ApiError> {
 fn content_to_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(content_item_to_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(object)
+            if object.contains_key("content") || object.contains_key("structuredContent") =>
+        {
+            let mut sections = Vec::new();
+            if let Some(content) = object.get("content") {
+                let text = content_to_text(content);
+                if !text.is_empty() {
+                    sections.push(text);
+                }
+            }
+            if let Some(structured) = object.get("structuredContent") {
+                sections.push(serde_json::to_string(structured).unwrap_or_default());
+            }
+            sections.join("\n")
+        }
         other => serde_json::to_string(other).unwrap_or_default(),
     }
+}
+
+fn content_item_to_text(value: &Value) -> String {
+    value
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
 }
 
 fn convert_tool(tool: &Value) -> Option<Value> {
@@ -573,6 +602,26 @@ mod tests {
         assert_eq!(chat["messages"][0]["role"], "system");
         assert_eq!(chat["messages"][1]["content"][0]["text"], "hello");
         assert_eq!(chat["tools"][0]["function"]["name"], "read");
+    }
+
+    #[test]
+    fn preserves_text_and_structured_mcp_tool_output() {
+        let request = json!({
+            "model": "demo/code",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "browser-call",
+                "output": {
+                    "content": [{"type":"text","text":"page title: Joocode"}],
+                    "structuredContent": {"execution_duration_ms": 7, "cursor": [10, 20]}
+                }
+            }]
+        });
+        let chat = to_chat_request(&request, "code").unwrap();
+        let output = chat["messages"][0]["content"].as_str().unwrap();
+        assert!(output.contains("page title: Joocode"));
+        assert!(output.contains("execution_duration_ms"));
+        assert!(output.contains("cursor"));
     }
 
     #[test]
