@@ -336,8 +336,16 @@ async fn proxy_openai(
 }
 
 pub async fn serve(host: IpAddr, port: u16, registry: Registry) -> anyhow::Result<()> {
-    let (listener, app, address, port_warning) =
-        prepare_server(host, port, RegistryStore::new(registry)).await?;
+    let PreparedServer::Ready {
+        listener,
+        app,
+        address,
+        port_warning,
+    } = prepare_server(host, port, RegistryStore::new(registry)).await?
+    else {
+        tracing::info!(port, "Joocode is already running in the background");
+        return Ok(());
+    };
     if let Some(warning) = port_warning {
         tracing::warn!("{warning}");
     }
@@ -359,8 +367,17 @@ pub async fn serve_dashboard(
     let interactive = dashboard::is_interactive();
     let mut persistent_proxy = PersistentProxyHandoff::begin(interactive)?;
     let registry_store = RegistryStore::new(registry.clone());
-    let (listener, app, address, port_warning) =
-        prepare_server(host, port, registry_store.clone()).await?;
+    let PreparedServer::Ready {
+        listener,
+        app,
+        address,
+        port_warning,
+    } = prepare_server(host, port, registry_store.clone()).await?
+    else {
+        persistent_proxy.disarm();
+        println!("Joocode is already running in the background at http://{host}:{port}.");
+        return Ok(());
+    };
     let base_url = base_url.unwrap_or_else(|| desktop_base_url(address));
     let dashboard_data = DashboardData::new(&registry, &targets, address, port_warning);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -540,7 +557,7 @@ async fn prepare_server(
     host: IpAddr,
     port: u16,
     registry: RegistryStore,
-) -> anyhow::Result<(tokio::net::TcpListener, Router, SocketAddr, Option<String>)> {
+) -> anyhow::Result<PreparedServer> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/hello", get(healthz))
@@ -552,19 +569,52 @@ async fn prepare_server(
         .with_state(AppState { registry })
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
-    let (listener, port_warning) = bind_available(host, port).await?;
-    let address = listener.local_addr()?;
-    Ok((listener, app, address, port_warning))
+    match bind_available(host, port).await? {
+        BindResult::Bound {
+            listener,
+            port_warning,
+        } => {
+            let address = listener.local_addr()?;
+            Ok(PreparedServer::Ready {
+                listener,
+                app,
+                address,
+                port_warning,
+            })
+        }
+        BindResult::ExistingJoocode => Ok(PreparedServer::ExistingJoocode),
+    }
 }
 
-async fn bind_available(
-    host: IpAddr,
-    requested_port: u16,
-) -> std::io::Result<(tokio::net::TcpListener, Option<String>)> {
+enum PreparedServer {
+    Ready {
+        listener: tokio::net::TcpListener,
+        app: Router,
+        address: SocketAddr,
+        port_warning: Option<String>,
+    },
+    ExistingJoocode,
+}
+
+enum BindResult {
+    Bound {
+        listener: tokio::net::TcpListener,
+        port_warning: Option<String>,
+    },
+    ExistingJoocode,
+}
+
+async fn bind_available(host: IpAddr, requested_port: u16) -> std::io::Result<BindResult> {
     let requested_address = SocketAddr::from((host, requested_port));
     match tokio::net::TcpListener::bind(requested_address).await {
-        Ok(listener) => Ok((listener, None)),
+        Ok(listener) => Ok(BindResult::Bound {
+            listener,
+            port_warning: None,
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            if joocode_is_running(host, requested_port).await {
+                return Ok(BindResult::ExistingJoocode);
+            }
             let listener = if requested_port == u16::MAX {
                 tokio::net::TcpListener::bind(SocketAddr::from((host, 0))).await?
             } else {
@@ -586,22 +636,67 @@ async fn bind_available(
                 }
             };
             let actual_port = listener.local_addr()?.port();
-            Ok((
+            Ok(BindResult::Bound {
                 listener,
-                Some(format!(
+                port_warning: Some(format!(
                     "Port {requested_port} already in used, close another process first. Using port {actual_port}."
                 )),
-            ))
+            })
         }
         Err(error) => Err(error),
     }
+}
+
+async fn joocode_is_running(host: IpAddr, port: u16) -> bool {
+    let host = match host {
+        IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
+        IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_owned(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+        ip => ip.to_string(),
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+    else {
+        return false;
+    };
+    let Ok(response) = client
+        .get(format!("http://{host}:{port}/api/hello"))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    if response
+        .headers()
+        .get("x-joocode-service")
+        .and_then(|value| value.to_str().ok())
+        == Some("joocode")
+    {
+        return true;
+    }
+    response
+        .json::<Value>()
+        .await
+        .is_ok_and(|body| body.get("ok").and_then(Value::as_bool) == Some(true))
 }
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 async fn healthz() -> impl IntoResponse {
-    Json(json!({ "ok": true }))
+    (
+        [
+            ("x-joocode-service", "joocode"),
+            ("x-joocode-version", env!("CARGO_PKG_VERSION")),
+        ],
+        Json(json!({
+            "ok": true,
+            "service": "joocode",
+            "version": env!("CARGO_PKG_VERSION")
+        })),
+    )
 }
 
 async fn models(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -772,9 +867,15 @@ mod tests {
     async fn busy_port_falls_back_to_the_next_available_port() {
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let requested_port = occupied.local_addr().unwrap().port();
-        let (listener, warning) = bind_available("127.0.0.1".parse().unwrap(), requested_port)
+        let BindResult::Bound {
+            listener,
+            port_warning: warning,
+        } = bind_available("127.0.0.1".parse().unwrap(), requested_port)
             .await
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("a non-Joocode process must use a fallback port");
+        };
         let actual_port = listener.local_addr().unwrap().port();
 
         assert_ne!(actual_port, requested_port);
@@ -785,5 +886,20 @@ mod tests {
                 "Port {requested_port} already in used, close another process first. Using port {actual_port}."
             )
         );
+    }
+
+    #[tokio::test]
+    async fn busy_port_owned_by_joocode_reuses_the_existing_instance() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new().route("/api/hello", get(healthz));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let result = bind_available("127.0.0.1".parse().unwrap(), port)
+            .await
+            .unwrap();
+
+        assert!(matches!(result, BindResult::ExistingJoocode));
+        server.abort();
     }
 }
