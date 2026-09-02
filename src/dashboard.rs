@@ -9,10 +9,13 @@ use std::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -37,6 +40,104 @@ pub struct DashboardData {
     pub detected_sources: BTreeMap<SourceKind, bool>,
     pub providers: Vec<ProviderSummary>,
     pub port_warning: Option<String>,
+}
+
+const MODAL_BACKGROUND: Color = Color::Rgb(24, 42, 59);
+const MODAL_OVERLAY: Color = Color::Rgb(13, 17, 19);
+const MODAL_ACCENT: Color = Color::Rgb(62, 139, 255);
+
+#[derive(Clone, Copy)]
+struct ModalAreas {
+    content: Rect,
+}
+
+fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
+    let width = area.width.saturating_sub(2).min(max_width).max(1);
+    let height = area.height.saturating_sub(2).min(max_height).max(1);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn draw_modal_shell(
+    frame: &mut Frame<'_>,
+    title: &str,
+    max_width: u16,
+    max_height: u16,
+    footer: Line<'static>,
+) -> ModalAreas {
+    let area = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().bg(MODAL_OVERLAY)),
+        area,
+    );
+
+    let popup = centered_rect(area, max_width, max_height);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(MODAL_BACKGROUND)),
+        popup,
+    );
+
+    let inner = popup.inner(Margin {
+        horizontal: 3.min(popup.width.saturating_sub(1) / 2),
+        vertical: 1.min(popup.height.saturating_sub(1) / 2),
+    });
+    let [header, content, footer_area] = Layout::vertical([
+        Constraint::Length(2.min(inner.height)),
+        Constraint::Min(1),
+        Constraint::Length(2.min(inner.height)),
+    ])
+    .areas(inner);
+    let [title_area, escape_area] =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(3)]).areas(header);
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        title_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "esc",
+            Style::default()
+                .fg(MODAL_ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Right),
+        escape_area,
+    );
+    frame.render_widget(
+        Paragraph::new(footer).style(Style::default().bg(MODAL_BACKGROUND)),
+        footer_area,
+    );
+
+    ModalAreas { content }
+}
+
+fn draw_modal_scrollbar(frame: &mut Frame<'_>, area: Rect, content_length: usize, position: usize) {
+    if content_length <= usize::from(area.height) {
+        return;
+    }
+    let mut state = ScrollbarState::new(content_length).position(position);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_symbol("┃")
+            .track_symbol(Some("│"))
+            .begin_symbol(None)
+            .end_symbol(None)
+            .style(Style::default().fg(Color::Rgb(39, 71, 96)))
+            .thumb_style(Style::default().fg(Color::Gray)),
+        area,
+        &mut state,
+    );
 }
 
 fn header_animation_tick() -> usize {
@@ -87,12 +188,19 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: usize) {
     );
 }
 
-fn draw_providers(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    providers: &[ProviderSummary],
-    selected: usize,
-) {
+fn draw_providers(frame: &mut Frame<'_>, providers: &[ProviderSummary], selected: usize) {
+    let modal = draw_modal_shell(
+        frame,
+        "Providers",
+        96,
+        30,
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(MODAL_ACCENT)),
+            Span::raw(" new provider    "),
+            Span::styled("Del", Style::default().fg(Color::LightRed)),
+            Span::raw(" remove selected provider"),
+        ]),
+    );
     let items = if providers.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             "No providers configured. Press Enter to add one.",
@@ -104,14 +212,6 @@ fn draw_providers(
             .enumerate()
             .map(|(index, provider)| {
                 ListItem::new(Line::from(vec![
-                    Span::styled(
-                        if index == selected { "◆ " } else { "◇ " },
-                        Style::default().fg(if index == selected {
-                            Color::Green
-                        } else {
-                            Color::DarkGray
-                        }),
-                    ),
                     Span::styled(
                         &provider.label,
                         Style::default().add_modifier(Modifier::BOLD),
@@ -125,80 +225,100 @@ fn draw_providers(
             })
             .collect()
     };
-    frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title(" Providers ")
-                .title_style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .borders(Borders::ALL),
-        ),
-        area,
+    let mut state = ListState::default().with_selected((!providers.is_empty()).then_some(selected));
+    frame.render_stateful_widget(
+        List::new(items)
+            .style(Style::default().fg(Color::Gray).bg(MODAL_BACKGROUND))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::White)
+                    .bg(MODAL_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("● "),
+        modal.content,
+        &mut state,
     );
+    draw_modal_scrollbar(frame, modal.content, providers.len(), selected);
 }
 
 fn draw_provider_input(frame: &mut Frame<'_>, title: &str, value: &str, secret: bool) {
-    let area = frame.area();
-    let width = area.width.saturating_sub(4).min(72);
-    let height = 7_u16.min(area.height.saturating_sub(2));
-    let popup = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
+    let modal = draw_modal_shell(
+        frame,
+        "New provider",
+        76,
+        13,
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(MODAL_ACCENT)),
+            Span::raw(" continue    "),
+            Span::styled("esc", Style::default().fg(Color::DarkGray)),
+            Span::raw(" cancel"),
+        ]),
     );
     let shown = if secret {
         "•".repeat(value.chars().count())
     } else {
         value.to_owned()
     };
-    frame.render_widget(Clear, popup);
+    let [label, input] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(modal.content);
     frame.render_widget(
-        Paragraph::new(vec![Line::from(""), Line::from(shown)])
-            .block(
-                Block::default()
-                    .title(format!(" New provider · {title} "))
-                    .title_style(Style::default().fg(Color::Green))
-                    .borders(Borders::ALL),
-            )
+        Paragraph::new(Span::styled(
+            title,
+            Style::default()
+                .fg(MODAL_ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )),
+        label,
+    );
+    frame.render_widget(
+        Paragraph::new(format!("▌{shown}"))
+            .style(Style::default().fg(Color::White).bg(MODAL_BACKGROUND))
             .wrap(Wrap { trim: false }),
-        popup,
+        input,
     );
 }
 
 fn draw_provider_loading(frame: &mut Frame<'_>) {
-    let area = frame.area();
-    let width = area.width.saturating_sub(4).min(60);
-    let height = 7_u16.min(area.height.saturating_sub(2));
-    let popup = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
+    let modal = draw_modal_shell(
+        frame,
+        "New provider",
+        68,
+        12,
+        Line::from(Span::styled(
+            "Fetching /models…",
+            Style::default().fg(Color::DarkGray),
+        )),
     );
-    frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new("Fetching /models and reloading Joocode…")
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .title(" New provider · Step 3/3 ")
-                    .title_style(Style::default().fg(Color::Yellow))
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: true }),
-        popup,
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "◐  Connecting provider",
+                Style::default()
+                    .fg(MODAL_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Fetching /models and reloading Joocode…",
+                Style::default().fg(Color::Gray),
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .style(Style::default().bg(MODAL_BACKGROUND))
+        .wrap(Wrap { trim: true }),
+        modal.content,
     );
 }
 
 fn selected_style(selected: bool) -> Style {
     if selected {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
         Style::default()
+            .fg(Color::White)
+            .bg(MODAL_ACCENT)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray).bg(MODAL_BACKGROUND)
     }
 }
 
@@ -300,37 +420,38 @@ fn draw_update_animation(frame: &mut Frame<'_>, tag: &str, tick: usize) {
 }
 
 fn draw_update_prompt(frame: &mut Frame<'_>, tag: &str) {
-    let area = frame.area();
-    let width = area.width.saturating_sub(4).min(72);
-    let height = 9_u16.min(area.height.saturating_sub(2));
-    let popup = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
+    let modal = draw_modal_shell(
+        frame,
+        "Joocode update",
+        76,
+        14,
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(MODAL_ACCENT)),
+            Span::raw(" update & restart"),
+        ]),
     );
-    frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(""),
             Line::from(Span::styled(
-                format!("There's a new version available: {tag}"),
+                "New version available",
                 Style::default()
-                    .fg(Color::LightGreen)
+                    .fg(MODAL_ACCENT)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from("Press Enter to update and run immediately after updating."),
+            Line::from(vec![
+                Span::styled(tag, Style::default().fg(Color::White)),
+                Span::styled(" is ready to install.", Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Joocode will restart immediately after the update.",
+                Style::default().fg(Color::DarkGray),
+            )),
         ])
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true })
-        .block(
-            Block::default()
-                .title(" ↑ Joocode update ")
-                .title_style(Style::default().fg(Color::Cyan))
-                .borders(Borders::ALL),
-        ),
-        popup,
+        .style(Style::default().bg(MODAL_BACKGROUND))
+        .wrap(Wrap { trim: true }),
+        modal.content,
     );
 }
 
@@ -385,14 +506,17 @@ fn config_row_for_item(item: usize) -> usize {
 }
 
 fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
-    let area = frame.area();
-    let width = area.width.saturating_sub(2).min(76);
-    let height = area.height.saturating_sub(2).min(23);
-    let popup = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
+    let modal = draw_modal_shell(
+        frame,
+        "Configuration",
+        86,
+        30,
+        Line::from(vec![
+            Span::styled("Space", Style::default().fg(MODAL_ACCENT)),
+            Span::raw(" toggle    "),
+            Span::styled("↑/↓", Style::default().fg(MODAL_ACCENT)),
+            Span::raw(" navigate"),
+        ]),
     );
 
     let marker = if data.autostart.enabled() {
@@ -483,21 +607,53 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
         );
     }
 
-    frame.render_widget(Clear, popup);
     let mut state = ListState::default().with_selected(Some(config_row_for_item(selected)));
     frame.render_stateful_widget(
-        List::new(items).block(
-            Block::default()
-                .title(" ⚙ Configuration ")
-                .title_style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .borders(Borders::ALL),
-        ),
-        popup,
+        List::new(items)
+            .style(Style::default().fg(Color::Gray).bg(MODAL_BACKGROUND))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::White)
+                    .bg(MODAL_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("● "),
+        modal.content,
         &mut state,
+    );
+    draw_modal_scrollbar(
+        frame,
+        modal.content,
+        8 + SourceKind::DETECTED.len() + ProxyTarget::ALL.len(),
+        config_row_for_item(selected),
+    );
+}
+
+fn draw_error(frame: &mut Frame<'_>, error: &str) {
+    let modal = draw_modal_shell(
+        frame,
+        "Something went wrong",
+        76,
+        16,
+        Line::from(Span::styled(
+            "Enter return",
+            Style::default().fg(MODAL_ACCENT),
+        )),
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Error",
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(error, Style::default().fg(Color::Gray))),
+        ])
+        .style(Style::default().bg(MODAL_BACKGROUND))
+        .wrap(Wrap { trim: true }),
+        modal.content,
     );
 }
 
@@ -1059,19 +1215,19 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             draw_dashboard(frame, body, data);
             draw_config(frame, data, *selected);
         }
-        Screen::Providers { selected } => draw_providers(frame, body, &data.providers, *selected),
+        Screen::Providers { selected } => draw_providers(frame, &data.providers, *selected),
         Screen::ProviderBaseUrl { selected, value } => {
-            draw_providers(frame, body, &data.providers, *selected);
+            draw_providers(frame, &data.providers, *selected);
             draw_provider_input(frame, "Step 1/3 — Base URL", value, false);
         }
         Screen::ProviderApiKey {
             selected, api_key, ..
         } => {
-            draw_providers(frame, body, &data.providers, *selected);
+            draw_providers(frame, &data.providers, *selected);
             draw_provider_input(frame, "Step 2/3 — API key", api_key, true);
         }
         Screen::ProviderLoading { selected } => {
-            draw_providers(frame, body, &data.providers, *selected);
+            draw_providers(frame, &data.providers, *selected);
             draw_provider_loading(frame);
         }
         Screen::UpdateAvailable(tag) => {
@@ -1082,12 +1238,11 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             unreachable!("updating is rendered as a full-screen animated scene")
         }
         Screen::EasterEgg { .. } => unreachable!("easter egg is rendered as a full-screen scene"),
-        Screen::Error(error) => frame.render_widget(
-            Paragraph::new(error.as_str())
-                .style(Style::default().fg(Color::Red))
-                .wrap(Wrap { trim: true }),
-            body,
-        ),
+        Screen::Error(error) => draw_error(frame, error),
+    }
+
+    if !matches!(screen, Screen::Dashboard) {
+        return;
     }
 
     let help = match screen {
@@ -1114,34 +1269,16 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             ),
             Span::raw(" Config"),
         ],
-        Screen::Config { .. } => vec![
-            Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
-            Span::raw(" navigate  ·  "),
-            Span::styled("Space", Style::default().fg(Color::Green)),
-            Span::raw(" toggle  ·  Esc to close"),
-        ],
-        Screen::Providers { .. } => vec![
-            Span::styled("Enter", Style::default().fg(Color::Green)),
-            Span::raw(" new provider  ·  "),
-            Span::styled("Del", Style::default().fg(Color::Red)),
-            Span::raw(" remove selected provider  ·  Esc close"),
-        ],
-        Screen::ProviderBaseUrl { .. } | Screen::ProviderApiKey { .. } => vec![
-            Span::styled("Enter", Style::default().fg(Color::Green)),
-            Span::raw(" to continue  ·  Esc to cancel"),
-        ],
-        Screen::ProviderLoading { .. } => vec![Span::raw("Fetching /models…")],
-        Screen::UpdateAvailable(_) => vec![
-            Span::styled("Enter", Style::default().fg(Color::Green)),
-            Span::raw(" update & restart  ·  Esc dismiss"),
-        ],
+        Screen::Config { .. }
+        | Screen::Providers { .. }
+        | Screen::ProviderBaseUrl { .. }
+        | Screen::ProviderApiKey { .. }
+        | Screen::ProviderLoading { .. }
+        | Screen::UpdateAvailable(_)
+        | Screen::Error(_) => unreachable!("modal screens return before global footer rendering"),
         Screen::Updating { .. } => {
             unreachable!("updating has its own full-screen progress scene")
         }
-        Screen::Error(_) => vec![
-            Span::styled("Enter", Style::default().fg(Color::Green)),
-            Span::raw(" to return  ·  Esc to cancel"),
-        ],
         Screen::EasterEgg { .. } => unreachable!("easter egg has its own full-screen controls"),
     };
     frame.render_widget(
@@ -1463,6 +1600,40 @@ mod tests {
         assert!(rendered.contains("gunamaya.id"));
         assert!(rendered.contains("openai.com"));
         assert!(!rendered.contains("secret"));
+    }
+
+    #[test]
+    fn standard_modal_uses_opencode_inspired_visual_shell() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 14,
+            provider_count: 2,
+            autostart: AutoStartStatus::Off,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
+            providers: vec![ProviderSummary {
+                name: "gunamaya".into(),
+                label: "gunamaya.id".into(),
+                model_count: 10,
+            }],
+            port_warning: None,
+        };
+
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Providers { selected: 0 }))
+            .unwrap();
+        let cells = terminal.backend().buffer().content();
+        let rendered = cells.iter().map(|cell| cell.symbol()).collect::<String>();
+
+        assert!(rendered.contains("Providers"));
+        assert!(rendered.contains("esc"));
+        assert!(!rendered.contains('┌'));
+        assert!(cells.iter().any(|cell| cell.bg == MODAL_BACKGROUND));
+        assert!(cells.iter().any(|cell| cell.bg == MODAL_ACCENT));
     }
 
     #[test]
