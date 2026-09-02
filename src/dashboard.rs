@@ -1148,6 +1148,7 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
     } else {
         data.ide_targets.join(", ")
     };
+    let openai_compatible = format!("{}/v1", data.listening.trim_end_matches('/'));
     let lines = vec![
         data.port_warning
             .as_ref()
@@ -1180,6 +1181,14 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
             Span::styled("● ", Style::default().fg(Color::Green)),
             Span::styled("Listening: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(&data.listening, Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::styled("● ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "OpenAI Compatible: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(openai_compatible, Style::default().fg(Color::Cyan)),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -1343,6 +1352,38 @@ mod tests {
         assert_eq!(data.config_sources, vec!["CrabCode"]);
         assert_eq!(data.model_count, 30);
         assert_eq!(data.provider_count, 5);
+    }
+
+    #[test]
+    fn dashboard_shows_openai_compatible_endpoint() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = DashboardData {
+            config_sources: vec!["OpenCode".into()],
+            ide_targets: vec!["Codex".into()],
+            listening: "http://127.0.0.1:10123".into(),
+            model_count: 30,
+            provider_count: 5,
+            autostart: AutoStartStatus::Off,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
+            providers: vec![],
+            port_warning: None,
+        };
+
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Dashboard))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("OpenAI Compatible:"));
+        assert!(rendered.contains("http://127.0.0.1:10123/v1"));
     }
 
     #[test]

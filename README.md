@@ -30,6 +30,7 @@ jcx
 ◆ Config: OpenCode, Joocode
 ⌘ IDE Target: Codex, Zed, JetBrains, Claude Code, Grok Build
 ● Listening: http://127.0.0.1:10100
+● OpenAI Compatible: http://127.0.0.1:10100/v1
 
 ◉ Models: 30    ◇ Providers: 5
 
@@ -67,6 +68,9 @@ into Codex, Zed, JetBrains, Claude Code, or Grok Build. Start `jcx` and keep usi
   icon and install a platform launcher while retaining the `jcx` flagship CLI (`joocode` remains an alias).
 - **Protocol bridge** — Responses API and Chat Completions, JSON and SSE,
   images, tool calls, streamed arguments, and function results.
+- **Local OpenRouter-style gateway** — point any OpenAI-compatible application
+  at `http://127.0.0.1:10100/v1` and use every model discovered by Joocode from
+  one fully local endpoint.
 - **Credential-safe** — upstream credentials stay in their original source;
   Joocode never prints authorization values.
 
@@ -461,6 +465,18 @@ JetBrains keeps the local placeholder in its managed credential store; upstream
 credentials remain in their original source.
 
 ## HTTP API
+
+Joocode can be used outside the built-in desktop integrations as a fully local
+OpenAI-compatible gateway. Configure any compatible application with:
+
+```text
+Base URL: http://127.0.0.1:10100/v1
+API key:  any non-empty local placeholder
+Model:    provider/model
+```
+
+Joocode ignores the placeholder client key and uses credentials from the
+original provider source. It does not expose provider credentials to the client.
 
 ```bash
 curl http://127.0.0.1:10100/healthz
