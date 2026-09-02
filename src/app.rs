@@ -407,6 +407,12 @@ pub async fn serve_dashboard(
 
     let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let shutdown_event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = shutdown_event_tx.send(dashboard::DashboardEvent::ShutdownRequested);
+        }
+    });
     let update_event_tx = event_tx.clone();
     tokio::spawn(async move {
         if let Ok(Some(tag)) = upgrade::check().await {

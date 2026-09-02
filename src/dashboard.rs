@@ -670,6 +670,7 @@ pub enum DashboardEvent {
     },
     UpdateAvailable(String),
     UpdateInstalled,
+    ShutdownRequested,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -736,8 +737,8 @@ pub fn run(
     let mut secret_input = String::new();
     let exit = ratatui::run(|terminal| {
         loop {
-            if receive_events(&mut data, &mut screen, &event_rx) {
-                return Ok::<DashboardExit, std::io::Error>(DashboardExit::Restart);
+            if let Some(exit) = receive_events(&mut data, &mut screen, &event_rx) {
+                return Ok::<DashboardExit, std::io::Error>(exit);
             }
             if let Screen::EasterEgg { tick } | Screen::Updating { tick, .. } = &mut screen {
                 *tick = tick.wrapping_add(1);
@@ -791,7 +792,7 @@ fn receive_events(
     data: &mut DashboardData,
     screen: &mut Screen,
     event_rx: &Receiver<DashboardEvent>,
-) -> bool {
+) -> Option<DashboardExit> {
     loop {
         match event_rx.try_recv() {
             Ok(DashboardEvent::ProviderAdded {
@@ -843,11 +844,12 @@ fn receive_events(
                     .collect();
             }
             Ok(DashboardEvent::UpdateAvailable(tag)) => *screen = Screen::UpdateAvailable(tag),
-            Ok(DashboardEvent::UpdateInstalled) => return true,
+            Ok(DashboardEvent::UpdateInstalled) => return Some(DashboardExit::Restart),
+            Ok(DashboardEvent::ShutdownRequested) => return Some(DashboardExit::Quit),
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
         }
     }
-    false
+    None
 }
 
 #[cfg(test)]
@@ -1513,7 +1515,7 @@ mod tests {
         tx.send(DashboardEvent::UpdateAvailable("v0.2.0".into()))
             .unwrap();
 
-        assert!(!receive_events(&mut data, &mut screen, &rx));
+        assert_eq!(receive_events(&mut data, &mut screen, &rx), None);
         assert!(matches!(screen, Screen::UpdateAvailable(tag) if tag == "v0.2.0"));
     }
 
@@ -1554,7 +1556,10 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(DashboardEvent::UpdateInstalled).unwrap();
 
-        assert!(receive_events(&mut data, &mut screen, &rx));
+        assert_eq!(
+            receive_events(&mut data, &mut screen, &rx),
+            Some(DashboardExit::Restart)
+        );
     }
 
     #[test]
