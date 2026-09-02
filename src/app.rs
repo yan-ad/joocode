@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     convert::Infallible,
     net::{IpAddr, SocketAddr},
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -381,7 +382,7 @@ pub async fn serve_dashboard(
     let base_url = base_url.unwrap_or_else(|| desktop_base_url(address));
     let dashboard_data = DashboardData::new(&registry, &targets, address, port_warning);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(async move {
+    let mut server = tokio::spawn(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.await;
@@ -533,7 +534,17 @@ pub async fn serve_dashboard(
         tokio::task::spawn_blocking(move || dashboard::run(dashboard_data, command_tx, event_rx));
     let dashboard_result = dashboard.await?;
     let _ = shutdown_tx.send(());
-    server.await??;
+    // Desktop clients commonly keep SSE/HTTP connections open. Do not hold the
+    // user's terminal indefinitely while Axum waits for those connections to
+    // close after Ctrl+C/Esc. Give active requests a short grace period, then
+    // drop the listener task so the background proxy handoff can proceed.
+    match tokio::time::timeout(Duration::from_millis(250), &mut server).await {
+        Ok(result) => result??,
+        Err(_) => {
+            server.abort();
+            let _ = server.await;
+        }
+    }
     match dashboard_result? {
         dashboard::DashboardExit::Quit => {
             autostart::resume()?;

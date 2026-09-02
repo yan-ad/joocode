@@ -247,15 +247,24 @@ fn resume_platform() -> anyhow::Result<()> {
         .arg(runtime_path)
         .output()
         .context("failed to start the Joocode background service")?;
-    if !output.status.success() && !launchctl_already_loaded(&output.stderr) {
+    if output.status.success() {
+        // The service has RunAtLoad=true, so a successful bootstrap starts it.
+        // Avoid `kickstart -k`: it synchronously tears down and relaunches the
+        // process, adding several seconds to dashboard shutdown.
+        return Ok(());
+    }
+    if !launchctl_already_loaded(&output.stderr) {
         anyhow::bail!(
             "failed to start the Joocode background service: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+
+    // Already loaded usually means the KeepAlive service is running. A plain
+    // kickstart is a cheap idempotent nudge and does not kill a healthy daemon.
     let service = format!("{domain}/{LABEL}");
     let output = std::process::Command::new("/bin/launchctl")
-        .args(["kickstart", "-k", &service])
+        .args(["kickstart", &service])
         .output()
         .context("failed to kick-start the Joocode background service")?;
     if output.status.success() {
