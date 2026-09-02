@@ -144,7 +144,7 @@ pub enum Command {
         #[arg(long, default_value = "http://127.0.0.1:10100/v1")]
         base_url: String,
     },
-    /// Upgrade JustOpenCode from a checksummed GitHub release.
+    /// Upgrade Joocode from a checksummed GitHub release.
     Upgrade {
         /// Install a specific version instead of the latest release.
         #[arg(long)]

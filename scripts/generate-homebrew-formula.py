@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a Homebrew formula for a JustOpenCode release."""
+"""Generate a Homebrew formula for a Joocode release."""
 
 from pathlib import Path
 import os

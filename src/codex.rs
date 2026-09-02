@@ -95,7 +95,7 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
     fs::write(&catalog_path, serde_json::to_vec_pretty(&catalog)?)
         .with_context(|| format!("failed to write {}", catalog_path.display()))?;
 
-    // Codex selects one provider globally. JustOpenCode is an aggregate provider:
+    // Codex selects one provider globally. Joocode is an aggregate provider:
     // native OpenAI model slugs are passed through with Codex's existing auth,
     // while qualified slugs are routed through the discovered provider sources.
     document["model_provider"] = value(PROVIDER_ID);
@@ -110,7 +110,7 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
         .as_table_mut()
         .context("model_providers must be a TOML table")?;
     let mut provider = Table::new();
-    provider["name"] = value("JustOpenCode");
+    provider["name"] = value("Joocode");
     provider["base_url"] = value(base_url.trim_end_matches('/'));
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(true);

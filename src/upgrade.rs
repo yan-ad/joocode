@@ -24,7 +24,7 @@ pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
             Some(tag) => tag,
             None => {
                 println!(
-                    "JustOpenCode {} is already up to date",
+                    "Joocode {} is already up to date",
                     normalize_tag(env!("CARGO_PKG_VERSION"))
                 );
                 return Ok(());
@@ -33,12 +33,12 @@ pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
     };
 
     if tag == normalize_tag(env!("CARGO_PKG_VERSION")) {
-        println!("JustOpenCode {tag} is already up to date");
+        println!("Joocode {tag} is already up to date");
         return Ok(());
     }
 
     let executable = install(&tag).await?;
-    println!("JustOpenCode {tag} installed at {}", executable.display());
+    println!("Joocode {tag} installed at {}", executable.display());
     Ok(())
 }
 
@@ -54,12 +54,12 @@ pub async fn check() -> anyhow::Result<Option<String>> {
         ))
         .send()
         .await
-        .context("failed to query the latest JustOpenCode release")?
+        .context("failed to query the latest Joocode release")?
         .error_for_status()
         .context("GitHub returned an error while checking for updates")?
         .json::<LatestRelease>()
         .await
-        .context("failed to parse the latest JustOpenCode release")?;
+        .context("failed to parse the latest Joocode release")?;
 
     if is_newer(&release.tag_name, env!("CARGO_PKG_VERSION"))? {
         Ok(Some(release.tag_name))
@@ -80,7 +80,7 @@ pub async fn install(tag: &str) -> anyhow::Result<PathBuf> {
         .get(format!("{base_url}/{asset}"))
         .send()
         .await
-        .with_context(|| format!("failed to download JustOpenCode {tag}"))?
+        .with_context(|| format!("failed to download Joocode {tag}"))?
         .error_for_status()
         .with_context(|| format!("release asset not found: {asset}"))?
         .bytes()
@@ -119,14 +119,14 @@ pub fn restart_current() -> anyhow::Result<()> {
         use std::os::unix::process::CommandExt;
 
         let error = command.exec();
-        Err(error).context("failed to restart the updated JustOpenCode process")
+        Err(error).context("failed to restart the updated Joocode process")
     }
 
     #[cfg(not(unix))]
     {
         command
             .status()
-            .context("failed to restart the updated JustOpenCode process")?;
+            .context("failed to restart the updated Joocode process")?;
         Ok(())
     }
 }
@@ -231,7 +231,7 @@ fn replace_binary(executable: &Path, archive: &[u8], target: &str) -> anyhow::Re
 
 fn replace_executable(destination: &Path, source: &Path) -> anyhow::Result<()> {
     let replacement = destination.with_extension(format!("upgrade-{}", std::process::id()));
-    fs::copy(source, &replacement).context("failed to stage the new JustOpenCode binary")?;
+    fs::copy(source, &replacement).context("failed to stage the new Joocode binary")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

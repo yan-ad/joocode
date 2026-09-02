@@ -144,6 +144,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -160,14 +161,17 @@ jobs:
           python3 scripts/generate-homebrew-formula.py "${RELEASE_TAG}" dist/SHA256SUMS
           mv joocode.rb dist/joocode.rb
 
+      - name: Generate release notes
+        run: python3 scripts/generate-release-notes.py "$RELEASE_TAG" RELEASE_NOTES.md
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$RELEASE_TAG" dist/* \
             --verify-tag \
-            --generate-notes \
-            --title "JustOpenCode $RELEASE_TAG"
+            --notes-file RELEASE_NOTES.md \
+            --title "Joocode $RELEASE_TAG"
 
   publish-homebrew:
     name: Publish Homebrew formula

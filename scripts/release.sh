@@ -63,7 +63,7 @@ if [[ "$DRY_RUN" != "1" ]]; then
   git rev-parse -q --verify "refs/tags/$tag" >/dev/null && fail "tag already exists: $tag"
 fi
 
-echo "Preparing JustOpenCode $tag (from $current_version)."
+echo "Preparing Joocode $tag (from $current_version)."
 
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "Dry run: would update Cargo.toml and Cargo.lock, run the locked release gate, commit, tag, and push main plus $tag."
@@ -98,8 +98,8 @@ cargo build --release --locked
 git add Cargo.toml Cargo.lock
 git diff --cached --quiet && fail "version update produced no changes"
 git commit -m "chore: release $tag"
-git tag -a "$tag" -m "JustOpenCode $tag"
+git tag -a "$tag" -m "Joocode $tag"
 git push origin main
 git push origin "$tag"
 
-echo "Released JustOpenCode $tag."
+echo "Released Joocode $tag."
