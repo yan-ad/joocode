@@ -503,6 +503,23 @@ pub async fn serve_dashboard(
                     };
                     let _ = event_tx.send(event);
                 }
+                dashboard::DashboardCommand::SetDefaultModel { provider, model } => {
+                    let result = (|| {
+                        local_config::set_default_model(&provider, &model)?;
+                        let registry = reload_store.snapshot();
+                        let setup_targets = active_targets.clone();
+                        desktop::configure_detected(&registry, &reload_base_url, &setup_targets);
+                        local_config::summaries()
+                    })();
+                    let event = match result {
+                        Ok(providers) => dashboard::DashboardEvent::ProviderDefaultUpdated {
+                            provider,
+                            providers,
+                        },
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
                 dashboard::DashboardCommand::ToggleAutoStart => {
                     let event = match tokio::task::spawn_blocking(autostart::toggle_for_dashboard)
                         .await

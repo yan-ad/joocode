@@ -43,6 +43,53 @@ pub struct DashboardData {
     pub port_warning: Option<String>,
 }
 
+fn draw_provider_models(frame: &mut Frame<'_>, provider: &ProviderSummary, selected: usize) {
+    let modal = draw_modal_shell(
+        frame,
+        "Default model",
+        88,
+        28,
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(MODAL_ACCENT)),
+            Span::raw(" set default    "),
+            Span::styled("esc", Style::default().fg(Color::DarkGray)),
+            Span::raw(" back"),
+        ]),
+    );
+    let items = provider
+        .models
+        .iter()
+        .enumerate()
+        .map(|(index, model)| {
+            let suffix = if provider.default_model.as_deref() == Some(model.as_str()) {
+                "  default"
+            } else {
+                ""
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(model, Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(suffix, Style::default().fg(Color::LightCyan)),
+            ]))
+            .style(selected_style(index == selected))
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(
+        List::new(items)
+            .style(Style::default().fg(Color::Gray).bg(MODAL_BACKGROUND))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::White)
+                    .bg(MODAL_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("● "),
+        modal.content,
+        &mut state,
+    );
+    draw_modal_scrollbar(frame, modal.content, provider.models.len(), selected);
+}
+
 const MODAL_BACKGROUND: Color = Color::Rgb(24, 42, 59);
 const MODAL_OVERLAY: Color = Color::Rgb(13, 17, 19);
 const MODAL_ACCENT: Color = Color::Rgb(62, 139, 255);
@@ -127,6 +174,7 @@ fn draw_modal_scrollbar(frame: &mut Frame<'_>, area: Rect, content_length: usize
     if content_length <= usize::from(area.height) {
         return;
     }
+
     let mut state = ScrollbarState::new(content_length).position(position);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -190,6 +238,9 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: usize) {
 }
 
 fn draw_providers(frame: &mut Frame<'_>, providers: &[ProviderSummary], selected: usize) {
+    let default_model = providers
+        .get(selected)
+        .and_then(|provider| provider.default_model.as_deref());
     let modal = draw_modal_shell(
         frame,
         "Providers",
@@ -199,7 +250,12 @@ fn draw_providers(frame: &mut Frame<'_>, providers: &[ProviderSummary], selected
             Span::styled("Enter", Style::default().fg(MODAL_ACCENT)),
             Span::raw(" new provider    "),
             Span::styled("Del", Style::default().fg(Color::LightRed)),
-            Span::raw(" remove selected provider"),
+            Span::raw(" remove    "),
+            Span::styled("\\", Style::default().fg(MODAL_ACCENT)),
+            Span::raw(match default_model {
+                Some(model) => format!(" {model}"),
+                None => " Set default model".to_owned(),
+            }),
         ]),
     );
     let items = if providers.is_empty() {
@@ -220,6 +276,14 @@ fn draw_providers(frame: &mut Frame<'_>, providers: &[ProviderSummary], selected
                     Span::styled(
                         format!("  {} models", provider.model_count),
                         Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        provider
+                            .default_model
+                            .as_ref()
+                            .map(|model| format!("  \\ {model}"))
+                            .unwrap_or_default(),
+                        Style::default().fg(Color::LightCyan),
                     ),
                 ]))
                 .style(selected_style(index == selected))
@@ -878,6 +942,7 @@ impl DashboardData {
 pub enum DashboardCommand {
     AddProvider { base_url: String, api_key: String },
     RemoveProvider { name: String },
+    SetDefaultModel { provider: String, model: String },
     ToggleAutoStart,
     ToggleRunInBackground,
     ToggleSource { source: SourceKind },
@@ -892,6 +957,10 @@ pub enum DashboardEvent {
         config_sources: Vec<String>,
         model_count: usize,
         provider_count: usize,
+        providers: Vec<ProviderSummary>,
+    },
+    ProviderDefaultUpdated {
+        provider: String,
         providers: Vec<ProviderSummary>,
     },
     ProviderRemoved {
@@ -934,6 +1003,10 @@ enum Screen {
     },
     Providers {
         selected: usize,
+    },
+    ProviderModels {
+        provider_selected: usize,
+        model_selected: usize,
     },
     ProviderBaseUrl {
         selected: usize,
@@ -1018,6 +1091,11 @@ pub fn run(
                 screen = match screen {
                     Screen::ProviderBaseUrl { selected, .. }
                     | Screen::ProviderApiKey { selected, .. } => Screen::Providers { selected },
+                    Screen::ProviderModels {
+                        provider_selected, ..
+                    } => Screen::Providers {
+                        selected: provider_selected,
+                    },
                     _ => Screen::Dashboard,
                 };
                 continue;
@@ -1078,6 +1156,18 @@ fn receive_events(
                 *screen = Screen::Providers {
                     selected: selected.min(data.providers.len().saturating_sub(1)),
                 };
+            }
+            Ok(DashboardEvent::ProviderDefaultUpdated {
+                provider,
+                providers,
+            }) => {
+                data.providers = providers;
+                let selected = data
+                    .providers
+                    .iter()
+                    .position(|entry| entry.name == provider)
+                    .unwrap_or_default();
+                *screen = Screen::Providers { selected };
             }
             Ok(DashboardEvent::ProviderError(error)) => *screen = Screen::Error(error),
             Ok(DashboardEvent::AutoStartUpdated(status)) => data.autostart = status,
@@ -1145,6 +1235,30 @@ fn handle_key_with_providers(
             }
             _ => {}
         },
+        Screen::ProviderModels {
+            provider_selected,
+            model_selected,
+        } => match key {
+            KeyCode::Up => *model_selected = model_selected.saturating_sub(1),
+            KeyCode::Down => {
+                if let Some(provider) = providers.get(*provider_selected) {
+                    *model_selected = model_selected
+                        .saturating_add(1)
+                        .min(provider.models.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(provider) = providers.get(*provider_selected)
+                    && let Some(model) = provider.models.get(*model_selected)
+                {
+                    let _ = command_tx.send(DashboardCommand::SetDefaultModel {
+                        provider: provider.name.clone(),
+                        model: model.clone(),
+                    });
+                }
+            }
+            _ => {}
+        },
         Screen::Providers { selected } => match key {
             KeyCode::Up => *selected = selected.saturating_sub(1),
             KeyCode::Down => {
@@ -1163,6 +1277,23 @@ fn handle_key_with_providers(
                     let _ = command_tx.send(DashboardCommand::RemoveProvider {
                         name: provider.name.clone(),
                     });
+                }
+            }
+            KeyCode::Char('\\') => {
+                if let Some(provider) = providers.get(*selected)
+                    && !provider.models.is_empty()
+                {
+                    let model_selected = provider
+                        .default_model
+                        .as_ref()
+                        .and_then(|default| {
+                            provider.models.iter().position(|model| model == default)
+                        })
+                        .unwrap_or_default();
+                    *screen = Screen::ProviderModels {
+                        provider_selected: *selected,
+                        model_selected,
+                    };
                 }
             }
             _ => {}
@@ -1249,6 +1380,15 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             draw_config(frame, data, *selected);
         }
         Screen::Providers { selected } => draw_providers(frame, &data.providers, *selected),
+        Screen::ProviderModels {
+            provider_selected,
+            model_selected,
+        } => {
+            draw_providers(frame, &data.providers, *provider_selected);
+            if let Some(provider) = data.providers.get(*provider_selected) {
+                draw_provider_models(frame, provider, *model_selected);
+            }
+        }
         Screen::ProviderBaseUrl { selected, value } => {
             draw_providers(frame, &data.providers, *selected);
             draw_provider_input(frame, "Step 1/3 — Base URL", value, false);
@@ -1304,6 +1444,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
         ],
         Screen::Config { .. }
         | Screen::Providers { .. }
+        | Screen::ProviderModels { .. }
         | Screen::ProviderBaseUrl { .. }
         | Screen::ProviderApiKey { .. }
         | Screen::ProviderLoading { .. }
@@ -1415,6 +1556,34 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
+
+    #[test]
+    fn backslash_opens_default_model_picker_and_enter_selects_model() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let providers = vec![ProviderSummary {
+            name: "gunamaya".into(),
+            label: "gunamaya.id".into(),
+            model_count: 2,
+            models: vec!["gpt-5.4".into(), "gpt-5.5".into()],
+            default_model: None,
+        }];
+        let mut screen = Screen::Providers { selected: 0 };
+        handle_key_with_providers(&mut screen, KeyCode::Char('\\'), &tx, &providers);
+        assert!(matches!(
+            screen,
+            Screen::ProviderModels {
+                provider_selected: 0,
+                model_selected: 0
+            }
+        ));
+        handle_key_with_providers(&mut screen, KeyCode::Down, &tx, &providers);
+        handle_key_with_providers(&mut screen, KeyCode::Enter, &tx, &providers);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DashboardCommand::SetDefaultModel { provider, model })
+                if provider == "gunamaya" && model == "gpt-5.5"
+        ));
+    }
 
     #[test]
     fn header_shows_running_version_and_animated_icons() {
@@ -1592,11 +1761,15 @@ mod tests {
                 name: "gunamaya".into(),
                 label: "gunamaya.id".into(),
                 model_count: 10,
+                models: vec!["gpt-5.5".into()],
+                default_model: None,
             },
             ProviderSummary {
                 name: "openai".into(),
                 label: "openai.com".into(),
                 model_count: 4,
+                models: vec!["gpt-5.4".into()],
+                default_model: None,
             },
         ];
         let mut screen = Screen::Providers { selected: 1 };
@@ -1626,11 +1799,15 @@ mod tests {
                     name: "gunamaya".into(),
                     label: "gunamaya.id".into(),
                     model_count: 10,
+                    models: vec!["gpt-5.5".into()],
+                    default_model: Some("gpt-5.5".into()),
                 },
                 ProviderSummary {
                     name: "openai".into(),
                     label: "openai.com".into(),
                     model_count: 4,
+                    models: vec!["gpt-5.4".into()],
+                    default_model: None,
                 },
             ],
             port_warning: None,
@@ -1669,6 +1846,8 @@ mod tests {
                 name: "gunamaya".into(),
                 label: "gunamaya.id".into(),
                 model_count: 10,
+                models: vec!["gpt-5.5".into()],
+                default_model: None,
             }],
             port_warning: None,
         };
@@ -1938,6 +2117,8 @@ mod tests {
                 name: "local".into(),
                 label: "example.test".into(),
                 model_count: 1,
+                models: vec!["model-a".into()],
+                default_model: None,
             }],
         })
         .unwrap();

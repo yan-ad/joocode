@@ -11,6 +11,33 @@ pub struct LocalProvider {
     pub base_url: String,
     pub api_key: String,
     pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+}
+
+pub fn set_default_model(name: &str, model: &str) -> anyhow::Result<PathBuf> {
+    let path = path()?;
+    let mut providers = load_from(&path)?;
+    let selected = providers
+        .iter()
+        .find(|provider| provider.name == name)
+        .context("selected provider was not found")?;
+    if !selected.models.iter().any(|candidate| candidate == model) {
+        bail!("model `{model}` does not belong to provider `{name}`");
+    }
+    for provider in &mut providers {
+        provider.default_model = (provider.name == name).then(|| model.to_owned());
+    }
+    write_providers(&path, &providers)?;
+    Ok(path)
+}
+
+pub fn default_model_route() -> anyhow::Result<Option<String>> {
+    Ok(load()?.into_iter().find_map(|provider| {
+        provider
+            .default_model
+            .map(|model| format!("joocode/{}/{model}", provider.name))
+    }))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -18,6 +45,8 @@ pub struct ProviderSummary {
     pub name: String,
     pub label: String,
     pub model_count: usize,
+    pub models: Vec<String>,
+    pub default_model: Option<String>,
 }
 
 impl LocalProvider {
@@ -26,6 +55,8 @@ impl LocalProvider {
             name: self.name.clone(),
             label: provider_label(&self.base_url).unwrap_or_else(|_| self.name.clone()),
             model_count: self.models.len(),
+            models: self.models.clone(),
+            default_model: self.default_model.clone(),
         }
     }
 }
@@ -89,6 +120,7 @@ pub async fn probe(
         base_url,
         api_key: api_key.trim().to_owned(),
         models,
+        default_model: None,
     })
 }
 
@@ -99,7 +131,14 @@ pub fn save(provider: LocalProvider) -> anyhow::Result<PathBuf> {
         .iter_mut()
         .find(|entry| entry.name == provider.name)
     {
-        *existing = provider;
+        let default_model = existing
+            .default_model
+            .clone()
+            .filter(|model| provider.models.contains(model));
+        *existing = LocalProvider {
+            default_model,
+            ..provider
+        };
     } else {
         providers.push(provider);
         providers.sort_by(|a, b| a.name.cmp(&b.name));
@@ -272,6 +311,7 @@ mod tests {
             base_url: "http://localhost:1234/v1".into(),
             api_key: "secret".into(),
             models: vec!["model-a".into()],
+            default_model: None,
         }];
         fs::write(&path, serde_json::to_vec_pretty(&providers).unwrap()).unwrap();
         let loaded = load_from(&path).unwrap();
@@ -289,12 +329,14 @@ mod tests {
                 base_url: "https://gunamaya.id/v1".into(),
                 api_key: "secret-a".into(),
                 models: vec!["model-a".into()],
+                default_model: None,
             },
             LocalProvider {
                 name: "openai".into(),
                 base_url: "https://api.openai.com/v1".into(),
                 api_key: "secret-b".into(),
                 models: vec!["model-b".into()],
+                default_model: None,
             },
         ];
         write_providers(&path, &providers).unwrap();
@@ -303,6 +345,44 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].name, "openai");
         assert_eq!(remaining[0].api_key, "secret-b");
+    }
+
+    #[test]
+    fn sets_one_global_default_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("providers.json");
+        let providers = vec![
+            LocalProvider {
+                name: "gunamaya".into(),
+                base_url: "https://gunamaya.id/v1".into(),
+                api_key: "secret-a".into(),
+                models: vec!["gpt-5.5".into()],
+                default_model: None,
+            },
+            LocalProvider {
+                name: "openai".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key: "secret-b".into(),
+                models: vec!["gpt-5.4".into()],
+                default_model: Some("gpt-5.4".into()),
+            },
+        ];
+        write_providers(&path, &providers).unwrap();
+
+        let mut loaded = load_from(&path).unwrap();
+        let selected = loaded
+            .iter()
+            .find(|provider| provider.name == "gunamaya")
+            .unwrap();
+        assert!(selected.models.contains(&"gpt-5.5".into()));
+        for provider in &mut loaded {
+            provider.default_model = (provider.name == "gunamaya").then(|| "gpt-5.5".to_owned());
+        }
+        write_providers(&path, &loaded).unwrap();
+
+        let result = load_from(&path).unwrap();
+        assert_eq!(result[0].default_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(result[1].default_model, None);
     }
 
     #[tokio::test]

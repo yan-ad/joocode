@@ -41,7 +41,8 @@ const LOCAL_API_KEY: &str = "joocode-local";
 /// API key; Joocode ignores this value and continues using source credentials.
 pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<PathBuf> {
     let path = settings_path()?;
-    let path = install_at(registry, base_url, path)?;
+    let default_model = crate::local_config::default_model_route()?;
+    let path = install_at(registry, base_url, path, default_model.as_deref())?;
     install_local_api_key(base_url)?;
     Ok(path)
 }
@@ -66,7 +67,12 @@ pub fn uninstall() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn install_at(registry: &Registry, base_url: &str, path: PathBuf) -> anyhow::Result<PathBuf> {
+fn install_at(
+    registry: &Registry,
+    base_url: &str,
+    path: PathBuf,
+    default_model: Option<&str>,
+) -> anyhow::Result<PathBuf> {
     let mut root = match fs::read_to_string(&path) {
         Ok(text) if !text.trim().is_empty() => json5::from_str::<Value>(&text)
             .with_context(|| format!("invalid Zed settings JSONC at {}", path.display()))?,
@@ -112,6 +118,12 @@ fn install_at(registry: &Registry, base_url: &str, path: PathBuf) -> anyhow::Res
     );
     compatible.remove("joc");
     compatible.remove("crabcodex");
+    if let Some(model) = default_model {
+        let agent = object_at(root, "agent")?;
+        let selection = json!({ "provider": PROVIDER_ID, "model": model });
+        agent.insert("default_model".into(), selection.clone());
+        agent.insert("commit_message_model".into(), selection);
+    }
     let parent = path.parent().context("Zed settings path has no parent")?;
     fs::create_dir_all(parent).with_context(|| format!("failed creating {}", parent.display()))?;
     let content = format!("{}\n", serde_json::to_string_pretty(&root)?);
@@ -163,7 +175,13 @@ mod tests {
         .unwrap();
         let registry = Registry::load(&ConfigPaths { config, auth }).unwrap();
 
-        install_at(&registry, "http://127.0.0.1:10100/v1", settings.clone()).unwrap();
+        install_at(
+            &registry,
+            "http://127.0.0.1:10100/v1",
+            settings.clone(),
+            None,
+        )
+        .unwrap();
 
         let result: Value = serde_json::from_str(&fs::read_to_string(settings).unwrap()).unwrap();
         assert_eq!(result["theme"], "Ayu");
@@ -181,6 +199,34 @@ mod tests {
                 ["prompt_cache_key"],
             false
         );
+    }
+
+    #[test]
+    fn installs_default_and_commit_message_model() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("opencode.jsonc");
+        let auth = dir.path().join("auth.json");
+        let settings = dir.path().join("zed/settings.json");
+        fs::write(
+            &config,
+            r#"{ provider: { demo: { options: { baseURL: "https://upstream.test/v1" }, models: { fast: {} } } } }"#,
+        )
+        .unwrap();
+        fs::write(&auth, "{}").unwrap();
+        let registry = Registry::load(&ConfigPaths { config, auth }).unwrap();
+
+        install_at(
+            &registry,
+            "http://127.0.0.1:10100/v1",
+            settings.clone(),
+            Some("joocode/demo/fast"),
+        )
+        .unwrap();
+
+        let result: Value = serde_json::from_str(&fs::read_to_string(settings).unwrap()).unwrap();
+        let expected = json!({"provider":"joocode","model":"joocode/demo/fast"});
+        assert_eq!(result["agent"]["default_model"], expected);
+        assert_eq!(result["agent"]["commit_message_model"], expected);
     }
 
     #[test]

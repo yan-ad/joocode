@@ -266,6 +266,8 @@ Press `Tab` in the dashboard:
 - Use `↑` and `↓` to select a saved provider.
 - Press `Enter` to open the new-provider modal.
 - Press `Del` to remove the selected provider.
+- Press `\\` to select its default model. Joocode syncs that model to Zed's
+  default chat model and commit-message generator.
 
 The create modal asks for:
 
