@@ -111,11 +111,24 @@ pub async fn install(tag: &str) -> anyhow::Result<PathBuf> {
 
 pub fn restart_current() -> anyhow::Result<()> {
     let executable = std::env::current_exe().context("failed to locate the updated binary")?;
-    std::process::Command::new(executable)
-        .args(std::env::args_os().skip(1))
-        .spawn()
-        .context("failed to restart the updated JustOpenCode process")?;
-    Ok(())
+    let mut command = std::process::Command::new(executable);
+    command.args(std::env::args_os().skip(1));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        let error = command.exec();
+        Err(error).context("failed to restart the updated JustOpenCode process")
+    }
+
+    #[cfg(not(unix))]
+    {
+        command
+            .status()
+            .context("failed to restart the updated JustOpenCode process")?;
+        Ok(())
+    }
 }
 
 fn repository() -> String {
