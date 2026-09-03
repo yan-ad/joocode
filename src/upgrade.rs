@@ -17,6 +17,192 @@ struct LatestRelease {
     tag_name: String,
 }
 
+#[cfg(target_os = "windows")]
+fn stage_windows_upgrade(
+    executable: &Path,
+    archive: &[u8],
+    target: &str,
+    relaunch: bool,
+) -> anyhow::Result<()> {
+    let install_dir = executable
+        .parent()
+        .context("the running executable has no install directory")?;
+    let probe = install_dir.join(format!(".joocode-write-test-{}", std::process::id()));
+    fs::write(&probe, b"").with_context(|| format!("{} is not writable", install_dir.display()))?;
+    fs::remove_file(&probe).context("failed to clear the upgrade write test")?;
+
+    let staging = std::env::temp_dir().join(format!(
+        "joocode-upgrade-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&staging).context("failed to create Windows upgrade staging")?;
+    let archive_path = staging.join(format!("joocode-{target}.zip"));
+    fs::write(&archive_path, archive).context("failed to stage the Windows release archive")?;
+
+    let script_path = staging.join("complete-upgrade.ps1");
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let script = WindowsUpgradePlan {
+        parent_pid: std::process::id(),
+        target,
+        staging: &staging,
+        archive: &archive_path,
+        install_dir,
+        current_executable: executable,
+        relaunch,
+        relaunch_args: &arguments,
+    }
+    .render();
+    fs::write(&script_path, script).context("failed to write the Windows upgrade helper")?;
+
+    let status = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&script_path)
+        .spawn()
+        .context("failed to launch the Windows PowerShell upgrade helper")?;
+    drop(status);
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+struct WindowsUpgradePlan<'a> {
+    parent_pid: u32,
+    target: &'a str,
+    staging: &'a Path,
+    archive: &'a Path,
+    install_dir: &'a Path,
+    current_executable: &'a Path,
+    relaunch: bool,
+    relaunch_args: &'a [std::ffi::OsString],
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsUpgradePlan<'_> {
+    fn render(&self) -> String {
+        let extracted = self.staging.join("extracted");
+        let executable_name = self
+            .current_executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("jcx.exe");
+        let relaunch_path = self.install_dir.join(executable_name);
+        let arguments = windows_command_line(self.relaunch_args);
+        format!(
+            r#"$ErrorActionPreference = 'Stop'
+$parentPid = {parent_pid}
+$deadline = (Get-Date).AddSeconds(60)
+while (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{
+  if ((Get-Date) -ge $deadline) {{ throw 'Timed out waiting for Joocode to exit' }}
+  Start-Sleep -Milliseconds 100
+}}
+
+$managedExecutables = @(
+  (Join-Path {install_dir} 'jcx.exe'),
+  (Join-Path {install_dir} 'joocode.exe')
+)
+$runtimeDirectory = Join-Path $env:LOCALAPPDATA 'joocode'
+$pauseMarker = Join-Path $runtimeDirectory 'Joocode.paused'
+$runtimeEntry = Join-Path $runtimeDirectory 'Joocode.cmd'
+New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
+Set-Content -LiteralPath $pauseMarker -Value 'paused' -Force
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object {{ $_.CommandLine -like '*Joocode.cmd*' }} |
+  ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object {{ $_.ProcessId -ne $PID -and $managedExecutables -contains $_.ExecutablePath }} |
+  ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
+
+Expand-Archive -LiteralPath {archive} -DestinationPath {extracted} -Force
+$releaseRoot = Join-Path {extracted} 'joocode-{target}'
+Copy-Item -LiteralPath (Join-Path $releaseRoot 'jcx.exe') -Destination (Join-Path {install_dir} 'jcx.exe') -Force
+Copy-Item -LiteralPath (Join-Path $releaseRoot 'joocode.exe') -Destination (Join-Path {install_dir} 'joocode.exe') -Force
+
+if ({relaunch}) {{
+  $process = New-Object System.Diagnostics.ProcessStartInfo
+  $process.FileName = {relaunch_path}
+  $process.Arguments = {arguments}
+  $process.WorkingDirectory = {working_directory}
+  $process.UseShellExecute = $true
+  [System.Diagnostics.Process]::Start($process) | Out-Null
+}} elseif (Test-Path -LiteralPath $runtimeEntry) {{
+  Remove-Item -LiteralPath $pauseMarker -Force -ErrorAction SilentlyContinue
+  Start-Process -FilePath $runtimeEntry -WindowStyle Hidden
+}} else {{
+  Remove-Item -LiteralPath $pauseMarker -Force -ErrorAction SilentlyContinue
+}}
+
+Remove-Item -LiteralPath {staging} -Recurse -Force -ErrorAction SilentlyContinue
+"#,
+            parent_pid = self.parent_pid,
+            archive = powershell_literal(self.archive.to_string_lossy().as_ref()),
+            extracted = powershell_literal(extracted.to_string_lossy().as_ref()),
+            target = self.target,
+            install_dir = powershell_literal(self.install_dir.to_string_lossy().as_ref()),
+            relaunch = if self.relaunch { "$true" } else { "$false" },
+            relaunch_path = powershell_literal(relaunch_path.to_string_lossy().as_ref()),
+            arguments = powershell_literal(&arguments),
+            working_directory = powershell_literal(
+                std::env::current_dir()
+                    .unwrap_or_else(|_| self.install_dir.to_path_buf())
+                    .to_string_lossy()
+                    .as_ref(),
+            ),
+            staging = powershell_literal(self.staging.to_string_lossy().as_ref()),
+        )
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn powershell_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_command_line(arguments: &[std::ffi::OsString]) -> String {
+    arguments
+        .iter()
+        .map(|argument| windows_quote_argument(&argument.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_quote_argument(value: &str) -> String {
+    if !value.is_empty()
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || character == '"')
+    {
+        return value.to_owned();
+    }
+
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for character in value.chars() {
+        if character == '\\' {
+            backslashes += 1;
+        } else if character == '"' {
+            quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+            quoted.push('"');
+            backslashes = 0;
+        } else {
+            quoted.push_str(&"\\".repeat(backslashes));
+            backslashes = 0;
+            quoted.push(character);
+        }
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
 pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
     let tag = match version {
         Some(version) => normalize_tag(version),
@@ -38,6 +224,12 @@ pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
     }
 
     let executable = install(&tag).await?;
+    #[cfg(target_os = "windows")]
+    println!(
+        "Joocode {tag} upgrade staged for {}; it will finish after this process exits",
+        executable.display()
+    );
+    #[cfg(not(target_os = "windows"))]
     println!("Joocode {tag} installed at {}", executable.display());
     Ok(())
 }
@@ -69,12 +261,27 @@ pub async fn check() -> anyhow::Result<Option<String>> {
 }
 
 pub async fn install(tag: &str) -> anyhow::Result<PathBuf> {
+    install_inner(tag, false).await
+}
+
+pub async fn install_for_restart(tag: &str) -> anyhow::Result<PathBuf> {
+    install_inner(tag, true).await
+}
+
+async fn install_inner(tag: &str, relaunch: bool) -> anyhow::Result<PathBuf> {
+    #[cfg(not(target_os = "windows"))]
+    let _ = relaunch;
     let repository = repository();
     let client = client()?;
     let tag = normalize_tag(tag);
 
     let target = release_target()?;
-    let asset = format!("joocode-{target}.tar.gz");
+    let extension = if cfg!(target_os = "windows") {
+        "zip"
+    } else {
+        "tar.gz"
+    };
+    let asset = format!("joocode-{target}.{extension}");
     let base_url = format!("https://github.com/{repository}/releases/download/{tag}");
     let archive = client
         .get(format!("{base_url}/{asset}"))
@@ -105,6 +312,9 @@ pub async fn install(tag: &str) -> anyhow::Result<PathBuf> {
     }
 
     let executable = std::env::current_exe().context("failed to locate the running binary")?;
+    #[cfg(target_os = "windows")]
+    stage_windows_upgrade(&executable, &archive, &target, relaunch)?;
+    #[cfg(not(target_os = "windows"))]
     replace_binary(&executable, &archive, &target)?;
     Ok(executable)
 }
@@ -124,9 +334,8 @@ pub fn restart_current() -> anyhow::Result<()> {
 
     #[cfg(not(unix))]
     {
-        command
-            .status()
-            .context("failed to restart the updated Joocode process")?;
+        // Windows replacement and relaunch are performed by the staged
+        // PowerShell helper after this process releases its executable.
         Ok(())
     }
 }
@@ -145,7 +354,7 @@ fn client() -> anyhow::Result<reqwest::Client> {
 }
 
 fn self_upgrade_supported() -> bool {
-    matches!(std::env::consts::OS, "linux" | "macos")
+    matches!(std::env::consts::OS, "linux" | "macos" | "windows")
 }
 
 fn is_newer(tag: &str, current: &str) -> anyhow::Result<bool> {
@@ -173,9 +382,7 @@ fn release_target() -> anyhow::Result<String> {
     let os = match std::env::consts::OS {
         "linux" => "unknown-linux-gnu",
         "macos" => "apple-darwin",
-        "windows" => {
-            bail!("self-upgrade is not supported on Windows; download the latest ZIP release")
-        }
+        "windows" => "pc-windows-msvc",
         other => bail!("unsupported operating system for self-upgrade: {other}"),
     };
     Ok(format!("{arch}-{os}"))
@@ -270,7 +477,10 @@ mod tests {
 
     use flate2::{Compression, write::GzEncoder};
 
-    use super::{checksum_for, is_newer, normalize_tag, replace_binary};
+    use super::{
+        WindowsUpgradePlan, checksum_for, is_newer, normalize_tag, replace_binary,
+        windows_quote_argument,
+    };
 
     fn test_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -349,5 +559,42 @@ mod tests {
         assert_eq!(fs::read(&executable).unwrap(), b"new-joocode");
         assert_eq!(fs::read(directory.join("jcx")).unwrap(), b"new-jcx");
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn windows_upgrade_waits_replaces_both_commands_and_can_relaunch() {
+        let root = PathBuf::from(r"C:\Users\O'Brien\App Data\joocode-upgrade");
+        let install = PathBuf::from(r"C:\Users\O'Brien\.local\bin");
+        let archive = root.join("release.zip");
+        let executable = install.join("jcx.exe");
+        let arguments = ["--port".into(), "10101".into()];
+        let script = WindowsUpgradePlan {
+            parent_pid: 42,
+            target: "x86_64-pc-windows-msvc",
+            staging: &root,
+            archive: &archive,
+            install_dir: &install,
+            current_executable: &executable,
+            relaunch: true,
+            relaunch_args: &arguments,
+        }
+        .render();
+
+        assert!(script.contains("Get-Process -Id $parentPid"));
+        assert!(script.contains("joocode-x86_64-pc-windows-msvc"));
+        assert!(script.contains("'C:\\Users\\O''Brien\\.local\\bin'"));
+        assert!(script.contains("'jcx.exe'"));
+        assert!(script.contains("'joocode.exe'"));
+        assert!(script.contains("Joocode.paused"));
+        assert!(script.contains("Joocode.cmd"));
+        assert!(script.contains("$process.Arguments = '--port 10101'"));
+        assert!(script.contains("if ($true)"));
+    }
+
+    #[test]
+    fn windows_arguments_are_quoted_for_create_process() {
+        assert_eq!(windows_quote_argument("plain"), "plain");
+        assert_eq!(windows_quote_argument("two words"), r#""two words""#);
+        assert_eq!(windows_quote_argument(r#"a"b"#), r#""a\"b""#);
     }
 }

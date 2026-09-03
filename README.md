@@ -542,9 +542,12 @@ jcx upgrade
 jcx upgrade --version 0.2.0
 ```
 
-Linux and macOS upgrades download the matching archive and `SHA256SUMS`, verify
-the checksum, and atomically replace the executable. Windows currently uses the
-release ZIP or PowerShell installer for upgrades.
+All platforms download the matching archive and `SHA256SUMS` before replacing
+the executable. Linux and macOS replace the binary atomically. On Windows,
+Joocode stages a PowerShell helper that waits for the running process to exit,
+replaces both `jcx.exe` and `joocode.exe`, and relaunches the dashboard when the
+upgrade was accepted from the live update prompt. The installer remains the
+fallback when the current installation directory is not writable.
 
 ### Uninstall
 

@@ -593,7 +593,7 @@ pub async fn serve_dashboard(
                     let _ = event_tx.send(event);
                 }
                 dashboard::DashboardCommand::InstallUpdate { tag } => {
-                    let event = match upgrade::install(&tag).await {
+                    let event = match upgrade::install_for_restart(&tag).await {
                         Ok(_) => dashboard::DashboardEvent::UpdateInstalled,
                         Err(error) => dashboard::DashboardEvent::ProviderError(format!(
                             "Update failed: {error:#}"
