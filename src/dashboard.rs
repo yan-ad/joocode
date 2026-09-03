@@ -1459,10 +1459,13 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
     } else {
         3
     };
-    let [header, body, footer] = Layout::vertical([
+    let warning_height = u16::from(data.port_warning.is_some()) * 4;
+    let dashboard_height = if frame.area().width >= 76 { 12 } else { 19 } + warning_height;
+    let [header, body, footer, _spacer] = Layout::vertical([
         Constraint::Length(header_height),
-        Constraint::Min(7),
-        Constraint::Length(3),
+        Constraint::Length(dashboard_height.min(frame.area().height.saturating_sub(header_height))),
+        Constraint::Length(2),
+        Constraint::Min(0),
     ])
     .areas(frame.area());
 
@@ -1555,7 +1558,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
     };
     frame.render_widget(
         Paragraph::new(Line::from(help)),
-        footer.inner(Margin::new(1, 1)),
+        footer.inner(Margin::new(1, 0)),
     );
 }
 
@@ -1571,7 +1574,7 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
         data.ide_targets.join(", ")
     };
     let openai_compatible = format!("{}/v1", data.listening.trim_end_matches('/'));
-    let canvas = area.inner(Margin::new(2, 1));
+    let canvas = area.inner(Margin::new(1, 0));
     frame.render_widget(
         Block::default().style(Style::default().bg(Color::Rgb(15, 19, 21))),
         area,
@@ -1580,9 +1583,10 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
     let warning_height = u16::from(data.port_warning.is_some()) * 3;
     let [warning_area, content_area, stats_area] = Layout::vertical([
         Constraint::Length(warning_height),
-        Constraint::Length(if canvas.width >= 76 { 8 } else { 14 }),
-        Constraint::Length(5),
+        Constraint::Length(if canvas.width >= 76 { 7 } else { 14 }),
+        Constraint::Length(3),
     ])
+    .spacing(1)
     .areas(canvas);
 
     if let Some(warning) = &data.port_warning {
@@ -1735,10 +1739,7 @@ fn draw_stats(frame: &mut Frame<'_>, area: Rect, models: usize, providers: usize
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("● ", Style::default().fg(Color::Green)),
-                Span::styled(
-                    "Ready for connections",
-                    Style::default().fg(Color::LightGreen),
-                ),
+                Span::styled("Ready", Style::default().fg(Color::LightGreen)),
             ]))
             .alignment(Alignment::Center),
             inner,
@@ -1758,16 +1759,14 @@ fn draw_stat_card(
     let inner = panel.inner(area);
     frame.render_widget(panel, area);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(label, Style::default().fg(MUTED_TEXT))),
-            Line::from(vec![
-                Span::styled(format!("{icon} "), Style::default().fg(accent)),
-                Span::styled(
-                    value.to_string(),
-                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-        ])
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{label}  "), Style::default().fg(MUTED_TEXT)),
+            Span::styled(format!("{icon} "), Style::default().fg(accent)),
+            Span::styled(
+                value.to_string(),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+        ]))
         .alignment(Alignment::Center),
         inner,
     );
