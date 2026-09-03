@@ -196,61 +196,135 @@ fn header_animation_tick() -> usize {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    (elapsed.as_millis() / 450) as usize
+    (elapsed.as_millis() / 100) as usize
+}
+
+const JOOCODE_LOGO: [&str; 5] = [
+    r"       __                           __   ",
+    r"      / /___  ____  _________  ____/ /__ ",
+    r" __  / / __ \/ __ \/ ___/ __ \/ __  / _ \",
+    r"/ /_/ / /_/ / /_/ / /__/ /_/ / /_/ /  __/",
+    r"\____/\____/\____/\___/\____/\__,_/\___/",
+];
+
+const HEADER_RAINBOW: [Color; 7] = [
+    Color::Rgb(255, 88, 116),
+    Color::Rgb(255, 151, 76),
+    Color::Rgb(255, 218, 92),
+    Color::Rgb(87, 214, 141),
+    Color::Rgb(73, 184, 255),
+    Color::Rgb(126, 128, 255),
+    Color::Rgb(205, 105, 255),
+];
+
+fn rainbow_logo_line(line: &str, row: usize, tick: usize) -> Line<'static> {
+    Line::from(
+        line.chars()
+            .enumerate()
+            .map(|(column, character)| {
+                let phase = (column / 3 + row + HEADER_RAINBOW.len() - tick % HEADER_RAINBOW.len())
+                    % HEADER_RAINBOW.len();
+                Span::styled(
+                    character.to_string(),
+                    Style::default()
+                        .fg(HEADER_RAINBOW[phase])
+                        .add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: usize) {
-    let icons = ["🦀", "🌴", "🦀", "🌴"];
-    let colors = [
-        Color::LightRed,
-        Color::LightGreen,
-        Color::LightMagenta,
-        Color::LightCyan,
-    ];
-    let frame_index = tick % icons.len();
+    if area.width < 52 || area.height < 7 {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled(
+                        "Joocode",
+                        Style::default()
+                            .fg(HEADER_RAINBOW[tick % HEADER_RAINBOW.len()])
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  LOCAL AI ROUTER", Style::default().fg(Color::LightCyan)),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        format!("v{}", env!("CARGO_PKG_VERSION")),
+                        Style::default().fg(Color::LightYellow),
+                    ),
+                    Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("ONLINE", Style::default().fg(Color::LightGreen)),
+                ]),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(Color::Rgb(52, 65, 70))),
+            ),
+            area,
+        );
+        return;
+    }
+
+    let logo_width = JOOCODE_LOGO
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or_default() as u16;
+    let [logo_area, status_area] = Layout::horizontal([
+        Constraint::Length(logo_width.min(area.width)),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    format!("{} ", icons[frame_index]),
-                    Style::default()
-                        .fg(colors[frame_index])
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "Joocode",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    " LOCAL AI ROUTER ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Rgb(91, 208, 200))
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("   "),
-                Span::styled(
-                    format!("v{}", env!("CARGO_PKG_VERSION")),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
-                Span::styled("ONLINE", Style::default().fg(Color::Green)),
-            ]),
-        ])
+        Paragraph::new(
+            JOOCODE_LOGO
+                .iter()
+                .enumerate()
+                .map(|(row, line)| rainbow_logo_line(line, row, tick))
+                .collect::<Vec<_>>(),
+        )
         .block(
             Block::default()
                 .borders(Borders::BOTTOM)
                 .border_style(Style::default().fg(Color::Rgb(52, 65, 70))),
         ),
-        area,
+        logo_area,
     );
+
+    if status_area.width >= 18 {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    " LOCAL AI ROUTER ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Rgb(91, 208, 200))
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(
+                        format!("v{}", env!("CARGO_PKG_VERSION")),
+                        Style::default()
+                            .fg(Color::LightYellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  •  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("ONLINE", Style::default().fg(Color::LightGreen)),
+                ]),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(Color::Rgb(52, 65, 70))),
+            ),
+            status_area,
+        );
+    }
 }
 
 fn draw_providers(frame: &mut Frame<'_>, providers: &[ProviderSummary], selected: usize) {
@@ -1380,8 +1454,13 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
         return;
     }
 
+    let header_height = if frame.area().width >= 82 && frame.area().height >= 30 {
+        7
+    } else {
+        3
+    };
     let [header, body, footer] = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(header_height),
         Constraint::Min(7),
         Constraint::Length(3),
     ])
@@ -1742,8 +1821,8 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_running_version_and_animated_icons() {
-        let backend = TestBackend::new(80, 5);
+    fn header_shows_running_version_and_animated_rainbow_logo() {
+        let backend = TestBackend::new(110, 7);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| draw_header(frame, frame.area(), 0))
@@ -1755,22 +1834,31 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(first.contains("🦀"));
-        assert!(first.contains("Joocode"));
-        assert!(first.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
-        assert!(first.contains("ONLINE"));
-
-        terminal
-            .draw(|frame| draw_header(frame, frame.area(), 1))
-            .unwrap();
-        let second = terminal
+        let first_colors = terminal
             .backend()
             .buffer()
             .content()
             .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(second.contains("🌴"));
+            .take(45)
+            .map(|cell| cell.fg)
+            .collect::<Vec<_>>();
+        assert!(first.contains("/ /___"));
+        assert!(first.contains("/ /_/ /"));
+        assert!(first.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
+        assert!(first.contains("ONLINE"));
+
+        terminal
+            .draw(|frame| draw_header(frame, frame.area(), 2))
+            .unwrap();
+        let second_colors = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .take(45)
+            .map(|cell| cell.fg)
+            .collect::<Vec<_>>();
+        assert_ne!(first_colors, second_colors);
     }
 
     #[test]
