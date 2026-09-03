@@ -1454,7 +1454,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
         return;
     }
 
-    let header_height = if frame.area().width >= 82 && frame.area().height >= 30 {
+    let header_height = if frame.area().width >= 82 && frame.area().height >= 22 {
         7
     } else {
         3
@@ -1999,6 +1999,39 @@ mod tests {
         assert!(rendered.contains("http://127.0.0.1:10123/v1"));
         assert!(rendered.contains("KEY"));
         assert!(rendered.contains("any non-empty value"));
+    }
+
+    #[test]
+    fn wide_dashboard_keeps_ascii_logo_on_shorter_terminals() {
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = DashboardData {
+            config_sources: vec!["OpenCode".into()],
+            ide_targets: vec!["Codex".into()],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 30,
+            provider_count: 5,
+            autostart: AutoStartStatus::Off,
+            run_in_background: true,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
+            providers: vec![],
+            port_warning: None,
+        };
+
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Dashboard))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("/ /___"));
+        assert!(rendered.contains("\\____/\\____/"));
     }
 
     #[test]
