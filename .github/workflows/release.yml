@@ -26,15 +26,14 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
       - name: Verify tag matches Cargo version
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
-          test "$RELEASE_TAG" = "v$cargo_version" || {
-            echo "Tag $RELEASE_TAG does not match Cargo version v$cargo_version" >&2
-            exit 1
-          }
+        run: cargo xtask verify-tag "$RELEASE_TAG"
 
   build:
     name: Build ${{ matrix.target }}
@@ -149,6 +148,12 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -160,12 +165,10 @@ jobs:
         run: sha256sum joocode-* > SHA256SUMS
 
       - name: Generate Homebrew formula
-        run: |
-          python3 scripts/generate-homebrew-formula.py "${RELEASE_TAG}" dist/SHA256SUMS
-          mv joocode.rb dist/joocode.rb
+        run: cargo xtask homebrew-formula "$RELEASE_TAG" dist/SHA256SUMS --output dist/joocode.rb
 
       - name: Generate release notes
-        run: python3 scripts/generate-release-notes.py "$RELEASE_TAG" RELEASE_NOTES.md
+        run: cargo xtask release-notes "$RELEASE_TAG" RELEASE_NOTES.md
 
       - name: Publish release
         env:
@@ -191,6 +194,14 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
 
+      - name: Install Rust
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        uses: Swatinem/rust-cache@v2
+
       - name: Download release checksums
         if: env.HOMEBREW_TAP_TOKEN != ''
         env:
@@ -201,7 +212,7 @@ jobs:
 
       - name: Generate formula
         if: env.HOMEBREW_TAP_TOKEN != ''
-        run: python3 scripts/generate-homebrew-formula.py "$RELEASE_TAG" dist/SHA256SUMS
+        run: cargo xtask homebrew-formula "$RELEASE_TAG" dist/SHA256SUMS
 
       - name: Publish formula to tap
         if: env.HOMEBREW_TAP_TOKEN != ''

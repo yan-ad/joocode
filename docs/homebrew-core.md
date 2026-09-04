@@ -12,7 +12,7 @@ This document is only a maintainer checklist for enabling the tap later.
 3. Generate the formula from the release checksums:
 
    ```bash
-   python3 scripts/generate-homebrew-formula.py vX.Y.Z SHA256SUMS
+   cargo xtask homebrew-formula vX.Y.Z SHA256SUMS
    ```
 
 4. Test the formula locally:

@@ -26,17 +26,8 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Run tests
-        run: cargo test --all-features --locked
-
-      - name: Build release binary
-        run: cargo build --release --locked
+      - name: Run native CI gate
+        run: cargo xtask check
 
       - name: Check Homebrew formula generator
         run: |
@@ -45,8 +36,9 @@ jobs:
           printf '%064d  joocode-x86_64-apple-darwin.tar.gz\n' 2 >> /tmp/joocode-formula/SHA256SUMS
           printf '%064d  joocode-aarch64-unknown-linux-gnu.tar.gz\n' 3 >> /tmp/joocode-formula/SHA256SUMS
           printf '%064d  joocode-x86_64-unknown-linux-gnu.tar.gz\n' 4 >> /tmp/joocode-formula/SHA256SUMS
+           cargo xtask homebrew-formula v0.1.0 /tmp/joocode-formula/SHA256SUMS \
+             --output /tmp/joocode-formula/joocode.rb
            cd /tmp/joocode-formula
-           python3 "$GITHUB_WORKSPACE/scripts/generate-homebrew-formula.py" v0.1.0 SHA256SUMS >/dev/null
            ruby -c joocode.rb
            grep -F '=> "jcx"' joocode.rb
            grep -F '=> "joocode"' joocode.rb
@@ -55,7 +47,7 @@ jobs:
         run: |
           latest_tag="$(git tag --sort=-version:refname | head -n1)"
           test -n "$latest_tag"
-          python3 scripts/generate-release-notes.py "$latest_tag" /tmp/RELEASE_NOTES.md
+          cargo xtask release-notes "$latest_tag" /tmp/RELEASE_NOTES.md
           grep -F "# Joocode $latest_tag" /tmp/RELEASE_NOTES.md
           grep -F "## What's changed" /tmp/RELEASE_NOTES.md
           grep -F "## Full changelog" /tmp/RELEASE_NOTES.md

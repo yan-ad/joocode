@@ -616,18 +616,26 @@ sources and desktop targets to be added independently.
 From a clean and synchronized `main`:
 
 ```bash
-make release
+cargo xtask release
 ```
 
-The target bumps the patch version by default, updates Cargo metadata, runs
+The native Rust release task bumps the patch version by default, updates Cargo metadata, runs
 locked format/Clippy/tests/build checks, commits, creates an annotated tag, and
 pushes both `main` and the tag.
 
 ```bash
-make release BUMP=minor
-make release BUMP=major
-make release VERSION=1.2.3
-make release DRY_RUN=1
+cargo xtask release --bump minor
+cargo xtask release --bump major
+cargo xtask release --version 1.2.3
+cargo xtask release --dry-run
+```
+
+Other repository tooling is native Rust as well:
+
+```bash
+cargo xtask check
+cargo xtask release-notes v1.2.3 RELEASE_NOTES.md
+cargo xtask homebrew-formula v1.2.3 SHA256SUMS
 ```
 
 Release CI builds Linux, macOS, and Windows archives and publishes checksums plus
