@@ -51,9 +51,9 @@ impl DesktopTargets {
             github_copilot_app: copilot_app::installed(),
             zed: zed_installed(),
             jetbrains: jetbrains_installed(),
-            antigravity: command_exists("agy")
-                || command_exists("antigravity")
-                || application_exists(&["Antigravity.app"]),
+            // Antigravity is detectable, but its model picker comes from the
+            // private Cloud Code API and cannot be configured natively.
+            antigravity: false,
             claude_code: command_exists("claude") || application_exists(&["Claude.app"]),
             grok_build: command_exists("grok")
                 || application_exists(&["Grok.app", "Grok Build.app"]),
@@ -67,7 +67,7 @@ impl DesktopTargets {
             github_copilot_app: true,
             zed: true,
             jetbrains: true,
-            antigravity: true,
+            antigravity: false,
             claude_code: true,
             grok_build: true,
         }
@@ -76,7 +76,7 @@ impl DesktopTargets {
     pub fn with_preferences(mut self, preferences: &TargetPreferences) -> Self {
         for target in ProxyTarget::ALL {
             if let Some(enabled) = preferences.override_for(target) {
-                self.set(target, enabled);
+                self.set(target, enabled && target.can_auto_configure());
             }
         }
         self
@@ -169,10 +169,11 @@ pub fn configure_target(
         (ProxyTarget::ClaudeCode, true) => claude::install(registry, base_url).map(|_| ()),
         (ProxyTarget::ClaudeCode, false) => claude::uninstall(),
         // JetBrains stores the credential in its managed credential store.
-        // Antigravity does not expose a stable third-party gateway contract,
-        // and Claude Code needs the Anthropic Messages surface. Persist their
-        // opt-in state now without writing unsafe or incomplete configuration.
-        (ProxyTarget::JetBrains | ProxyTarget::Antigravity, _) => Ok(()),
+        (ProxyTarget::JetBrains, _) => Ok(()),
+        (ProxyTarget::Antigravity, true) => anyhow::bail!(
+            "Antigravity does not expose a native custom-provider API. Its model picker is supplied by Google's internal Cloud Code service, so adding Joocode models requires an explicit, reversible app.asar patch. Joocode will not modify the signed Antigravity application silently."
+        ),
+        (ProxyTarget::Antigravity, false) => Ok(()),
     }
 }
 
@@ -321,9 +322,33 @@ mod tests {
     }
 
     #[test]
-    fn all_supported_enables_every_target() {
+    fn all_supported_excludes_patch_only_targets() {
         let targets = DesktopTargets::all_supported();
         assert!(targets.codex && targets.github_copilot_app && targets.zed && targets.jetbrains);
-        assert!(targets.antigravity && targets.claude_code && targets.grok_build);
+        assert!(!targets.antigravity);
+        assert!(targets.claude_code && targets.grok_build);
+    }
+
+    #[test]
+    fn saved_antigravity_override_cannot_enable_unsupported_target() {
+        let mut preferences = TargetPreferences::default();
+        preferences.proxy_to.insert(ProxyTarget::Antigravity, true);
+
+        let targets = DesktopTargets::default().with_preferences(&preferences);
+
+        assert!(!targets.antigravity);
+    }
+
+    #[test]
+    fn antigravity_configuration_explains_patch_requirement() {
+        let error = configure_target(
+            &Registry::default(),
+            "http://127.0.0.1:10100/v1",
+            ProxyTarget::Antigravity,
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("app.asar patch"));
     }
 }

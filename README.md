@@ -51,7 +51,7 @@ into Codex, GitHub Copilot App, Zed, JetBrains, Claude Code, or Grok Build. Star
   Copilot, Antigravity Gemini API-key mode, and Joocode's own flat
   OpenAI-compatible provider file.
 - **Desktop-aware** — detects installed Codex, GitHub Copilot App, Zed,
-  JetBrains, Claude Code, Antigravity, and Grok Build clients and
+  JetBrains, Claude Code, and Grok Build clients and
   prepares only the integrations present on the machine.
 - **One native process** — a single Rust binary, one shared proxy, no Node/Bun
   runtime and no browser dashboard required.
@@ -169,7 +169,7 @@ OpenCodex / OCX ─┤
 OCX profiles ────┤
 Hermes ──────────┤                    ┌─ Codex Responses API
 GitHub Copilot ──┤                    ├─ GitHub Copilot App BYOK
-Antigravity ─────┼─► Joocode proxy ───┼─ Zed / JetBrains OpenAI-compatible
+Antigravity Gemini┼─► Joocode proxy ───┼─ Zed / JetBrains OpenAI-compatible
 providers.json ──┘                    ├─ Claude Code Messages API
                                       └─ Grok Build custom models
 ```
@@ -201,7 +201,7 @@ across upstream client releases. They are not uptime guarantees.
 | Claude Code | **85%** | Anthropic Messages gateway, model discovery, JSON/SSE and tools |
 | JetBrains | **80%** | OpenAI-compatible endpoint; credential stays in the IDE-managed store |
 | Grok Build | **90%** | Writes/removes Joocode custom models in `~/.grok/config.toml` |
-| Antigravity | **40% target / 70% source** | Official Gemini API-key source supported; custom proxy target remains experimental |
+| Antigravity | **Not native / 70% source** | Official Gemini API-key source supported; custom target requires an explicit app patch |
 
 Press `/` in the dashboard to open the configuration modal:
 
@@ -222,7 +222,7 @@ Proxy to
   Codex                      (On/Off)
   GitHub Copilot App         (On/Off)
   JetBrains                  (On/Off)
-  Antigravity                (On/Off · experimental)
+  Antigravity                (Off · patch required)
   Zed                        (On/Off)
   Claude Code                (On/Off · experimental)
   Grok Build                 (On/Off)

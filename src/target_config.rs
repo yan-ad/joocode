@@ -47,10 +47,14 @@ impl ProxyTarget {
     pub const fn support_note(self) -> Option<&'static str> {
         match self {
             Self::JetBrains => Some("manual credential"),
-            Self::Antigravity => Some("experimental"),
+            Self::Antigravity => Some("patch required"),
             Self::ClaudeCode => Some("experimental"),
             Self::Codex | Self::GitHubCopilotApp | Self::Zed | Self::GrokBuild => None,
         }
+    }
+
+    pub const fn can_auto_configure(self) -> bool {
+        !matches!(self, Self::Antigravity)
     }
 }
 
