@@ -327,7 +327,7 @@ mod tests {
     fn all_supported_includes_antigravity_patch_target() {
         let targets = DesktopTargets::all_supported();
         assert!(targets.codex && targets.github_copilot_app && targets.zed && targets.jetbrains);
-        assert!(targets.antigravity);
+        assert_eq!(targets.antigravity, cfg!(target_os = "macos"));
         assert!(targets.claude_code && targets.grok_build);
     }
 
@@ -338,6 +338,6 @@ mod tests {
 
         let targets = DesktopTargets::default().with_preferences(&preferences);
 
-        assert!(targets.antigravity);
+        assert_eq!(targets.antigravity, cfg!(target_os = "macos"));
     }
 }
