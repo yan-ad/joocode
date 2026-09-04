@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, process::Command};
 
 use crate::{
-    claude, codex, grok,
+    claude, codex, copilot_app, grok,
     provider::Registry,
     target_config::{ProxyTarget, TargetPreferences},
     zed,
@@ -10,6 +10,7 @@ use crate::{
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DesktopTargets {
     pub codex: bool,
+    pub github_copilot_app: bool,
     pub zed: bool,
     pub jetbrains: bool,
     pub antigravity: bool,
@@ -47,6 +48,7 @@ impl DesktopTargets {
     pub fn detect() -> Self {
         let detected = Self {
             codex: command_exists("codex") || application_exists(&["Codex.app"]),
+            github_copilot_app: copilot_app::installed(),
             zed: zed_installed(),
             jetbrains: jetbrains_installed(),
             antigravity: command_exists("agy")
@@ -62,6 +64,7 @@ impl DesktopTargets {
     pub fn all_supported() -> Self {
         Self {
             codex: true,
+            github_copilot_app: true,
             zed: true,
             jetbrains: true,
             antigravity: true,
@@ -82,6 +85,7 @@ impl DesktopTargets {
     pub fn enabled(&self, target: ProxyTarget) -> bool {
         match target {
             ProxyTarget::Codex => self.codex,
+            ProxyTarget::GitHubCopilotApp => self.github_copilot_app,
             ProxyTarget::JetBrains => self.jetbrains,
             ProxyTarget::Antigravity => self.antigravity,
             ProxyTarget::Zed => self.zed,
@@ -93,6 +97,7 @@ impl DesktopTargets {
     pub fn set(&mut self, target: ProxyTarget, enabled: bool) {
         match target {
             ProxyTarget::Codex => self.codex = enabled,
+            ProxyTarget::GitHubCopilotApp => self.github_copilot_app = enabled,
             ProxyTarget::JetBrains => self.jetbrains = enabled,
             ProxyTarget::Antigravity => self.antigravity = enabled,
             ProxyTarget::Zed => self.zed = enabled,
@@ -105,6 +110,9 @@ impl DesktopTargets {
         let mut names = Vec::new();
         if self.codex {
             names.push("Codex");
+        }
+        if self.github_copilot_app {
+            names.push("GitHub Copilot App");
         }
         if self.zed {
             names.push("Zed");
@@ -129,6 +137,9 @@ pub fn configure_detected(registry: &Registry, base_url: &str, targets: &Desktop
     if targets.codex {
         let _ = codex::install(registry, base_url);
     }
+    if targets.github_copilot_app {
+        let _ = copilot_app::install(registry, base_url);
+    }
     if targets.zed {
         let _ = zed::install(registry, base_url);
     }
@@ -149,6 +160,8 @@ pub fn configure_target(
     match (target, enabled) {
         (ProxyTarget::Codex, true) => codex::install(registry, base_url).map(|_| ()),
         (ProxyTarget::Codex, false) => codex::uninstall(),
+        (ProxyTarget::GitHubCopilotApp, true) => copilot_app::install(registry, base_url),
+        (ProxyTarget::GitHubCopilotApp, false) => copilot_app::uninstall(),
         (ProxyTarget::Zed, true) => zed::install(registry, base_url).map(|_| ()),
         (ProxyTarget::Zed, false) => zed::uninstall(),
         (ProxyTarget::GrokBuild, true) => grok::install(registry, base_url).map(|_| ()),
@@ -286,6 +299,7 @@ mod tests {
     fn target_names_are_stable_and_ordered() {
         let targets = DesktopTargets {
             codex: true,
+            github_copilot_app: true,
             zed: true,
             jetbrains: true,
             antigravity: true,
@@ -296,6 +310,7 @@ mod tests {
             targets.names(),
             vec![
                 "Codex",
+                "GitHub Copilot App",
                 "Zed",
                 "JetBrains",
                 "Antigravity",
@@ -308,7 +323,7 @@ mod tests {
     #[test]
     fn all_supported_enables_every_target() {
         let targets = DesktopTargets::all_supported();
-        assert!(targets.codex && targets.zed && targets.jetbrains);
+        assert!(targets.codex && targets.github_copilot_app && targets.zed && targets.jetbrains);
         assert!(targets.antigravity && targets.claude_code && targets.grok_build);
     }
 }

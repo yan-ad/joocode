@@ -13,6 +13,7 @@ use crate::sources::SourceKind;
 #[serde(rename_all = "snake_case")]
 pub enum ProxyTarget {
     Codex,
+    GitHubCopilotApp,
     JetBrains,
     Antigravity,
     Zed,
@@ -21,8 +22,9 @@ pub enum ProxyTarget {
 }
 
 impl ProxyTarget {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Codex,
+        Self::GitHubCopilotApp,
         Self::JetBrains,
         Self::Antigravity,
         Self::Zed,
@@ -33,6 +35,7 @@ impl ProxyTarget {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
+            Self::GitHubCopilotApp => "GitHub Copilot App",
             Self::JetBrains => "JetBrains",
             Self::Antigravity => "Antigravity",
             Self::Zed => "Zed",
@@ -46,7 +49,7 @@ impl ProxyTarget {
             Self::JetBrains => Some("manual credential"),
             Self::Antigravity => Some("experimental"),
             Self::ClaudeCode => Some("experimental"),
-            Self::Codex | Self::Zed | Self::GrokBuild => None,
+            Self::Codex | Self::GitHubCopilotApp | Self::Zed | Self::GrokBuild => None,
         }
     }
 }
@@ -206,6 +209,7 @@ mod tests {
             ProxyTarget::ALL.map(ProxyTarget::label),
             [
                 "Codex",
+                "GitHub Copilot App",
                 "JetBrains",
                 "Antigravity",
                 "Zed",

@@ -2,7 +2,7 @@
 <h3 align="center">your AI configs, everywhere.</h3>
 
 <p align="center"><b>The OCX idea, supercharged as one fast native Rust binary.</b><br>
-Reuse OpenCode, CrabCode, OCX, Hermes, Copilot, Antigravity Gemini, and OpenAI-compatible providers inside Codex, Zed, JetBrains, Claude Code, and Grok Build.</p>
+Reuse OpenCode, CrabCode, OCX, Hermes, Copilot, Antigravity Gemini, and OpenAI-compatible providers inside Codex, GitHub Copilot App, Zed, JetBrains, Claude Code, and Grok Build.</p>
 
 <p align="center">
   <img src="assets/joocode-icon.png" alt="Joocode palm and crab logo" width="180">
@@ -28,7 +28,7 @@ jcx
 ◈ Joocode
 
 ◆ Config: OpenCode, Joocode
-⌘ IDE Target: Codex, Zed, JetBrains, Claude Code, Grok Build
+⌘ IDE Target: Codex, GitHub Copilot App, Zed, JetBrains, Claude Code, Grok Build
 ● Listening: http://127.0.0.1:10100
 ● OpenAI Compatible: http://127.0.0.1:10100/v1
 
@@ -43,15 +43,15 @@ already have, wire installed desktop clients automatically, and keep the whole
 runtime small enough to disappear into the background.**
 
 No second provider dashboard is required. No upstream key needs to be copied
-into Codex, Zed, JetBrains, Claude Code, or Grok Build. Start `jcx` and keep using the native client UI.
+into Codex, GitHub Copilot App, Zed, JetBrains, Claude Code, or Grok Build. Start `jcx` and keep using the native client UI.
 
 ## Why Joocode?
 
 - **Config-first** — discovers OpenCode, OCX profiles, Hermes Agent, GitHub
   Copilot, Antigravity Gemini API-key mode, and Joocode's own flat
   OpenAI-compatible provider file.
-- **Desktop-aware** — detects installed Codex, Zed, JetBrains, Claude Code,
-  Antigravity, and Grok Build clients and
+- **Desktop-aware** — detects installed Codex, GitHub Copilot App, Zed,
+  JetBrains, Claude Code, Antigravity, and Grok Build clients and
   prepares only the integrations present on the machine.
 - **One native process** — a single Rust binary, one shared proxy, no Node/Bun
   runtime and no browser dashboard required.
@@ -168,9 +168,10 @@ OpenCode ────────┐
 OpenCodex / OCX ─┤
 OCX profiles ────┤
 Hermes ──────────┤                    ┌─ Codex Responses API
-GitHub Copilot ──┤                    ├─ Zed / JetBrains OpenAI-compatible
-Antigravity ─────┼─► Joocode proxy ───┼─ Claude Code Messages API
-providers.json ──┘                    └─ Grok Build custom models
+GitHub Copilot ──┤                    ├─ GitHub Copilot App BYOK
+Antigravity ─────┼─► Joocode proxy ───┼─ Zed / JetBrains OpenAI-compatible
+providers.json ──┘                    ├─ Claude Code Messages API
+                                      └─ Grok Build custom models
 ```
 
 Joocode builds one source-aware model registry, exposes it through
@@ -195,6 +196,7 @@ across upstream client releases. They are not uptime guarantees.
 | Target | Probability | Current behavior |
 | --- | ---: | --- |
 | Codex | **98%** | Full catalog and Responses API integration |
+| GitHub Copilot App | **90%** | Automatic BYOK provider/model sync through its local database and OS credential store |
 | Zed | **95%** | Full OpenAI-compatible model catalog and local credential registration |
 | Claude Code | **85%** | Anthropic Messages gateway, model discovery, JSON/SSE and tools |
 | JetBrains | **80%** | OpenAI-compatible endpoint; credential stays in the IDE-managed store |
@@ -218,6 +220,7 @@ Detected Providers
 
 Proxy to
   Codex                      (On/Off)
+  GitHub Copilot App         (On/Off)
   JetBrains                  (On/Off)
   Antigravity                (On/Off · experimental)
   Zed                        (On/Off)
@@ -474,6 +477,19 @@ default model remain unchanged. Restart Zed once after the first install or mode
 catalog sync. When a Joocode default model is selected, Zed's commit-message
 generator is also configured with Conventional Commits 1.0.0 instructions while
 preserving any existing custom commit instructions.
+
+### GitHub Copilot App
+
+When the GitHub Copilot App is installed and has been opened at least once,
+automatic desktop mode creates a **Joocode** BYOK provider and synchronizes the
+complete discovered model catalog. The app's built-in GitHub Copilot provider,
+other custom endpoints, accounts, sessions, and selected model remain untouched.
+
+Joocode stores only the local placeholder `joocode-local` in the operating
+system credential store. Upstream provider credentials remain in their original
+OpenCode, CrabCode, OCX, Hermes, Copilot, or Joocode provider configuration.
+Restart the GitHub Copilot App after the first sync or after adding/removing
+models so its in-memory model catalog reloads.
 
 ### JetBrains AI Assistant
 

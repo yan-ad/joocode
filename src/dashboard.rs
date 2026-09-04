@@ -2285,6 +2285,7 @@ mod tests {
             "CrabCode",
             "Proxy to",
             "Codex",
+            "GitHub Copilot App",
             "JetBrains",
             "Antigravity",
             "Zed",

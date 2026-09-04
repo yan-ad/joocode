@@ -4,6 +4,7 @@ mod claude;
 mod cli;
 mod codex;
 mod config;
+mod copilot_app;
 mod dashboard;
 mod desktop;
 mod error;
