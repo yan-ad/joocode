@@ -2,7 +2,7 @@
 <h3 align="center">your AI configs, everywhere.</h3>
 
 <p align="center"><b>The OCX idea, supercharged as one fast native Rust binary.</b><br>
-Reuse OpenCode, CrabCode, OCX, Hermes, Copilot, Antigravity Gemini, and OpenAI-compatible providers inside Codex, GitHub Copilot App, Zed, JetBrains, Claude Code, and Grok Build.</p>
+Reuse OpenCode, CrabCode, OCX, Hermes, Copilot, Antigravity Gemini, and OpenAI-compatible providers inside Codex, GitHub Copilot App, Antigravity, Zed, JetBrains, Claude Code, and Grok Build.</p>
 
 <p align="center">
   <img src="assets/joocode-icon.png" alt="Joocode palm and crab logo" width="180">
@@ -28,7 +28,7 @@ jcx
 ◈ Joocode
 
 ◆ Config: OpenCode, Joocode
-⌘ IDE Target: Codex, GitHub Copilot App, Zed, JetBrains, Claude Code, Grok Build
+⌘ IDE Target: Codex, GitHub Copilot App, Antigravity, Zed, JetBrains, Claude Code, Grok Build
 ● Listening: http://127.0.0.1:10100
 ● OpenAI Compatible: http://127.0.0.1:10100/v1
 
@@ -43,7 +43,7 @@ already have, wire installed desktop clients automatically, and keep the whole
 runtime small enough to disappear into the background.**
 
 No second provider dashboard is required. No upstream key needs to be copied
-into Codex, GitHub Copilot App, Zed, JetBrains, Claude Code, or Grok Build. Start `jcx` and keep using the native client UI.
+into Codex, GitHub Copilot App, Antigravity, Zed, JetBrains, Claude Code, or Grok Build. Start `jcx` and keep using the native client UI.
 
 ## Why Joocode?
 
@@ -201,7 +201,7 @@ across upstream client releases. They are not uptime guarantees.
 | Claude Code | **85%** | Anthropic Messages gateway, model discovery, JSON/SSE and tools |
 | JetBrains | **80%** | OpenAI-compatible endpoint; credential stays in the IDE-managed store |
 | Grok Build | **90%** | Writes/removes Joocode custom models in `~/.grok/config.toml` |
-| Antigravity | **Not native / 70% source** | Official Gemini API-key source supported; custom target requires an explicit app patch |
+| Antigravity | **80% on macOS 2.12.x / 70% source** | Official Gemini source plus an opt-in, reversible patched app clone for custom Joocode models |
 
 Press `/` in the dashboard to open the configuration modal:
 
@@ -222,7 +222,7 @@ Proxy to
   Codex                      (On/Off)
   GitHub Copilot App         (On/Off)
   JetBrains                  (On/Off)
-  Antigravity                (Off · patch required)
+  Antigravity                (On/Off · patched app)
   Zed                        (On/Off)
   Claude Code                (On/Off · experimental)
   Grok Build                 (On/Off)
@@ -490,6 +490,30 @@ system credential store. Upstream provider credentials remain in their original
 OpenCode, CrabCode, OCX, Hermes, Copilot, or Joocode provider configuration.
 Restart the GitHub Copilot App after the first sync or after adding/removing
 models so its in-memory model catalog reloads.
+
+### Antigravity
+
+Antigravity's model picker is backed by Google's internal Cloud Code protocol,
+not a public OpenAI-compatible provider setting. Joocode therefore uses an
+explicit, reversible integration inspired by Antigravity manager projects:
+
+```bash
+jcx antigravity patch
+jcx antigravity status
+jcx antigravity restore
+```
+
+On macOS, `patch` creates `~/Applications/Antigravity Joocode.app` from the
+installed Google application, changes only the language-server API endpoints to
+the local Joocode bridge, updates ASAR integrity metadata, and ad-hoc signs the
+copy. Google's original `/Applications/Antigravity.app` remains untouched.
+Open **Antigravity Joocode** after patching; its model picker merges built-in
+models with the complete Joocode catalog. Toggle **Antigravity** under
+`/ Config → Proxy to` to install or remove the patched app.
+
+Quit Antigravity before patching. Antigravity updates may require running
+`jcx antigravity patch` again. The bridge preserves native Google requests and
+only translates models whose IDs belong to the Joocode registry.
 
 ### JetBrains AI Assistant
 

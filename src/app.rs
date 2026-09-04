@@ -5,15 +5,26 @@ use std::{
     time::Duration,
 };
 
+async fn antigravity_bridge(
+    State(state): State<AppState>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    body: AxumBytes,
+) -> Result<Response, ApiError> {
+    let registry = state.registry.snapshot();
+    antigravity::handle(&registry, method, uri, headers, body).await
+}
+
 use anyhow::Context;
 use async_stream::stream;
 use axum::{
     Json, Router,
-    body::Body,
-    extract::State,
-    http::{HeaderMap, StatusCode, header},
+    body::{Body, Bytes as AxumBytes},
+    extract::{OriginalUri, State},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use bytes::Bytes;
 use futures_util::{Stream, TryStreamExt};
@@ -24,7 +35,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
 use crate::{
-    autostart,
+    antigravity, autostart,
     dashboard::{self, DashboardData},
     desktop::{self, DesktopTargets},
     error::ApiError,
@@ -662,6 +673,15 @@ async fn prepare_server(
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/messages/count_tokens", post(anthropic_count_tokens))
+        .route("/v1internal:fetchAvailableModels", post(antigravity_bridge))
+        .route("/v1internal:generateContent", post(antigravity_bridge))
+        .route(
+            "/v1internal:streamGenerateContent",
+            post(antigravity_bridge),
+        )
+        .route("/v1internal:{*path}", any(antigravity_bridge))
+        .route("/v1beta/models", get(antigravity_bridge))
+        .route("/v1beta/{*path}", any(antigravity_bridge))
         .with_state(AppState { registry })
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());

@@ -1,3 +1,4 @@
+mod antigravity;
 mod app;
 mod autostart;
 mod claude;
@@ -21,7 +22,7 @@ mod zed;
 
 use anyhow::Context;
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{AntigravityCommand, Cli, Command};
 use desktop::DesktopTargets;
 use provider::Registry;
 use sources::SourceSelection;
@@ -45,6 +46,23 @@ pub async fn run() -> anyhow::Result<()> {
     if matches!(cli.command, Some(Command::Start)) {
         autostart::start()?;
         println!("Joocode background proxy started.");
+        return Ok(());
+    }
+    if let Some(Command::Antigravity { command }) = &cli.command {
+        match command {
+            AntigravityCommand::Patch { base_url } => {
+                let app = antigravity::install(base_url)?;
+                println!("Installed {}", app.display());
+                println!("Quit the original Antigravity app, then open Antigravity Joocode.");
+            }
+            AntigravityCommand::Status { base_url } => {
+                println!("{}", antigravity::status(base_url)?.render());
+            }
+            AntigravityCommand::Restore => {
+                antigravity::restore()?;
+                println!("Removed the Antigravity Joocode patched application.");
+            }
+        }
         return Ok(());
     }
     if matches!(cli.command, Some(Command::Stop)) {
@@ -126,6 +144,9 @@ pub async fn run() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Upgrade { .. } => unreachable!("upgrade is handled before config discovery"),
+        Command::Antigravity { .. } => {
+            unreachable!("Antigravity commands are handled before config discovery")
+        }
         Command::Start | Command::Stop => {
             unreachable!("background lifecycle commands are handled before config discovery")
         }

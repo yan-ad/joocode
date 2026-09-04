@@ -119,6 +119,26 @@ mod tests {
             Some(Command::Stop)
         ));
     }
+
+    #[test]
+    fn accepts_antigravity_patch_commands() {
+        assert!(matches!(
+            Cli::try_parse_from(["jcx", "antigravity", "patch"])
+                .unwrap()
+                .command,
+            Some(Command::Antigravity {
+                command: AntigravityCommand::Patch { .. }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["jcx", "antigravity", "status"])
+                .unwrap()
+                .command,
+            Some(Command::Antigravity {
+                command: AntigravityCommand::Status { .. }
+            })
+        ));
+    }
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -150,4 +170,27 @@ pub enum Command {
         #[arg(long)]
         version: Option<String>,
     },
+    /// Manage the reversible Antigravity Joocode app bridge.
+    Antigravity {
+        #[command(subcommand)]
+        command: AntigravityCommand,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum AntigravityCommand {
+    /// Create the patched Antigravity Joocode application.
+    Patch {
+        /// URL where Antigravity can reach Joocode.
+        #[arg(long, default_value = "http://127.0.0.1:10100/v1")]
+        base_url: String,
+    },
+    /// Show whether the Antigravity bridge is installed and current.
+    Status {
+        /// URL expected by the patched application.
+        #[arg(long, default_value = "http://127.0.0.1:10100/v1")]
+        base_url: String,
+    },
+    /// Remove the patched application and keep Google's original untouched.
+    Restore,
 }

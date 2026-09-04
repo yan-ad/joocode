@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, process::Command};
 
 use crate::{
-    claude, codex, copilot_app, grok,
+    antigravity, claude, codex, copilot_app, grok,
     provider::Registry,
     target_config::{ProxyTarget, TargetPreferences},
     zed,
@@ -51,9 +51,10 @@ impl DesktopTargets {
             github_copilot_app: copilot_app::installed(),
             zed: zed_installed(),
             jetbrains: jetbrains_installed(),
-            // Antigravity is detectable, but its model picker comes from the
-            // private Cloud Code API and cannot be configured natively.
-            antigravity: false,
+            // Antigravity requires an explicit app clone/patch. Detect an
+            // existing patched app, but never create the 400+ MiB clone just
+            // because Google's original application is installed.
+            antigravity: antigravity::patch_installed(),
             claude_code: command_exists("claude") || application_exists(&["Claude.app"]),
             grok_build: command_exists("grok")
                 || application_exists(&["Grok.app", "Grok Build.app"]),
@@ -67,7 +68,7 @@ impl DesktopTargets {
             github_copilot_app: true,
             zed: true,
             jetbrains: true,
-            antigravity: false,
+            antigravity: cfg!(target_os = "macos"),
             claude_code: true,
             grok_build: true,
         }
@@ -149,6 +150,9 @@ pub fn configure_detected(registry: &Registry, base_url: &str, targets: &Desktop
     if targets.claude_code {
         let _ = claude::install(registry, base_url);
     }
+    if targets.antigravity {
+        let _ = antigravity::install(base_url);
+    }
 }
 
 pub fn configure_target(
@@ -170,10 +174,8 @@ pub fn configure_target(
         (ProxyTarget::ClaudeCode, false) => claude::uninstall(),
         // JetBrains stores the credential in its managed credential store.
         (ProxyTarget::JetBrains, _) => Ok(()),
-        (ProxyTarget::Antigravity, true) => anyhow::bail!(
-            "Antigravity does not expose a native custom-provider API. Its model picker is supplied by Google's internal Cloud Code service, so adding Joocode models requires an explicit, reversible app.asar patch. Joocode will not modify the signed Antigravity application silently."
-        ),
-        (ProxyTarget::Antigravity, false) => Ok(()),
+        (ProxyTarget::Antigravity, true) => antigravity::install(base_url).map(|_| ()),
+        (ProxyTarget::Antigravity, false) => antigravity::restore(),
     }
 }
 
@@ -322,33 +324,20 @@ mod tests {
     }
 
     #[test]
-    fn all_supported_excludes_patch_only_targets() {
+    fn all_supported_includes_antigravity_patch_target() {
         let targets = DesktopTargets::all_supported();
         assert!(targets.codex && targets.github_copilot_app && targets.zed && targets.jetbrains);
-        assert!(!targets.antigravity);
+        assert!(targets.antigravity);
         assert!(targets.claude_code && targets.grok_build);
     }
 
     #[test]
-    fn saved_antigravity_override_cannot_enable_unsupported_target() {
+    fn saved_antigravity_override_enables_patch_target() {
         let mut preferences = TargetPreferences::default();
         preferences.proxy_to.insert(ProxyTarget::Antigravity, true);
 
         let targets = DesktopTargets::default().with_preferences(&preferences);
 
-        assert!(!targets.antigravity);
-    }
-
-    #[test]
-    fn antigravity_configuration_explains_patch_requirement() {
-        let error = configure_target(
-            &Registry::default(),
-            "http://127.0.0.1:10100/v1",
-            ProxyTarget::Antigravity,
-            true,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("app.asar patch"));
+        assert!(targets.antigravity);
     }
 }
