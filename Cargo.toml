@@ -5,7 +5,7 @@ resolver = "2"
 
 [package]
 name = "joocode"
-version = "0.1.21"
+version = "0.1.22"
 edition = "2024"
 default-run = "jcx"
 description = "Minimal native bridge that exposes models from OpenCode, OCX, Hermes, and GitHub Copilot to desktop AI clients"
