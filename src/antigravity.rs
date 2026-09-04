@@ -2,8 +2,11 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
 };
+
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
 
 use anyhow::{Context, ensure};
 use axum::{
@@ -23,6 +26,7 @@ const CLOUD_CODE_API: &str = "https://daily-cloudcode-pa.googleapis.com";
 const OFFICIAL_GOOGLE_LITERAL: &str = "'https://generativelanguage.googleapis.com'";
 const OFFICIAL_CLOUD_LITERAL: &str = "'https://daily-cloudcode-pa.googleapis.com'";
 const PATCHED_APP_NAME: &str = "Antigravity Joocode.app";
+#[cfg(target_os = "macos")]
 const OFFICIAL_APP_NAME: &str = "Antigravity.app";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
