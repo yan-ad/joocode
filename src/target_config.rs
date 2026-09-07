@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -66,6 +66,55 @@ pub struct TargetPreferences {
     pub proxy_to: BTreeMap<ProxyTarget, bool>,
     #[serde(default)]
     pub detected_providers: BTreeMap<String, bool>,
+    #[serde(default)]
+    pub disabled_models: BTreeSet<String>,
+    #[serde(default)]
+    pub subagent_catalog: SubagentCatalogPolicy,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SubagentCatalogPolicy {
+    #[serde(default)]
+    pub featured_models: Vec<String>,
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
+    #[serde(default = "default_subagent_max_entries")]
+    pub max_entries: usize,
+}
+
+const fn default_subagent_max_entries() -> usize {
+    12
+}
+
+impl Default for SubagentCatalogPolicy {
+    fn default() -> Self {
+        Self {
+            featured_models: Vec::new(),
+            fallback_models: Vec::new(),
+            max_entries: default_subagent_max_entries(),
+        }
+    }
+}
+
+impl SubagentCatalogPolicy {
+    pub fn resolve(
+        &self,
+        models: &[crate::provider::ModelInfo],
+    ) -> Vec<crate::provider::ModelInfo> {
+        let by_id = models
+            .iter()
+            .map(|model| (model.id.as_str(), model))
+            .collect::<BTreeMap<_, _>>();
+        let mut seen = BTreeSet::new();
+        self.featured_models
+            .iter()
+            .chain(&self.fallback_models)
+            .filter_map(|id| by_id.get(id.as_str()).copied())
+            .filter(|model| seen.insert(model.id.as_str()))
+            .take(self.max_entries)
+            .cloned()
+            .collect()
+    }
 }
 
 const fn default_run_in_background() -> bool {
@@ -78,6 +127,8 @@ impl Default for TargetPreferences {
             run_in_background: true,
             proxy_to: BTreeMap::new(),
             detected_providers: BTreeMap::new(),
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: SubagentCatalogPolicy::default(),
         }
     }
 }
@@ -117,6 +168,22 @@ impl TargetPreferences {
         preferences
             .detected_providers
             .insert(source.key().to_owned(), enabled);
+        save_to(&path, &preferences)?;
+        Ok(preferences)
+    }
+
+    pub fn set_disabled_models(disabled_models: BTreeSet<String>) -> anyhow::Result<Self> {
+        let path = path()?;
+        let mut preferences = load_from(&path)?;
+        preferences.disabled_models = disabled_models;
+        save_to(&path, &preferences)?;
+        Ok(preferences)
+    }
+
+    pub fn set_subagent_catalog(policy: SubagentCatalogPolicy) -> anyhow::Result<Self> {
+        let path = path()?;
+        let mut preferences = load_from(&path)?;
+        preferences.subagent_catalog = policy;
         save_to(&path, &preferences)?;
         Ok(preferences)
     }
@@ -187,6 +254,12 @@ mod tests {
         preferences
             .detected_providers
             .insert(SourceKind::OpenCode.key().into(), false);
+        preferences.disabled_models.insert("demo/hidden".into());
+        preferences.subagent_catalog = SubagentCatalogPolicy {
+            featured_models: vec!["demo/featured".into()],
+            fallback_models: vec!["demo/fallback".into()],
+            max_entries: 2,
+        };
         save_to(&path, &preferences).unwrap();
 
         let loaded = load_from(&path).unwrap();
@@ -196,6 +269,10 @@ mod tests {
         assert_eq!(loaded.override_for(ProxyTarget::Zed), None);
         assert_eq!(loaded.source_override(SourceKind::OpenCode), Some(false));
         assert_eq!(loaded.source_override(SourceKind::CrabCode), None);
+        assert!(loaded.disabled_models.contains("demo/hidden"));
+        assert_eq!(loaded.subagent_catalog.featured_models, ["demo/featured"]);
+        assert_eq!(loaded.subagent_catalog.fallback_models, ["demo/fallback"]);
+        assert_eq!(loaded.subagent_catalog.max_entries, 2);
     }
 
     #[test]
@@ -221,5 +298,29 @@ mod tests {
                 "Grok Build",
             ]
         );
+    }
+
+    #[test]
+    fn subagent_catalog_keeps_configured_order_and_valid_models() {
+        let model = |id: &str| crate::provider::ModelInfo {
+            id: id.into(),
+            provider: "fixture".into(),
+            upstream_id: id.into(),
+            name: id.into(),
+            reasoning: false,
+            context_window: None,
+            max_output_tokens: None,
+        };
+        let policy = SubagentCatalogPolicy {
+            featured_models: vec!["b".into(), "missing".into(), "a".into()],
+            fallback_models: vec!["a".into(), "c".into()],
+            max_entries: 3,
+        };
+        let ids = policy
+            .resolve(&[model("a"), model("b"), model("c")])
+            .into_iter()
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["b", "a", "c"]);
     }
 }

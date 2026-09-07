@@ -80,7 +80,28 @@ impl ComboRoute {
 pub enum Credential {
     None,
     Bearer(String),
+    BearerPool(Arc<BearerPool>),
     Copilot(CopilotCredential),
+}
+
+#[derive(Debug)]
+pub struct BearerPool {
+    keys: Vec<String>,
+    cursor: AtomicU64,
+}
+
+impl BearerPool {
+    pub fn new(keys: Vec<String>) -> Option<Self> {
+        (!keys.is_empty()).then(|| Self {
+            keys,
+            cursor: AtomicU64::new(0),
+        })
+    }
+
+    fn next(&self) -> &str {
+        let index = self.cursor.fetch_add(1, Ordering::Relaxed) as usize % self.keys.len();
+        &self.keys[index]
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -188,6 +209,7 @@ impl Provider {
         match &self.credential {
             Credential::None => {}
             Credential::Bearer(token) => insert_bearer(&mut headers, token)?,
+            Credential::BearerPool(pool) => insert_bearer(&mut headers, pool.next())?,
             Credential::Copilot(credential) => {
                 let (token, discovered_base_url) = credential.exchange(client).await?;
                 insert_bearer(&mut headers, &token)?;
@@ -243,7 +265,8 @@ impl Registry {
             .user_agent(concat!("joocode/", env!("CARGO_PKG_VERSION")))
             .build()?;
         let catalog = crate::sources::load_opencode_catalog("opencode", None, paths);
-        Self::from_catalogs(client, vec![catalog])
+        let disabled = crate::target_config::TargetPreferences::load()?.disabled_models;
+        Self::from_catalogs_with_disabled(client, vec![catalog], &disabled)
     }
 
     pub async fn discover(selection: &SourceSelection) -> anyhow::Result<Self> {
@@ -251,7 +274,8 @@ impl Registry {
             .user_agent(concat!("joocode/", env!("CARGO_PKG_VERSION")))
             .build()?;
         let catalogs = crate::sources::discover(selection, &client).await;
-        Self::from_catalogs(client, catalogs)
+        let disabled = crate::target_config::TargetPreferences::load()?.disabled_models;
+        Self::from_catalogs_with_disabled(client, catalogs, &disabled)
     }
 
     #[cfg(test)]
@@ -260,21 +284,48 @@ impl Registry {
         catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
         combos: Vec<crate::combo::Combo>,
     ) -> anyhow::Result<Self> {
-        Self::from_catalogs_and_combos(client, catalogs, Ok(combos))
+        Self::from_catalogs_combos_and_disabled(
+            client,
+            catalogs,
+            Ok(combos),
+            &std::collections::BTreeSet::new(),
+        )
     }
 
     fn from_catalogs(
         client: Client,
         catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
     ) -> anyhow::Result<Self> {
+        Self::from_catalogs_with_disabled(client, catalogs, &std::collections::BTreeSet::new())
+    }
+
+    fn from_catalogs_with_disabled(
+        client: Client,
+        catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
+        disabled_models: &std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<Self> {
         let combos = crate::combo::load();
-        Self::from_catalogs_and_combos(client, catalogs, combos)
+        Self::from_catalogs_combos_and_disabled(client, catalogs, combos, disabled_models)
     }
 
     fn from_catalogs_and_combos(
         client: Client,
         catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
         configured_combos: anyhow::Result<Vec<crate::combo::Combo>>,
+    ) -> anyhow::Result<Self> {
+        Self::from_catalogs_combos_and_disabled(
+            client,
+            catalogs,
+            configured_combos,
+            &std::collections::BTreeSet::new(),
+        )
+    }
+
+    fn from_catalogs_combos_and_disabled(
+        client: Client,
+        catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
+        configured_combos: anyhow::Result<Vec<crate::combo::Combo>>,
+        disabled_models: &std::collections::BTreeSet<String>,
     ) -> anyhow::Result<Self> {
         let mut providers = BTreeMap::new();
         let mut routes = BTreeMap::new();
@@ -288,10 +339,14 @@ impl Registry {
                     let model_count = catalog
                         .providers
                         .iter()
-                        .map(|provider| provider.models.len())
-                        .sum();
+                        .flat_map(|provider| &provider.models)
+                        .filter(|model| !disabled_models.contains(&model.info.id))
+                        .count();
                     for discovered in catalog.providers {
                         for model in discovered.models {
+                            if disabled_models.contains(&model.info.id) {
+                                continue;
+                            }
                             if routes.contains_key(&model.info.id) {
                                 continue;
                             }
@@ -363,6 +418,9 @@ impl Registry {
                         continue;
                     }
                     let id = format!("combo/{}", combo.name);
+                    if disabled_models.contains(&id) {
+                        continue;
+                    }
                     combos.insert(
                         id.clone(),
                         ComboRoute {
@@ -643,5 +701,71 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(primaries, vec!["a", "a", "a", "b", "a", "a", "a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn bearer_pool_rotates_round_robin() {
+        let provider = Provider {
+            base_url: "https://example.test/v1".into(),
+            credential: Credential::BearerPool(Arc::new(
+                BearerPool::new(vec!["a".into(), "b".into()]).unwrap(),
+            )),
+            headers: HeaderMap::new(),
+        };
+        let mut values = Vec::new();
+        for _ in 0..4 {
+            let (_, headers) = provider.request_parts(&Client::new()).await.unwrap();
+            values.push(headers["authorization"].to_str().unwrap().to_owned());
+        }
+        assert_eq!(values, ["Bearer a", "Bearer b", "Bearer a", "Bearer b"]);
+    }
+
+    #[test]
+    fn exact_disabled_model_ids_are_filtered() {
+        let discovered = |id: &str| DiscoveredModel {
+            info: ModelInfo {
+                id: id.into(),
+                provider: "fixture".into(),
+                upstream_id: id.into(),
+                name: id.into(),
+                reasoning: false,
+                context_window: None,
+                max_output_tokens: None,
+            },
+        };
+        let catalog = DiscoveredCatalog {
+            source: "fixture".into(),
+            detail: None,
+            providers: vec![DiscoveredProvider {
+                key: "fixture".into(),
+                provider: Provider {
+                    base_url: "https://example.test/v1".into(),
+                    credential: Credential::None,
+                    headers: HeaderMap::new(),
+                },
+                models: vec![
+                    discovered("provider/model"),
+                    discovered("provider/model-extra"),
+                ],
+            }],
+        };
+        let disabled = std::collections::BTreeSet::from(["provider/model".to_owned()]);
+        let registry = Registry::from_catalogs_combos_and_disabled(
+            Client::new(),
+            vec![Ok(catalog)],
+            Ok(Vec::new()),
+            &disabled,
+        )
+        .unwrap();
+        assert!(registry.resolve("provider/model").is_err());
+        assert!(registry.resolve("provider/model-extra").is_ok());
+        assert_eq!(
+            registry
+                .models()
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider/model-extra"]
+        );
     }
 }

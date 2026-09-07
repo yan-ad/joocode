@@ -9,7 +9,10 @@ use serde_json::Value;
 pub struct LocalProvider {
     pub name: String,
     pub base_url: String,
+    #[serde(default)]
     pub api_key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_keys: Vec<String>,
     pub models: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
@@ -50,6 +53,20 @@ pub struct ProviderSummary {
 }
 
 impl LocalProvider {
+    pub fn api_keys(&self) -> Vec<String> {
+        let mut keys = self
+            .api_keys
+            .iter()
+            .map(|key| key.trim())
+            .filter(|key| !key.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !self.api_key.trim().is_empty() && !keys.iter().any(|key| key == self.api_key.trim()) {
+            keys.insert(0, self.api_key.trim().to_owned());
+        }
+        keys
+    }
+
     pub fn summary(&self) -> ProviderSummary {
         ProviderSummary {
             name: self.name.clone(),
@@ -119,6 +136,7 @@ pub async fn probe(
         name: provider_name(&base_url)?,
         base_url,
         api_key: api_key.trim().to_owned(),
+        api_keys: Vec::new(),
         models,
         default_model: None,
     })
@@ -310,6 +328,7 @@ mod tests {
             name: "local".into(),
             base_url: "http://localhost:1234/v1".into(),
             api_key: "secret".into(),
+            api_keys: Vec::new(),
             models: vec!["model-a".into()],
             default_model: None,
         }];
@@ -317,6 +336,22 @@ mod tests {
         let loaded = load_from(&path).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].models, vec!["model-a"]);
+    }
+
+    #[test]
+    fn accepts_legacy_api_key_and_new_key_pool() {
+        let legacy: LocalProvider = serde_json::from_value(serde_json::json!({
+            "name":"legacy", "base_url":"https://example.test/v1", "api_key":"one", "models":["m"]
+        }))
+        .unwrap();
+        assert_eq!(legacy.api_keys(), vec!["one"]);
+
+        let pooled: LocalProvider = serde_json::from_value(serde_json::json!({
+            "name":"pool", "base_url":"https://example.test/v1", "api_keys":["secret-alpha", "secret-beta"], "models":["m"]
+        })).unwrap();
+        assert_eq!(pooled.api_keys(), vec!["secret-alpha", "secret-beta"]);
+        let summary = format!("{:?}", pooled.summary());
+        assert!(!summary.contains("secret-alpha") && !summary.contains("secret-beta"));
     }
 
     #[test]
@@ -328,6 +363,7 @@ mod tests {
                 name: "gunamaya".into(),
                 base_url: "https://gunamaya.id/v1".into(),
                 api_key: "secret-a".into(),
+                api_keys: Vec::new(),
                 models: vec!["model-a".into()],
                 default_model: None,
             },
@@ -335,6 +371,7 @@ mod tests {
                 name: "openai".into(),
                 base_url: "https://api.openai.com/v1".into(),
                 api_key: "secret-b".into(),
+                api_keys: Vec::new(),
                 models: vec!["model-b".into()],
                 default_model: None,
             },
@@ -356,6 +393,7 @@ mod tests {
                 name: "gunamaya".into(),
                 base_url: "https://gunamaya.id/v1".into(),
                 api_key: "secret-a".into(),
+                api_keys: Vec::new(),
                 models: vec!["gpt-5.5".into()],
                 default_model: None,
             },
@@ -363,6 +401,7 @@ mod tests {
                 name: "openai".into(),
                 base_url: "https://api.openai.com/v1".into(),
                 api_key: "secret-b".into(),
+                api_keys: Vec::new(),
                 models: vec!["gpt-5.4".into()],
                 default_model: Some("gpt-5.4".into()),
             },

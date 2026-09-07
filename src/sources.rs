@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::{
     config::{self, AuthEntry, ConfigPaths, ModelConfig},
     local_config,
-    provider::{CopilotCredential, Credential, ModelInfo, Provider},
+    provider::{BearerPool, CopilotCredential, Credential, ModelInfo, Provider},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, ValueEnum)]
@@ -618,6 +618,7 @@ fn discover_joocode() -> anyhow::Result<DiscoveredCatalog> {
         .into_iter()
         .map(|configured| {
             let public_provider = format!("joocode/{}", configured.name);
+            let api_keys = configured.api_keys();
             let models = configured
                 .models
                 .iter()
@@ -627,10 +628,9 @@ fn discover_joocode() -> anyhow::Result<DiscoveredCatalog> {
                 key: format!("joocode:{}", configured.name),
                 provider: Provider {
                     base_url: configured.base_url,
-                    credential: if configured.api_key.is_empty() {
-                        Credential::None
-                    } else {
-                        Credential::Bearer(configured.api_key)
+                    credential: match BearerPool::new(api_keys) {
+                        Some(pool) => Credential::BearerPool(std::sync::Arc::new(pool)),
+                        None => Credential::None,
                     },
                     headers: HeaderMap::new(),
                 },
