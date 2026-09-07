@@ -16,6 +16,30 @@ fn gemini_operation(uri: &axum::http::Uri) -> Option<(&str, bool)> {
         return None;
     }
 
+    pub async fn wait_until_ready(base_url: &str, timeout: Duration) -> anyhow::Result<()> {
+        let root = base_url
+            .trim_end_matches('/')
+            .strip_suffix("/v1")
+            .unwrap_or_else(|| base_url.trim_end_matches('/'));
+        let url = format!("{root}/readyz");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(500))
+            .build()?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(response) = client.get(&url).send().await
+                && response.status().is_success()
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("Joocode did not become ready at {url} within {timeout:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     match operation {
         "generateContent" => Some((model, false)),
         "streamGenerateContent" => Some((model, true)),
@@ -2556,8 +2580,8 @@ async fn prepare_server(
             Ok(PreparedServer::Ready {
                 listener,
                 app,
-                metrics,
-                upstream_runtime: policy.upstream_runtime.clone(),
+                metrics: Box::new(metrics),
+                upstream_runtime: Box::new(policy.upstream_runtime.clone()),
                 address,
                 port_warning,
             })
@@ -2654,8 +2678,8 @@ enum PreparedServer {
         app: Router,
         address: SocketAddr,
         port_warning: Option<String>,
-        metrics: Metrics,
-        upstream_runtime: upstream::Runtime,
+        metrics: Box<Metrics>,
+        upstream_runtime: Box<upstream::Runtime>,
     },
     ExistingJoocode,
 }

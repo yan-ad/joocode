@@ -159,6 +159,15 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn accepts_codex_shim_arguments() {
+        let cli = Cli::try_parse_from(["jcx", "codex", "--", "--model", "demo/model"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Codex { args, .. }) if args == ["--model", "demo/model"]
+        ));
+    }
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -201,6 +210,15 @@ pub enum Command {
         /// URL where Codex can reach the local Responses API.
         #[arg(long, default_value = "http://127.0.0.1:10100/v1")]
         base_url: String,
+    },
+    /// Ensure Joocode is running, synchronize Codex, then launch Codex.
+    Codex {
+        /// URL where Codex can reach the Joocode Responses API.
+        #[arg(long, default_value = "http://127.0.0.1:10100/v1")]
+        base_url: String,
+        /// Arguments passed directly to Codex.
+        #[arg(last = true, trailing_var_arg = true)]
+        args: Vec<String>,
     },
     /// Upgrade Joocode from a checksummed GitHub release.
     Upgrade {

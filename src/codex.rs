@@ -5,6 +5,32 @@ use std::{
     process::Command,
 };
 
+pub fn launch(args: &[String]) -> anyhow::Result<()> {
+    let executable = std::env::var_os("JOOCODE_CODEX_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("codex"));
+    let mut command = Command::new(&executable);
+    command.args(args);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = command.exec();
+        Err(error).with_context(|| format!("failed to launch {}", executable.display()))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = command
+            .status()
+            .with_context(|| format!("failed to launch {}", executable.display()))?;
+        if !status.success() {
+            bail!("Codex exited with status {status}");
+        }
+        Ok(())
+    }
+}
+
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
 use sha2::Digest;

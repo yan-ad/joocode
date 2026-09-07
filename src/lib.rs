@@ -51,6 +51,16 @@ pub async fn run() -> anyhow::Result<()> {
         println!("Joocode background proxy started.");
         return Ok(());
     }
+    if let Some(Command::Codex { base_url, args }) = &cli.command {
+        autostart::start()?;
+        app::wait_until_ready(base_url, std::time::Duration::from_secs(10)).await?;
+        let selection = SourceSelection::new(cli.sources, cli.config, cli.auth)?;
+        let registry = Registry::discover(&selection)
+            .await
+            .context("failed to discover model providers")?;
+        codex::install(&registry, base_url)?;
+        return codex::launch(args);
+    }
     if let Some(Command::Stats { url, token }) = &cli.command {
         return app::stats(url, token.as_deref()).await;
     }
@@ -64,6 +74,7 @@ pub async fn run() -> anyhow::Result<()> {
                 println!("Installed {}", app.display());
                 println!("Quit the original Antigravity app, then open Antigravity Joocode.");
             }
+            Command::Codex { .. } => unreachable!("Codex shim is handled before config discovery"),
             AntigravityCommand::Status { base_url } => {
                 println!("{}", antigravity::status(base_url)?.render());
             }
