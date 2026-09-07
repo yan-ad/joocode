@@ -44,7 +44,7 @@ Joocode should not become:
 | Readiness endpoint | Yes | Yes, `/readyz` | Complete |
 | Request body limits | Yes | Yes, configurable | Complete |
 | Stream stall/idle timeout | Yes | Yes, configurable incomplete semantics | Complete |
-| Integration ownership journal | Yes | Merge-preserving writes, no formal journal | P0 |
+| Integration ownership journal | Yes | Foundation shipped for Zed; more targets pending | P0 |
 | Credential/API-key pools | Yes | One credential route per discovered provider | P2 |
 | Multi-account OAuth pools | Yes | Limited source-specific support | P2 |
 | Native Anthropic upstream | Yes | Mostly translated through Chat Completions | P3 |

@@ -3,7 +3,7 @@ use std::{env, fs, path::PathBuf};
 use anyhow::Context;
 use serde_json::{Map, Value, json};
 
-use crate::provider::Registry;
+use crate::{integration_journal, provider::Registry};
 
 fn settings_path() -> anyhow::Result<PathBuf> {
     if let Some(path) = env::var_os("ZED_SETTINGS_PATH").filter(|value| !value.is_empty()) {
@@ -171,6 +171,7 @@ pub fn uninstall() -> anyhow::Result<()> {
     let text = fs::read_to_string(&path)?;
     let mut root: Value = json5::from_str(&text)
         .with_context(|| format!("invalid Zed settings JSONC at {}", path.display()))?;
+    integration_journal::assert_unchanged("zed", &path, &managed_state(&root))?;
     #[cfg(target_os = "windows")]
     let local_api_url = root
         .pointer("/language_models/openai_compatible/joocode/api_url")
@@ -186,6 +187,7 @@ pub fn uninstall() -> anyhow::Result<()> {
     }
     remove_commit_instructions(&mut root);
     fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&root)?))?;
+    integration_journal::remove("zed")?;
     #[cfg(target_os = "windows")]
     if let Some(base_url) = local_api_url {
         remove_local_api_key(&base_url);
@@ -193,11 +195,33 @@ pub fn uninstall() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(not(test))]
 fn install_at(
     registry: &Registry,
     base_url: &str,
     path: PathBuf,
     default_model: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    install_at_with_journal(registry, base_url, path, default_model, None)
+}
+
+#[cfg(test)]
+fn install_at(
+    registry: &Registry,
+    base_url: &str,
+    path: PathBuf,
+    default_model: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let journal = path.with_extension("integration-journal.json");
+    install_at_with_journal(registry, base_url, path, default_model, Some(&journal))
+}
+
+fn install_at_with_journal(
+    registry: &Registry,
+    base_url: &str,
+    path: PathBuf,
+    default_model: Option<&str>,
+    journal_path: Option<&std::path::Path>,
 ) -> anyhow::Result<PathBuf> {
     let mut root = match fs::read_to_string(&path) {
         Ok(text) if !text.trim().is_empty() => json5::from_str::<Value>(&text)
@@ -208,6 +232,16 @@ fn install_at(
             return Err(error).with_context(|| format!("failed reading {}", path.display()));
         }
     };
+    if let Some(journal_path) = journal_path {
+        integration_journal::assert_unchanged_at(
+            journal_path,
+            "zed",
+            &path,
+            &managed_state(&root),
+        )?;
+    } else {
+        integration_journal::assert_unchanged("zed", &path, &managed_state(&root))?;
+    }
     let root = root
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("Zed settings root must be an object"))?;
@@ -262,7 +296,37 @@ fn install_at(
     fs::create_dir_all(parent).with_context(|| format!("failed creating {}", parent.display()))?;
     let content = format!("{}\n", serde_json::to_string_pretty(&root)?);
     fs::write(&path, content).with_context(|| format!("failed writing {}", path.display()))?;
+    let written: Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+    if let Some(journal_path) = journal_path {
+        integration_journal::record_at(journal_path, "zed", &path, &managed_state(&written))?;
+    } else {
+        integration_journal::record("zed", &path, &managed_state(&written))?;
+    }
     Ok(path)
+}
+
+fn managed_state(root: &Value) -> Value {
+    let selection = |key: &str| {
+        root.pointer(&format!("/agent/{key}"))
+            .filter(|value| value.get("provider").and_then(Value::as_str) == Some(PROVIDER_ID))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let instructions = root
+        .pointer("/agent/commit_message_instructions")
+        .and_then(Value::as_str)
+        .filter(|value| value.contains(COMMIT_INSTRUCTIONS_START))
+        .map(|_| Value::String(CONVENTIONAL_COMMITS_INSTRUCTIONS.into()))
+        .unwrap_or(Value::Null);
+    json!({
+        "provider": root
+            .pointer("/language_models/openai_compatible/joocode")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "default_model": selection("default_model"),
+        "commit_message_model": selection("commit_message_model"),
+        "commit_message_instructions": instructions
+    })
 }
 
 fn object_at<'a>(
@@ -491,5 +555,57 @@ mod tests {
                 .iter()
                 .any(|model| model["name"] == "hermes/gpt-fast")
         );
+    }
+
+    #[test]
+    fn refuses_external_changes_to_managed_zed_settings() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("opencode.jsonc");
+        let auth = dir.path().join("auth.json");
+        let settings = dir.path().join("zed/settings.json");
+        let journal = dir.path().join("integrations.json");
+        fs::write(
+            &config,
+            r#"{ provider: { demo: { options: { baseURL: "https://upstream.test/v1" }, models: { fast: {} } } } }"#,
+        )
+        .unwrap();
+        fs::write(&auth, "{}").unwrap();
+        let registry = Registry::load(&ConfigPaths { config, auth }).unwrap();
+        install_at_with_journal(
+            &registry,
+            "http://127.0.0.1:10100/v1",
+            settings.clone(),
+            None,
+            Some(&journal),
+        )
+        .unwrap();
+
+        let mut root: Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        root["theme"] = Value::String("Ayu".into());
+        fs::write(&settings, serde_json::to_vec_pretty(&root).unwrap()).unwrap();
+        install_at_with_journal(
+            &registry,
+            "http://127.0.0.1:10100/v1",
+            settings.clone(),
+            None,
+            Some(&journal),
+        )
+        .unwrap();
+
+        let mut root: Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        root["language_models"]["openai_compatible"]["joocode"]["api_url"] =
+            Value::String("http://changed.example/v1".into());
+        fs::write(&settings, serde_json::to_vec_pretty(&root).unwrap()).unwrap();
+        let error = install_at_with_journal(
+            &registry,
+            "http://127.0.0.1:10100/v1",
+            settings,
+            None,
+            Some(&journal),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("changed outside Joocode"));
     }
 }

@@ -524,6 +524,11 @@ catalog sync. When a Joocode default model is selected, Zed's commit-message
 generator is also configured with Conventional Commits 1.0.0 instructions while
 preserving any existing custom commit instructions.
 
+Joocode fingerprints the Zed fields it owns in
+`~/.local/state/joocode/integrations.json`. Unrelated Zed settings can still be
+edited freely. If Joocode's own provider or default-model fields are changed
+externally, the next sync reports a conflict instead of overwriting them.
+
 ### GitHub Copilot App
 
 When the GitHub Copilot App is installed and has been opened at least once,
