@@ -1653,6 +1653,7 @@ mod tests {
             })],
             vec![Combo {
                 name: "coding".into(),
+                strategy: crate::combo::Strategy::Failover,
                 models: vec!["first/model-a".into(), "second/model-b".into()],
             }],
         )
