@@ -74,7 +74,6 @@ pub async fn run() -> anyhow::Result<()> {
                 println!("Installed {}", app.display());
                 println!("Quit the original Antigravity app, then open Antigravity Joocode.");
             }
-            Command::Codex { .. } => unreachable!("Codex shim is handled before config discovery"),
             AntigravityCommand::Status { base_url } => {
                 println!("{}", antigravity::status(base_url)?.render());
             }
@@ -166,6 +165,7 @@ pub async fn run() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Upgrade { .. } => unreachable!("upgrade is handled before config discovery"),
+        Command::Codex { .. } => unreachable!("Codex shim is handled before config discovery"),
         Command::Antigravity { .. } => {
             unreachable!("Antigravity commands are handled before config discovery")
         }
