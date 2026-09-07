@@ -90,12 +90,16 @@ fn draw_provider_models(frame: &mut Frame<'_>, provider: &ProviderSummary, selec
     draw_modal_scrollbar(frame, modal.content, provider.models.len(), selected);
 }
 
-const MODAL_BACKGROUND: Color = Color::Rgb(24, 42, 59);
-const MODAL_OVERLAY: Color = Color::Rgb(13, 17, 19);
-const MODAL_ACCENT: Color = Color::Rgb(62, 139, 255);
-const PANEL_BACKGROUND: Color = Color::Rgb(19, 25, 28);
-const PANEL_BORDER: Color = Color::Rgb(48, 61, 66);
-const MUTED_TEXT: Color = Color::Rgb(120, 132, 136);
+// Named ANSI colours deliberately avoid true-colour escape sequences. Some
+// terminals advertise colour support inconsistently and render RGB values as
+// solid magenta/green surfaces. The ANSI palette remains readable across
+// Terminal.app, iTerm2, Windows Terminal, tmux, SSH, and 16-colour terminals.
+const MODAL_BACKGROUND: Color = Color::Black;
+const MODAL_OVERLAY: Color = Color::Reset;
+const MODAL_ACCENT: Color = Color::LightBlue;
+const PANEL_BACKGROUND: Color = Color::Black;
+const PANEL_BORDER: Color = Color::DarkGray;
+const MUTED_TEXT: Color = Color::Gray;
 
 #[derive(Clone, Copy)]
 struct ModalAreas {
@@ -185,7 +189,7 @@ fn draw_modal_scrollbar(frame: &mut Frame<'_>, area: Rect, content_length: usize
             .track_symbol(Some("│"))
             .begin_symbol(None)
             .end_symbol(None)
-            .style(Style::default().fg(Color::Rgb(39, 71, 96)))
+            .style(Style::default().fg(Color::DarkGray))
             .thumb_style(Style::default().fg(Color::Gray)),
         area,
         &mut state,
@@ -208,13 +212,13 @@ const JOOCODE_LOGO: [&str; 5] = [
 ];
 
 const HEADER_RAINBOW: [Color; 7] = [
-    Color::Rgb(255, 88, 116),
-    Color::Rgb(255, 151, 76),
-    Color::Rgb(255, 218, 92),
-    Color::Rgb(87, 214, 141),
-    Color::Rgb(73, 184, 255),
-    Color::Rgb(126, 128, 255),
-    Color::Rgb(205, 105, 255),
+    Color::LightRed,
+    Color::LightYellow,
+    Color::Yellow,
+    Color::LightGreen,
+    Color::LightCyan,
+    Color::LightBlue,
+    Color::LightMagenta,
 ];
 
 fn rainbow_logo_line(line: &str, row: usize, tick: usize) -> Line<'static> {
@@ -260,7 +264,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: usize) {
             .block(
                 Block::default()
                     .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(Color::Rgb(52, 65, 70))),
+                    .border_style(Style::default().fg(Color::DarkGray)),
             ),
             area,
         );
@@ -289,7 +293,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: usize) {
         .block(
             Block::default()
                 .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(Color::Rgb(52, 65, 70))),
+                .border_style(Style::default().fg(Color::DarkGray)),
         ),
         logo_area,
     );
@@ -302,7 +306,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: usize) {
                     " LOCAL AI ROUTER ",
                     Style::default()
                         .fg(Color::Black)
-                        .bg(Color::Rgb(91, 208, 200))
+                        .bg(Color::LightCyan)
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
@@ -320,7 +324,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: usize) {
             .block(
                 Block::default()
                     .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(Color::Rgb(52, 65, 70))),
+                    .border_style(Style::default().fg(Color::DarkGray)),
             ),
             status_area,
         );
@@ -482,12 +486,12 @@ fn draw_update_animation(frame: &mut Frame<'_>, tag: &str, tick: usize) {
     frame.render_widget(Clear, area);
 
     let palette = [
-        Color::Rgb(255, 75, 118),
-        Color::Rgb(255, 154, 72),
-        Color::Rgb(255, 226, 89),
-        Color::Rgb(75, 216, 146),
-        Color::Rgb(72, 177, 255),
-        Color::Rgb(154, 112, 255),
+        Color::LightRed,
+        Color::LightYellow,
+        Color::Yellow,
+        Color::LightGreen,
+        Color::LightCyan,
+        Color::LightMagenta,
     ];
     let sparkles = [' ', ' ', ' ', '·', '✦', '⋆'];
     let background = (0..area.height)
@@ -567,7 +571,7 @@ fn draw_update_animation(frame: &mut Frame<'_>, tag: &str, tick: usize) {
                         .fg(Color::LightMagenta)
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(Color::Rgb(15, 18, 28)))
+                .style(Style::default().bg(Color::Black))
                 .borders(Borders::ALL),
         ),
         popup,
@@ -838,12 +842,12 @@ fn draw_easter_egg(frame: &mut Frame<'_>, tick: usize) {
     frame.render_widget(Clear, area);
 
     let palette = [
-        Color::Rgb(255, 72, 120),
-        Color::Rgb(255, 145, 64),
-        Color::Rgb(255, 221, 74),
-        Color::Rgb(73, 211, 137),
-        Color::Rgb(73, 174, 255),
-        Color::Rgb(145, 105, 255),
+        Color::LightRed,
+        Color::LightYellow,
+        Color::Yellow,
+        Color::LightGreen,
+        Color::LightCyan,
+        Color::LightMagenta,
     ];
     let rain = ['│', '╎', '✦', '·'];
     let background = (0..area.height)
@@ -942,7 +946,7 @@ fn draw_easter_egg(frame: &mut Frame<'_>, tick: usize) {
                         .fg(Color::LightMagenta)
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(Color::Rgb(15, 18, 28)))
+                .style(Style::default().bg(Color::Black))
                 .borders(Borders::ALL),
         )
         .wrap(Wrap { trim: true }),
@@ -1576,7 +1580,7 @@ fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &Das
     let openai_compatible = format!("{}/v1", data.listening.trim_end_matches('/'));
     let canvas = area.inner(Margin::new(1, 0));
     frame.render_widget(
-        Block::default().style(Style::default().bg(Color::Rgb(15, 19, 21))),
+        Block::default().style(Style::default().bg(Color::Reset)),
         area,
     );
 
