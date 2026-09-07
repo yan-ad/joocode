@@ -50,7 +50,7 @@ does not send synthetic probe requests:
 
 ◉ Models: 30    ◇ Providers: 5
 
-Esc to exit  ·  Tab Providers  ·  / Config
+Esc to exit  ·  2 Providers  ·  / Config
 ```
 
 Joocode takes the universal local-proxy idea behind projects such as OCX and
@@ -71,9 +71,9 @@ into Codex, GitHub Copilot App, Antigravity, Zed, JetBrains, Claude Code, or Gro
   prepares only the integrations present on the machine.
 - **One native process** — a single Rust binary, one shared proxy, no Node/Bun
   runtime and no browser dashboard required.
-- **Provider manager** — press `Tab` to browse saved providers, add a new
-  OpenAI-compatible endpoint in a modal, or remove the selected provider. The
-  catalog reloads without restarting Joocode.
+- **Unified provider control plane** — page 2 combines detected sources, custom
+  OpenAI-compatible providers, API-key pools, and virtual combos. Toggle routes
+  or build failover strategies without editing configuration files.
 - **Optional background proxy** — press `/` and toggle **Run in background** to
   choose whether closing the dashboard hands the proxy to a supervised service or
   releases the port immediately. **Auto-start after login/restart** independently
@@ -226,14 +226,6 @@ Setting
   Auto-start after login/restart (On/Off)
   Run in background              (On/Off)
 
-Detected Providers
-  OpenCode                    (On/Off)
-  CrabCode                    (On/Off)
-  OpenCodex                   (On/Off)
-  Hermes                      (On/Off)
-  GitHub Copilot              (On/Off)
-  Antigravity                 (On/Off)
-
 Proxy to
   Codex                      (On/Off)
   GitHub Copilot App         (On/Off)
@@ -244,10 +236,10 @@ Proxy to
   Grok Build                 (On/Off)
 ```
 
-Navigate with `↑/↓` and press `Space` to toggle. Detected-provider changes reload
-the model registry and desktop catalogs immediately. Preferences are stored in
-`~/.config/joocode/settings.json`; explicit `--source` flags override the saved
-detected-provider choices for scripting.
+Navigate with `↑/↓` and press `Space` to toggle. Provider-source controls have
+moved to page **2 Providers**. Preferences are stored in
+`~/.config/joocode/settings.json`; explicit `--source` flags override saved
+provider choices for scripting.
 
 ## Run Joocode
 
@@ -280,10 +272,12 @@ so behind trusted network controls.
 
 ## Manage OpenAI-compatible providers
 
-Press `Tab` in the dashboard:
+Open page **2 Providers** in the dashboard. It contains detected sources, custom
+providers, and combos in one list:
 
-- Use `↑` and `↓` to select a saved provider.
-- Press `Enter` to open the new-provider modal.
+- Use `↑` and `↓` to select any source, provider, or combo.
+- Press `Space` to toggle it On or Off.
+- Press `n` to open the new-provider modal.
 - Press `Del` to remove the selected provider.
 - Press `\\` to select its default model. Joocode syncs that model to Zed's
   default chat model and commit-message generator. Generated commit messages
@@ -318,9 +312,16 @@ The flat JSON format is deliberately simple:
 The running registry and detected desktop catalogs reload automatically. Override
 the path with `JOOCODE_PROVIDERS=/custom/providers.json`.
 
-## Failover combos
+## Interactive combos
 
-Create virtual models that try multiple routed models in order:
+Press `c` from page **2 Providers** to open the Combo Builder:
+
+1. Enter a combo name.
+2. Choose **Failover**, **Weighted round-robin**, or **Lowest latency**.
+3. Select models with `Space`; use `←/→` to change weights or priority order.
+4. Review and save. The virtual model appears immediately as `combo/name`.
+
+The JSON file remains available as an advanced/manual interface:
 
 ```text
 ~/.config/joocode/combos.json
@@ -366,9 +367,9 @@ Override the file with `JOOCODE_COMBOS=/custom/combos.json`.
 
 ## Provider discovery
 
-All detected sources are enabled by default. Disable individual sources from
-`/ Config` → **Detected Providers**, or restrict one invocation with repeated or
-comma-separated `--source` values:
+All detected sources are enabled by default. Toggle individual sources from page
+**2 Providers**, or restrict one invocation with repeated or comma-separated
+`--source` values:
 
 ```bash
 jcx --source opencode,crabcode,hermes models

@@ -67,6 +67,8 @@ pub struct TargetPreferences {
     #[serde(default)]
     pub detected_providers: BTreeMap<String, bool>,
     #[serde(default)]
+    pub disabled_local_providers: BTreeSet<String>,
+    #[serde(default)]
     pub disabled_models: BTreeSet<String>,
     #[serde(default)]
     pub subagent_catalog: SubagentCatalogPolicy,
@@ -157,6 +159,7 @@ impl Default for TargetPreferences {
             run_in_background: true,
             proxy_to: BTreeMap::new(),
             detected_providers: BTreeMap::new(),
+            disabled_local_providers: BTreeSet::new(),
             disabled_models: BTreeSet::new(),
             subagent_catalog: SubagentCatalogPolicy::default(),
         }
@@ -176,6 +179,24 @@ impl TargetPreferences {
         let path = path()?;
         let mut preferences = load_from(&path)?;
         preferences.proxy_to.insert(target, enabled);
+        save_to(&path, &preferences)?;
+        Ok(preferences)
+    }
+
+    pub fn local_provider_enabled(&self, provider: &str) -> bool {
+        !self.disabled_local_providers.contains(provider)
+    }
+
+    pub fn set_local_provider(provider: &str, enabled: bool) -> anyhow::Result<Self> {
+        let path = path()?;
+        let mut preferences = load_from(&path)?;
+        if enabled {
+            preferences.disabled_local_providers.remove(provider);
+        } else {
+            preferences
+                .disabled_local_providers
+                .insert(provider.to_owned());
+        }
         save_to(&path, &preferences)?;
         Ok(preferences)
     }
@@ -270,6 +291,15 @@ fn set_private_permissions(_path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_provider_toggle_defaults_on_and_persists_off() {
+        let preferences = TargetPreferences::default();
+        assert!(preferences.local_provider_enabled("openai"));
+        let mut preferences = preferences;
+        preferences.disabled_local_providers.insert("openai".into());
+        assert!(!preferences.local_provider_enabled("openai"));
+    }
 
     #[test]
     fn preferences_round_trip() {

@@ -39,6 +39,33 @@ pub async fn wait_until_ready(base_url: &str, timeout: Duration) -> anyhow::Resu
     }
 }
 
+fn provider_controls_event(
+    result: anyhow::Result<(TargetPreferences, Registry)>,
+    selection: &SourceSelection,
+) -> dashboard::DashboardEvent {
+    match result {
+        Ok((preferences, registry)) => dashboard::DashboardEvent::ProviderControlsUpdated {
+            config_sources: dashboard::config_sources(&registry),
+            model_count: registry.models().len(),
+            provider_count: registry.provider_count(),
+            models: registry.models().to_vec(),
+            disabled_local_providers: preferences.disabled_local_providers,
+            combos: crate::combo::load().unwrap_or_default(),
+            detected_sources: SourceKind::DETECTED
+                .into_iter()
+                .map(|source| (source, selection.enabled(source)))
+                .collect(),
+        },
+        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+    }
+}
+
+fn sync_desktop_targets(registry: Registry, targets: DesktopTargets, base_url: String) {
+    std::thread::spawn(move || {
+        desktop::configure_detected(&registry, &base_url, &targets);
+    });
+}
+
 async fn realtime_websocket(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1378,7 +1405,7 @@ use crate::{
     error::ApiError,
     local_config, protocol,
     provider::{ModelInfo, Registry, RegistryStore},
-    sources::SourceSelection,
+    sources::{SourceKind, SourceSelection},
     target_config::TargetPreferences,
     upgrade, upstream,
 };
@@ -2433,16 +2460,11 @@ pub async fn serve_dashboard(
                         local_config::save(provider.clone())?;
                         let registry = Registry::discover(&active_selection).await?;
                         reload_store.replace(registry.clone());
-                        let setup_registry = registry.clone();
-                        let setup_targets = active_targets.clone();
-                        let setup_base_url = reload_base_url.clone();
-                        std::thread::spawn(move || {
-                            desktop::configure_detected(
-                                &setup_registry,
-                                &setup_base_url,
-                                &setup_targets,
-                            );
-                        });
+                        sync_desktop_targets(
+                            registry.clone(),
+                            active_targets.clone(),
+                            reload_base_url.clone(),
+                        );
                         Ok::<_, anyhow::Error>((provider, registry))
                     }
                     .await;
@@ -2456,6 +2478,52 @@ pub async fn serve_dashboard(
                         },
                         Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
                     };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::ToggleLocalProvider { provider } => {
+                    let enabled = TargetPreferences::load()
+                        .unwrap_or_default()
+                        .disabled_local_providers
+                        .contains(&provider);
+                    let result = async {
+                        let preferences =
+                            TargetPreferences::set_local_provider(&provider, enabled)?;
+                        let registry = Registry::discover(&active_selection).await?;
+                        reload_store.replace(registry.clone());
+                        Ok::<_, anyhow::Error>((preferences, registry))
+                    }
+                    .await;
+                    let event = provider_controls_event(result, &active_selection);
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::SaveCombo {
+                    original_name,
+                    combo,
+                } => {
+                    let result = async {
+                        crate::combo::save(combo, original_name.as_deref())?;
+                        let preferences = TargetPreferences::load()?;
+                        let registry = Registry::discover(&active_selection).await?;
+                        reload_store.replace(registry.clone());
+                        Ok::<_, anyhow::Error>((preferences, registry))
+                    }
+                    .await;
+                    let event = provider_controls_event(result, &active_selection);
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::RemoveCombo { name } => {
+                    let result = async {
+                        crate::combo::remove(&name)?;
+                        let mut preferences = TargetPreferences::load()?;
+                        preferences.disabled_models.remove(&format!("combo/{name}"));
+                        let preferences =
+                            TargetPreferences::set_disabled_models(preferences.disabled_models)?;
+                        let registry = Registry::discover(&active_selection).await?;
+                        reload_store.replace(registry.clone());
+                        Ok::<_, anyhow::Error>((preferences, registry))
+                    }
+                    .await;
+                    let event = provider_controls_event(result, &active_selection);
                     let _ = event_tx.send(event);
                 }
                 dashboard::DashboardCommand::AddProviderKey { provider, api_key } => {
@@ -2584,13 +2652,11 @@ pub async fn serve_dashboard(
                     let event = match result {
                         Ok((selection, registry)) => {
                             active_selection = selection;
-                            dashboard::DashboardEvent::SourceUpdated {
-                                source,
-                                enabled,
-                                config_sources: dashboard::config_sources(&registry),
-                                model_count: registry.models().len(),
-                                provider_count: registry.provider_count(),
-                            }
+                            provider_controls_event(
+                                TargetPreferences::load()
+                                    .map(|preferences| (preferences, registry)),
+                                &active_selection,
+                            )
                         }
                         Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
                     };

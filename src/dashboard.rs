@@ -251,40 +251,190 @@ fn draw_system_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
 }
 
 fn draw_logs_page(frame: &mut Frame<'_>, area: Rect, events: &[DashboardRequestEvent]) {
-    let lines = if events.is_empty() {
-        vec![Line::from("No requests have been recorded yet.")]
+    let panel_area = area.inner(Margin::new(1, 1));
+    let panel = dashboard_panel("Logs — newest first", Color::LightCyan);
+    let inner = panel.inner(panel_area);
+    frame.render_widget(panel, panel_area);
+
+    if events.is_empty() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "No requests yet",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Requests routed through Joocode will appear here.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
+
+    let successes = events
+        .iter()
+        .filter(|event| (200..400).contains(&event.status))
+        .count();
+    let failures = events.len().saturating_sub(successes);
+    let [summary, content] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{} requests", events.len()),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("   ● ", Style::default().fg(Color::Green)),
+            Span::styled(
+                format!("{successes} successful"),
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled("   ● ", Style::default().fg(Color::Red)),
+            Span::styled(
+                format!("{failures} failed"),
+                Style::default().fg(Color::Gray),
+            ),
+        ])),
+        summary,
+    );
+
+    if content.width < 100 {
+        draw_compact_logs(frame, content, events);
     } else {
-        events
-            .iter()
-            .rev()
-            .map(|event| {
-                let route = match (&event.provider, &event.model) {
-                    (Some(provider), Some(model)) => format!(" {provider}/{model}"),
-                    (Some(provider), None) => format!(" {provider}"),
-                    _ => String::new(),
-                };
-                Line::from(format!(
-                    "{:<6} {:<25} {:>3} {:>6}ms r{} f{} {}→{}{}",
-                    event.method,
-                    event.path,
-                    event.status,
-                    event.duration_ms,
-                    event.retries,
-                    event.failovers,
-                    event
-                        .input_tokens
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "?".into()),
-                    event
-                        .output_tokens
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "?".into()),
-                    route
-                ))
-            })
-            .collect()
+        draw_logs_table(frame, content, events);
+    }
+}
+
+fn draw_logs_table(frame: &mut Frame<'_>, area: Rect, events: &[DashboardRequestEvent]) {
+    let rows = events.iter().rev().map(|event| {
+        let provider = event.provider.as_deref().unwrap_or("—");
+        let model = event.model.as_deref().unwrap_or("—");
+        Row::new(vec![
+            Cell::from(event.status.to_string()).style(status_style(event.status)),
+            Cell::from(event.method.clone()).style(Style::default().fg(Color::LightCyan)),
+            Cell::from(event.path.clone()),
+            Cell::from(provider.to_owned()).style(Style::default().fg(Color::LightMagenta)),
+            Cell::from(model.to_owned()),
+            Cell::from(format_token_pair(event.input_tokens, event.output_tokens)),
+            Cell::from(format!("{}/{}", event.retries, event.failovers)),
+            Cell::from(format_latency(event.duration_ms)),
+        ])
+    });
+    let header = Row::new([
+        "STATUS", "METHOD", "ENDPOINT", "PROVIDER", "MODEL", "TOKENS", "R/F", "LATENCY",
+    ])
+    .style(
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .bottom_margin(1);
+    let widths = [
+        Constraint::Length(7),
+        Constraint::Length(7),
+        Constraint::Min(22),
+        Constraint::Length(18),
+        Constraint::Length(24),
+        Constraint::Length(13),
+        Constraint::Length(7),
+        Constraint::Length(10),
+    ];
+    frame.render_widget(
+        Table::new(rows, widths)
+            .header(header)
+            .column_spacing(1)
+            .row_highlight_style(Style::default()),
+        area,
+    );
+}
+
+fn draw_compact_logs(frame: &mut Frame<'_>, area: Rect, events: &[DashboardRequestEvent]) {
+    let items = events.iter().rev().map(|event| {
+        let route = match (&event.provider, &event.model) {
+            (Some(provider), Some(model)) => format!("{provider}/{model}"),
+            (Some(provider), None) => provider.clone(),
+            _ => "unresolved route".into(),
+        };
+        ListItem::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>3}", event.status),
+                    status_style(event.status).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{:<6}", event.method),
+                    Style::default().fg(Color::LightCyan),
+                ),
+                Span::raw(format!("  {}", event.path)),
+                Span::styled(
+                    format!("  {}", format_latency(event.duration_ms)),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("     "),
+                Span::styled(route, Style::default().fg(Color::LightMagenta)),
+                Span::styled(
+                    format!(
+                        "   {} tokens   retry {}   failover {}",
+                        format_token_pair(event.input_tokens, event.output_tokens),
+                        event.retries,
+                        event.failovers
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            Line::from(""),
+        ])
+    });
+    frame.render_widget(List::new(items), area);
+}
+
+fn status_style(status: u16) -> Style {
+    let color = match status {
+        200..=399 => Color::Green,
+        400..=499 => Color::Yellow,
+        _ => Color::Red,
     };
-    draw_read_only_page(frame, area, "Logs", lines);
+    Style::default().fg(color)
+}
+
+fn format_latency(duration_ms: u64) -> String {
+    if duration_ms >= 1_000 {
+        format!("{:.1}s", duration_ms as f64 / 1_000.0)
+    } else {
+        format!("{duration_ms}ms")
+    }
+}
+
+fn format_token_pair(input: Option<u64>, output: Option<u64>) -> String {
+    format!(
+        "{}→{}",
+        input
+            .map(format_compact_number)
+            .unwrap_or_else(|| "—".into()),
+        output
+            .map(format_compact_number)
+            .unwrap_or_else(|| "—".into())
+    )
+}
+
+fn format_compact_number(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}m", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
 }
 
 fn format_duration(seconds: u64) -> String {
@@ -378,14 +528,15 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Wrap,
+        Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Wrap,
     },
 };
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     autostart::{self, Status as AutoStartStatus},
+    combo::{Combo, ComboModel, Strategy as ComboStrategy},
     desktop::DesktopTargets,
     local_config::{self, ProviderSummary},
     provider::{ModelInfo, Registry},
@@ -405,6 +556,8 @@ pub struct DashboardData {
     pub proxy_targets: BTreeMap<ProxyTarget, bool>,
     pub detected_sources: BTreeMap<SourceKind, bool>,
     pub providers: Vec<ProviderSummary>,
+    pub disabled_local_providers: BTreeSet<String>,
+    pub combos: Vec<Combo>,
     pub models: Vec<ModelInfo>,
     pub disabled_models: BTreeSet<String>,
     pub subagent_catalog: crate::target_config::SubagentCatalogPolicy,
@@ -417,6 +570,7 @@ pub struct DashboardData {
 
 fn page_screen(page: Page) -> Screen {
     match page {
+        Page::Providers => Screen::Providers { selected: 0 },
         Page::Models => Screen::Models { selected: 0 },
         Page::Subagents => Screen::Subagents { selected: 0 },
         page => Screen::Base { page },
@@ -788,85 +942,274 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, tick: usize) {
     }
 }
 
-fn draw_providers(frame: &mut Frame<'_>, providers: &[ProviderSummary], selected: usize) {
-    let default_model = providers
-        .get(selected)
-        .and_then(|provider| provider.default_model.as_deref());
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderRow {
+    Source(SourceKind),
+    Local(usize),
+    Combo(usize),
+}
+
+const COMBO_STRATEGIES: [ComboStrategy; 3] = [
+    ComboStrategy::Failover,
+    ComboStrategy::WeightedRoundRobin,
+    ComboStrategy::LowestLatency,
+];
+
+fn combo_strategy_label(strategy: ComboStrategy) -> &'static str {
+    match strategy {
+        ComboStrategy::Failover => "Failover",
+        ComboStrategy::WeightedRoundRobin => "Weighted round-robin",
+        ComboStrategy::LowestLatency => "Lowest latency",
+    }
+}
+
+fn provider_rows(data: &DashboardData) -> Vec<ProviderRow> {
+    SourceKind::DETECTED
+        .into_iter()
+        .map(ProviderRow::Source)
+        .chain((0..data.providers.len()).map(ProviderRow::Local))
+        .chain((0..data.combos.len()).map(ProviderRow::Combo))
+        .collect()
+}
+
+fn status_marker(enabled: bool) -> Span<'static> {
+    Span::styled(
+        if enabled { "● " } else { "○ " },
+        Style::default().fg(if enabled {
+            Color::Green
+        } else {
+            Color::DarkGray
+        }),
+    )
+}
+
+fn provider_section(title: &'static str) -> ListItem<'static> {
+    ListItem::new(Span::styled(
+        title,
+        Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn draw_providers_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, selected: usize) {
+    let panel_area = area.inner(Margin::new(1, 1));
+    let panel = dashboard_panel(
+        "Providers — Space toggle · Enter manage · n new · c combo · Del remove",
+        Color::LightCyan,
+    );
+    let inner = panel.inner(panel_area);
+    frame.render_widget(panel, panel_area);
+    let rows = provider_rows(data);
+    let selected = selected.min(rows.len().saturating_sub(1));
+    let mut items = vec![provider_section("DETECTED PROVIDERS")];
+    let mut selected_row = 1;
+    let mut logical = 0;
+
+    for source in SourceKind::DETECTED {
+        let enabled = data.detected_sources.get(&source).copied().unwrap_or(false);
+        if logical == selected {
+            selected_row = items.len();
+        }
+        items.push(
+            ListItem::new(Line::from(vec![
+                status_marker(enabled),
+                Span::styled(
+                    source.label(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  auto-discovered source", Style::default().fg(MUTED_TEXT)),
+            ]))
+            .style(selected_style(logical == selected)),
+        );
+        logical += 1;
+    }
+
+    items.extend([ListItem::new(""), provider_section("CUSTOM PROVIDERS")]);
+    if data.providers.is_empty() {
+        items.push(ListItem::new(Span::styled(
+            "  No custom providers. Press n to connect one.",
+            Style::default().fg(MUTED_TEXT),
+        )));
+    }
+    for provider in &data.providers {
+        let enabled = !data.disabled_local_providers.contains(&provider.name);
+        if logical == selected {
+            selected_row = items.len();
+        }
+        items.push(
+            ListItem::new(Line::from(vec![
+                status_marker(enabled),
+                Span::styled(
+                    provider.label.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "  {} models · {} key(s)",
+                        provider.model_count, provider.key_count
+                    ),
+                    Style::default().fg(MUTED_TEXT),
+                ),
+            ]))
+            .style(selected_style(logical == selected)),
+        );
+        logical += 1;
+    }
+
+    items.extend([ListItem::new(""), provider_section("COMBOS")]);
+    if data.combos.is_empty() {
+        items.push(ListItem::new(Span::styled(
+            "  No combos. Press c to build one.",
+            Style::default().fg(MUTED_TEXT),
+        )));
+    }
+    for combo in &data.combos {
+        let enabled = !data
+            .disabled_models
+            .contains(&format!("combo/{}", combo.name));
+        if logical == selected {
+            selected_row = items.len();
+        }
+        items.push(
+            ListItem::new(Line::from(vec![
+                status_marker(enabled),
+                Span::styled(
+                    format!("combo/{}", combo.name),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "  {} · {} model(s)",
+                        combo_strategy_label(combo.strategy),
+                        combo.models.len()
+                    ),
+                    Style::default().fg(MUTED_TEXT),
+                ),
+            ]))
+            .style(selected_style(logical == selected)),
+        );
+        logical += 1;
+    }
+
+    let mut state = ListState::default().with_selected((!rows.is_empty()).then_some(selected_row));
+    frame.render_stateful_widget(List::new(items).highlight_symbol("› "), inner, &mut state);
+    draw_modal_scrollbar(frame, inner, logical + 5, selected_row);
+}
+
+fn draw_combo_name(frame: &mut Frame<'_>, value: &str) {
+    draw_provider_input(frame, "Step 1/4 — Combo name", value, false);
+}
+
+fn draw_combo_strategy(frame: &mut Frame<'_>, selected: usize) {
     let modal = draw_modal_shell(
         frame,
-        "Providers",
-        96,
-        30,
-        Line::from(vec![
-            Span::styled("Enter", Style::default().fg(MODAL_ACCENT)),
-            Span::raw(" new provider    "),
-            Span::styled("Del", Style::default().fg(Color::LightRed)),
-            Span::raw(" remove    "),
-            Span::styled("\\", Style::default().fg(MODAL_ACCENT)),
-            Span::raw(match default_model {
-                Some(model) => format!(" {model}"),
-                None => " Set default model".to_owned(),
-            }),
-            Span::raw("    "),
-            Span::styled("k", Style::default().fg(MODAL_ACCENT)),
-            Span::raw(" add key    "),
-            Span::styled("x", Style::default().fg(Color::LightRed)),
-            Span::raw(" remove key    "),
-            Span::styled("t", Style::default().fg(Color::LightGreen)),
-            Span::raw(" test"),
-        ]),
+        "Combo · Step 2/4 — Strategy",
+        78,
+        16,
+        Line::from("Enter continue   ↑/↓ select"),
     );
-    let items = if providers.is_empty() {
-        vec![ListItem::new(Line::from(Span::styled(
-            "No providers configured. Press Enter to add one.",
-            Style::default().fg(Color::DarkGray),
-        )))]
-    } else {
-        providers
-            .iter()
-            .enumerate()
-            .map(|(index, provider)| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        &provider.label,
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("  {} models", provider.model_count),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!("  {} key(s)", provider.key_count),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        provider
-                            .default_model
-                            .as_ref()
-                            .map(|model| format!("  \\ {model}"))
-                            .unwrap_or_default(),
-                        Style::default().fg(Color::LightCyan),
-                    ),
-                ]))
-                .style(selected_style(index == selected))
-            })
-            .collect()
-    };
-    let mut state = ListState::default().with_selected((!providers.is_empty()).then_some(selected));
+    let items = COMBO_STRATEGIES
+        .iter()
+        .enumerate()
+        .map(|(index, strategy)| {
+            ListItem::new(combo_strategy_label(*strategy)).style(selected_style(index == selected))
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(Some(selected));
     frame.render_stateful_widget(
-        List::new(items)
-            .style(Style::default().fg(Color::Gray).bg(MODAL_BACKGROUND))
-            .highlight_style(
-                Style::default()
-                    .fg(Color::White)
-                    .bg(MODAL_ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("● "),
+        List::new(items).highlight_symbol("● "),
         modal.content,
         &mut state,
     );
-    draw_modal_scrollbar(frame, modal.content, providers.len(), selected);
+}
+
+fn draw_combo_models(
+    frame: &mut Frame<'_>,
+    data: &DashboardData,
+    strategy: ComboStrategy,
+    selected: usize,
+    chosen: &[(String, u32)],
+) {
+    let modal = draw_modal_shell(
+        frame,
+        "Combo · Step 3/4 — Models",
+        104,
+        32,
+        Line::from("Space toggle   ←/→ weight/order   Enter review"),
+    );
+    let models = data
+        .models
+        .iter()
+        .filter(|model| !model.id.starts_with("combo/"))
+        .collect::<Vec<_>>();
+    let items = models
+        .iter()
+        .enumerate()
+        .map(|(index, model)| {
+            let chosen_index = chosen.iter().position(|(id, _)| id == &model.id);
+            let detail = chosen_index.map_or_else(String::new, |position| {
+                if strategy == ComboStrategy::WeightedRoundRobin {
+                    format!("  weight {}", chosen[position].1)
+                } else {
+                    format!("  order {}", position + 1)
+                }
+            });
+            ListItem::new(Line::from(vec![
+                status_marker(chosen_index.is_some()),
+                Span::raw(model.id.clone()),
+                Span::styled(detail, Style::default().fg(Color::LightCyan)),
+            ]))
+            .style(selected_style(index == selected))
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(
+        List::new(items).highlight_symbol("› "),
+        modal.content,
+        &mut state,
+    );
+    draw_modal_scrollbar(frame, modal.content, models.len(), selected);
+}
+
+fn draw_combo_review(
+    frame: &mut Frame<'_>,
+    name: &str,
+    strategy: ComboStrategy,
+    models: &[(String, u32)],
+) {
+    let modal = draw_modal_shell(
+        frame,
+        "Combo · Step 4/4 — Review",
+        92,
+        28,
+        Line::from("Enter save   esc back"),
+    );
+    let mut lines = vec![
+        Line::from(format!("Model ID   combo/{name}")),
+        Line::from(format!("Strategy   {}", combo_strategy_label(strategy))),
+        Line::from(""),
+    ];
+    lines.extend(models.iter().enumerate().map(|(index, (model, weight))| {
+        Line::from(format!(
+            "{:>2}. {}{}",
+            index + 1,
+            model,
+            if strategy == ComboStrategy::WeightedRoundRobin {
+                format!("  ×{weight}")
+            } else {
+                String::new()
+            }
+        ))
+    }));
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: true }),
+        modal.content,
+    );
 }
 
 fn draw_provider_input(frame: &mut Frame<'_>, title: &str, value: &str, secret: bool) {
@@ -1084,17 +1427,10 @@ fn draw_update_prompt(frame: &mut Frame<'_>, tag: &str) {
 
 const AUTO_START_ITEM: usize = 0;
 const RUN_IN_BACKGROUND_ITEM: usize = 1;
-const FIRST_SOURCE_ITEM: usize = 2;
-const FIRST_PROXY_ITEM: usize = FIRST_SOURCE_ITEM + SourceKind::DETECTED.len();
+const FIRST_PROXY_ITEM: usize = 2;
 
 fn config_items() -> Vec<usize> {
     (AUTO_START_ITEM..FIRST_PROXY_ITEM + ProxyTarget::ALL.len()).collect()
-}
-
-fn source_for_config_item(item: usize) -> Option<SourceKind> {
-    item.checked_sub(FIRST_SOURCE_ITEM)
-        .and_then(|index| SourceKind::DETECTED.get(index))
-        .copied()
 }
 
 fn target_for_config_item(item: usize) -> Option<ProxyTarget> {
@@ -1126,13 +1462,8 @@ fn config_row_for_item(item: usize) -> usize {
     if item == RUN_IN_BACKGROUND_ITEM {
         return 2;
     }
-    if let Some(index) = item.checked_sub(FIRST_SOURCE_ITEM)
-        && index < SourceKind::DETECTED.len()
-    {
-        return 5 + index;
-    }
     item.checked_sub(FIRST_PROXY_ITEM)
-        .map(|index| 7 + SourceKind::DETECTED.len() + index)
+        .map(|index| 5 + index)
         .unwrap_or(1)
 }
 
@@ -1192,33 +1523,7 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
         ))),
         ListItem::new(auto_start).style(selected_style(selected == AUTO_START_ITEM)),
         ListItem::new(run_in_background).style(selected_style(selected == RUN_IN_BACKGROUND_ITEM)),
-        ListItem::new(Line::from("")),
-        ListItem::new(Line::from(Span::styled(
-            "Detected Providers",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
-        ))),
     ];
-    for (index, source) in SourceKind::DETECTED.into_iter().enumerate() {
-        let enabled = data.detected_sources.get(&source).copied().unwrap_or(false);
-        let marker = if enabled { "●" } else { "○" };
-        items.push(
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{marker} "),
-                    Style::default().fg(if enabled {
-                        Color::Green
-                    } else {
-                        Color::DarkGray
-                    }),
-                ),
-                Span::raw(source.label()),
-                Span::raw(format!(" ({})", if enabled { "On" } else { "Off" })),
-            ]))
-            .style(selected_style(selected == FIRST_SOURCE_ITEM + index)),
-        );
-    }
     items.extend([
         ListItem::new(Line::from("")),
         ListItem::new(Line::from(Span::styled(
@@ -1272,7 +1577,7 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
     draw_modal_scrollbar(
         frame,
         modal.content,
-        9 + SourceKind::DETECTED.len() + ProxyTarget::ALL.len(),
+        7 + ProxyTarget::ALL.len(),
         config_row_for_item(selected),
     );
 }
@@ -1468,6 +1773,7 @@ fn handle_paste(screen: &mut Screen, value: &str) {
         } => base_url.push_str(&value),
         Screen::ProviderApiKey { api_key, .. } => api_key.push_str(&value),
         Screen::ProviderPoolKey { api_key, .. } => api_key.push_str(&value),
+        Screen::ComboName { value: name, .. } => name.push_str(&value),
         _ => {}
     }
 }
@@ -1514,6 +1820,8 @@ impl DashboardData {
                 .map(|source| (source, selection.enabled(source)))
                 .collect(),
             providers: local_config::summaries().unwrap_or_default(),
+            disabled_local_providers: preferences.disabled_local_providers,
+            combos: crate::combo::load().unwrap_or_default(),
             models,
             disabled_models: preferences.disabled_models,
             subagent_catalog: preferences.subagent_catalog,
@@ -1528,23 +1836,62 @@ impl DashboardData {
 
 #[derive(Debug)]
 pub enum DashboardCommand {
-    AddProvider { base_url: String, api_key: String },
-    AddProviderKey { provider: String, api_key: String },
-    RemoveProviderKey { provider: String },
-    RemoveProvider { name: String },
-    SetDefaultModel { provider: String, model: String },
+    AddProvider {
+        base_url: String,
+        api_key: String,
+    },
+    AddProviderKey {
+        provider: String,
+        api_key: String,
+    },
+    RemoveProviderKey {
+        provider: String,
+    },
+    RemoveProvider {
+        name: String,
+    },
+    SetDefaultModel {
+        provider: String,
+        model: String,
+    },
     ToggleAutoStart,
     ToggleRunInBackground,
-    ToggleSource { source: SourceKind },
-    ToggleProxyTarget { target: ProxyTarget },
-    ToggleModel { model: String },
-    ToggleSubagentFeatured { model: String },
-    ToggleSubagentFallback { model: String },
-    AdjustSubagentMaxEntries { delta: i8 },
+    ToggleSource {
+        source: SourceKind,
+    },
+    ToggleLocalProvider {
+        provider: String,
+    },
+    SaveCombo {
+        original_name: Option<String>,
+        combo: Combo,
+    },
+    RemoveCombo {
+        name: String,
+    },
+    ToggleProxyTarget {
+        target: ProxyTarget,
+    },
+    ToggleModel {
+        model: String,
+    },
+    ToggleSubagentFeatured {
+        model: String,
+    },
+    ToggleSubagentFallback {
+        model: String,
+    },
+    AdjustSubagentMaxEntries {
+        delta: i8,
+    },
     CycleReasoningEffortCap,
-    TestProvider { name: String },
+    TestProvider {
+        name: String,
+    },
     SyncCodex,
-    InstallUpdate { tag: String },
+    InstallUpdate {
+        tag: String,
+    },
 }
 
 #[derive(Debug)]
@@ -1574,12 +1921,14 @@ pub enum DashboardEvent {
     ProviderError(String),
     AutoStartUpdated(AutoStartStatus),
     RunInBackgroundUpdated(bool),
-    SourceUpdated {
-        source: SourceKind,
-        enabled: bool,
+    ProviderControlsUpdated {
         config_sources: Vec<String>,
         model_count: usize,
         provider_count: usize,
+        models: Vec<ModelInfo>,
+        disabled_local_providers: BTreeSet<String>,
+        combos: Vec<Combo>,
+        detected_sources: BTreeMap<SourceKind, bool>,
     },
     ProxyTargetUpdated {
         target: ProxyTarget,
@@ -1640,6 +1989,29 @@ enum Screen {
     },
     ProviderLoading {
         selected: usize,
+    },
+    ComboName {
+        original_name: Option<String>,
+        value: String,
+    },
+    ComboStrategy {
+        original_name: Option<String>,
+        name: String,
+        selected: usize,
+        models: Vec<(String, u32)>,
+    },
+    ComboModels {
+        original_name: Option<String>,
+        name: String,
+        strategy: ComboStrategy,
+        selected: usize,
+        models: Vec<(String, u32)>,
+    },
+    ComboReview {
+        original_name: Option<String>,
+        name: String,
+        strategy: ComboStrategy,
+        models: Vec<(String, u32)>,
     },
     Success(String),
     Error(String),
@@ -1712,16 +2084,20 @@ pub fn run(
                 }
                 screen = match screen {
                     Screen::ProviderBaseUrl { selected, .. }
-                    | Screen::ProviderApiKey { selected, .. }
-                    | Screen::ProviderPoolKey { selected, .. } => Screen::Providers { selected },
+                    | Screen::ProviderApiKey { selected, .. } => Screen::Providers { selected },
+                    Screen::ProviderPoolKey { selected, .. } => Screen::Providers {
+                        selected: SourceKind::DETECTED.len() + selected,
+                    },
                     Screen::ProviderModels {
                         provider_selected, ..
                     } => Screen::Providers {
-                        selected: provider_selected,
+                        selected: SourceKind::DETECTED.len() + provider_selected,
                     },
-                    Screen::Providers { .. } => Screen::Base {
-                        page: Page::Providers,
-                    },
+                    Screen::Providers { .. } => return Ok(DashboardExit::Quit),
+                    Screen::ComboName { .. }
+                    | Screen::ComboStrategy { .. }
+                    | Screen::ComboModels { .. }
+                    | Screen::ComboReview { .. } => Screen::Providers { selected: 0 },
                     Screen::Models { .. } => Screen::Base { page: Page::Models },
                     Screen::Subagents { .. } => Screen::Base {
                         page: Page::Subagents,
@@ -1772,10 +2148,15 @@ fn receive_events(
                 data.model_count = model_count;
                 data.provider_count = provider_count;
                 data.providers = providers;
+                data.combos = crate::combo::load().unwrap_or_default();
+                data.disabled_local_providers = crate::target_config::TargetPreferences::load()
+                    .unwrap_or_default()
+                    .disabled_local_providers;
                 let selected = data
                     .providers
                     .iter()
                     .position(|entry| entry.name == provider)
+                    .map(|index| SourceKind::DETECTED.len() + index)
                     .unwrap_or_default();
                 *screen = Screen::Providers { selected };
             }
@@ -1809,6 +2190,7 @@ fn receive_events(
                     .providers
                     .iter()
                     .position(|entry| entry.name == provider)
+                    .map(|index| SourceKind::DETECTED.len() + index)
                     .unwrap_or_default();
                 *screen = Screen::Providers { selected };
             }
@@ -1817,17 +2199,29 @@ fn receive_events(
             Ok(DashboardEvent::RunInBackgroundUpdated(enabled)) => {
                 data.run_in_background = enabled;
             }
-            Ok(DashboardEvent::SourceUpdated {
-                source,
-                enabled,
+            Ok(DashboardEvent::ProviderControlsUpdated {
                 config_sources,
                 model_count,
                 provider_count,
+                models,
+                disabled_local_providers,
+                combos,
+                detected_sources,
             }) => {
-                data.detected_sources.insert(source, enabled);
                 data.config_sources = config_sources;
                 data.model_count = model_count;
                 data.provider_count = provider_count;
+                data.models = models;
+                data.disabled_local_providers = disabled_local_providers;
+                data.combos = combos;
+                data.detected_sources = detected_sources;
+                let selected = match screen {
+                    Screen::Providers { selected } => *selected,
+                    _ => 0,
+                };
+                *screen = Screen::Providers {
+                    selected: selected.min(provider_rows(data).len().saturating_sub(1)),
+                };
             }
             Ok(DashboardEvent::ProxyTargetUpdated { target, enabled }) => {
                 data.proxy_targets.insert(target, enabled);
@@ -1883,6 +2277,207 @@ fn handle_key_with_data(
     data: &DashboardData,
 ) {
     match screen {
+        Screen::Providers { selected } => {
+            let rows = provider_rows(data);
+            *selected = (*selected).min(rows.len().saturating_sub(1));
+            match key {
+                KeyCode::Up => *selected = selected.saturating_sub(1),
+                KeyCode::Down => {
+                    *selected = selected.saturating_add(1).min(rows.len().saturating_sub(1));
+                }
+                KeyCode::Char(' ') | KeyCode::Enter => match rows.get(*selected).copied() {
+                    Some(ProviderRow::Source(source)) => {
+                        let _ = command_tx.send(DashboardCommand::ToggleSource { source });
+                    }
+                    Some(ProviderRow::Local(index)) if key == KeyCode::Char(' ') => {
+                        if let Some(provider) = data.providers.get(index) {
+                            let _ = command_tx.send(DashboardCommand::ToggleLocalProvider {
+                                provider: provider.name.clone(),
+                            });
+                        }
+                    }
+                    Some(ProviderRow::Local(index)) => {
+                        if let Some(provider) = data.providers.get(index)
+                            && !provider.models.is_empty()
+                        {
+                            let model_selected = provider
+                                .default_model
+                                .as_ref()
+                                .and_then(|default| {
+                                    provider.models.iter().position(|model| model == default)
+                                })
+                                .unwrap_or_default();
+                            *screen = Screen::ProviderModels {
+                                provider_selected: index,
+                                model_selected,
+                            };
+                        }
+                    }
+                    Some(ProviderRow::Combo(index)) if key == KeyCode::Char(' ') => {
+                        if let Some(combo) = data.combos.get(index) {
+                            let _ = command_tx.send(DashboardCommand::ToggleModel {
+                                model: format!("combo/{}", combo.name),
+                            });
+                        }
+                    }
+                    Some(ProviderRow::Combo(index)) => {
+                        if let Some(combo) = data.combos.get(index) {
+                            *screen = Screen::ComboStrategy {
+                                original_name: Some(combo.name.clone()),
+                                name: combo.name.clone(),
+                                selected: COMBO_STRATEGIES
+                                    .iter()
+                                    .position(|strategy| strategy == &combo.strategy)
+                                    .unwrap_or_default(),
+                                models: combo
+                                    .models
+                                    .iter()
+                                    .map(|model| (model.model().to_owned(), model.weight()))
+                                    .collect(),
+                            };
+                        }
+                    }
+                    None => {}
+                },
+                KeyCode::Char('n') => {
+                    *screen = Screen::ProviderBaseUrl {
+                        selected: *selected,
+                        value: String::new(),
+                    };
+                }
+                KeyCode::Char('c') => {
+                    *screen = Screen::ComboName {
+                        original_name: None,
+                        value: String::new(),
+                    };
+                }
+                KeyCode::Delete | KeyCode::Backspace => match rows.get(*selected).copied() {
+                    Some(ProviderRow::Local(index)) => {
+                        if let Some(provider) = data.providers.get(index) {
+                            let _ = command_tx.send(DashboardCommand::RemoveProvider {
+                                name: provider.name.clone(),
+                            });
+                        }
+                    }
+                    Some(ProviderRow::Combo(index)) => {
+                        if let Some(combo) = data.combos.get(index) {
+                            let _ = command_tx.send(DashboardCommand::RemoveCombo {
+                                name: combo.name.clone(),
+                            });
+                        }
+                    }
+                    _ => {}
+                },
+                KeyCode::Char('k')
+                | KeyCode::Char('x')
+                | KeyCode::Char('t')
+                | KeyCode::Char('\\') => {
+                    if let Some(ProviderRow::Local(index)) = rows.get(*selected).copied()
+                        && let Some(provider) = data.providers.get(index)
+                    {
+                        match key {
+                            KeyCode::Char('k') => {
+                                *screen = Screen::ProviderPoolKey {
+                                    selected: index,
+                                    api_key: String::new(),
+                                };
+                            }
+                            KeyCode::Char('x') => {
+                                let _ = command_tx.send(DashboardCommand::RemoveProviderKey {
+                                    provider: provider.name.clone(),
+                                });
+                            }
+                            KeyCode::Char('t') => {
+                                let _ = command_tx.send(DashboardCommand::TestProvider {
+                                    name: provider.name.clone(),
+                                });
+                            }
+                            KeyCode::Char('\\') if !provider.models.is_empty() => {
+                                *screen = Screen::ProviderModels {
+                                    provider_selected: index,
+                                    model_selected: provider
+                                        .default_model
+                                        .as_ref()
+                                        .and_then(|default| {
+                                            provider
+                                                .models
+                                                .iter()
+                                                .position(|model| model == default)
+                                        })
+                                        .unwrap_or_default(),
+                                };
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                KeyCode::Tab => *screen = page_screen(Page::Models),
+                KeyCode::BackTab => *screen = page_screen(Page::Overview),
+                KeyCode::Char(character) if Page::from_number(character).is_some() => {
+                    *screen = page_screen(Page::from_number(character).unwrap_or(Page::Providers));
+                }
+                KeyCode::Char('/') => *screen = Screen::Config { selected: 0 },
+                _ => {}
+            }
+        }
+        Screen::ComboModels {
+            original_name,
+            name,
+            strategy,
+            selected,
+            models,
+        } => {
+            let available = data
+                .models
+                .iter()
+                .filter(|model| !model.id.starts_with("combo/"))
+                .collect::<Vec<_>>();
+            *selected = (*selected).min(available.len().saturating_sub(1));
+            match key {
+                KeyCode::Up => *selected = selected.saturating_sub(1),
+                KeyCode::Down => {
+                    *selected = selected
+                        .saturating_add(1)
+                        .min(available.len().saturating_sub(1));
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(model) = available.get(*selected) {
+                        if let Some(index) = models.iter().position(|(id, _)| id == &model.id) {
+                            models.remove(index);
+                        } else {
+                            models.push((model.id.clone(), 1));
+                        }
+                    }
+                }
+                KeyCode::Left | KeyCode::Right => {
+                    if let Some(model) = available.get(*selected)
+                        && let Some(index) = models.iter().position(|(id, _)| id == &model.id)
+                    {
+                        if *strategy == ComboStrategy::WeightedRoundRobin {
+                            let weight = &mut models[index].1;
+                            *weight = if key == KeyCode::Right {
+                                weight.saturating_add(1).min(100)
+                            } else {
+                                weight.saturating_sub(1).max(1)
+                            };
+                        } else if key == KeyCode::Left && index > 0 {
+                            models.swap(index, index - 1);
+                        } else if key == KeyCode::Right && index + 1 < models.len() {
+                            models.swap(index, index + 1);
+                        }
+                    }
+                }
+                KeyCode::Enter if models.len() >= 2 => {
+                    *screen = Screen::ComboReview {
+                        original_name: original_name.clone(),
+                        name: name.clone(),
+                        strategy: *strategy,
+                        models: models.clone(),
+                    };
+                }
+                _ => {}
+            }
+        }
         Screen::Models { selected } => {
             *selected = (*selected).min(data.models.len().saturating_sub(1));
             match key {
@@ -1974,6 +2569,75 @@ fn handle_key_with_providers(
             KeyCode::Char('/') => *screen = Screen::Config { selected: 0 },
             _ => {}
         },
+        Screen::ComboName {
+            original_name,
+            value,
+        } => match key {
+            KeyCode::Enter if !value.trim().is_empty() => {
+                *screen = Screen::ComboStrategy {
+                    original_name: original_name.clone(),
+                    name: value.trim().to_owned(),
+                    selected: 0,
+                    models: Vec::new(),
+                };
+            }
+            KeyCode::Backspace => {
+                value.pop();
+            }
+            KeyCode::Char(character) => value.push(character),
+            _ => {}
+        },
+        Screen::ComboStrategy {
+            original_name,
+            name,
+            selected,
+            models,
+        } => match key {
+            KeyCode::Up => *selected = selected.saturating_sub(1),
+            KeyCode::Down => {
+                *selected = selected
+                    .saturating_add(1)
+                    .min(COMBO_STRATEGIES.len().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                *screen = Screen::ComboModels {
+                    original_name: original_name.clone(),
+                    name: name.clone(),
+                    strategy: COMBO_STRATEGIES[*selected],
+                    selected: 0,
+                    models: models.clone(),
+                };
+            }
+            _ => {}
+        },
+        Screen::ComboReview {
+            original_name,
+            name,
+            strategy,
+            models,
+        } if key == KeyCode::Enter => {
+            let combo = Combo {
+                name: name.clone(),
+                strategy: *strategy,
+                models: models
+                    .iter()
+                    .map(|(model, weight)| {
+                        if *strategy == ComboStrategy::WeightedRoundRobin {
+                            ComboModel::Weighted {
+                                model: model.clone(),
+                                weight: *weight,
+                            }
+                        } else {
+                            ComboModel::Model(model.clone())
+                        }
+                    })
+                    .collect(),
+            };
+            let _ = command_tx.send(DashboardCommand::SaveCombo {
+                original_name: original_name.clone(),
+                combo,
+            });
+        }
         Screen::ProviderPoolKey { selected, api_key } => match key {
             KeyCode::Enter if !api_key.trim().is_empty() => {
                 if let Some(provider) = providers.get(*selected) {
@@ -2031,9 +2695,7 @@ fn handle_key_with_providers(
                 let _ = command_tx.send(DashboardCommand::ToggleRunInBackground);
             }
             KeyCode::Char(' ') => {
-                if let Some(source) = source_for_config_item(*selected) {
-                    let _ = command_tx.send(DashboardCommand::ToggleSource { source });
-                } else if let Some(target) = target_for_config_item(*selected) {
+                if let Some(target) = target_for_config_item(*selected) {
                     let _ = command_tx.send(DashboardCommand::ToggleProxyTarget { target });
                 }
             }
@@ -2058,67 +2720,6 @@ fn handle_key_with_providers(
                     let _ = command_tx.send(DashboardCommand::SetDefaultModel {
                         provider: provider.name.clone(),
                         model: model.clone(),
-                    });
-                }
-            }
-            _ => {}
-        },
-        Screen::Providers { selected } => match key {
-            KeyCode::Up => *selected = selected.saturating_sub(1),
-            KeyCode::Down => {
-                *selected = selected
-                    .saturating_add(1)
-                    .min(providers.len().saturating_sub(1));
-            }
-            KeyCode::Enter => {
-                *screen = Screen::ProviderBaseUrl {
-                    selected: *selected,
-                    value: String::new(),
-                };
-            }
-            KeyCode::Delete | KeyCode::Backspace => {
-                if let Some(provider) = providers.get(*selected) {
-                    let _ = command_tx.send(DashboardCommand::RemoveProvider {
-                        name: provider.name.clone(),
-                    });
-                }
-            }
-            KeyCode::Char('\\') => {
-                if let Some(provider) = providers.get(*selected)
-                    && !provider.models.is_empty()
-                {
-                    let model_selected = provider
-                        .default_model
-                        .as_ref()
-                        .and_then(|default| {
-                            provider.models.iter().position(|model| model == default)
-                        })
-                        .unwrap_or_default();
-                    *screen = Screen::ProviderModels {
-                        provider_selected: *selected,
-                        model_selected,
-                    };
-                }
-            }
-            KeyCode::Char('k') => {
-                if providers.get(*selected).is_some() {
-                    *screen = Screen::ProviderPoolKey {
-                        selected: *selected,
-                        api_key: String::new(),
-                    };
-                }
-            }
-            KeyCode::Char('x') => {
-                if let Some(provider) = providers.get(*selected) {
-                    let _ = command_tx.send(DashboardCommand::RemoveProviderKey {
-                        provider: provider.name.clone(),
-                    });
-                }
-            }
-            KeyCode::Char('t') => {
-                if let Some(provider) = providers.get(*selected) {
-                    let _ = command_tx.send(DashboardCommand::TestProvider {
-                        name: provider.name.clone(),
                     });
                 }
             }
@@ -2221,40 +2822,72 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             draw_config(frame, data, *selected);
         }
         Screen::Providers { selected } => {
-            draw_shell(frame, body, data, Page::Providers);
-            draw_providers(frame, &data.providers, *selected);
+            draw_shell_selected(frame, body, data, Page::Providers, *selected);
         }
         Screen::ProviderModels {
             provider_selected,
             model_selected,
         } => {
-            draw_shell(frame, body, data, Page::Providers);
-            draw_providers(frame, &data.providers, *provider_selected);
+            draw_shell_selected(
+                frame,
+                body,
+                data,
+                Page::Providers,
+                SourceKind::DETECTED.len() + *provider_selected,
+            );
             if let Some(provider) = data.providers.get(*provider_selected) {
                 draw_provider_models(frame, provider, *model_selected);
             }
         }
         Screen::ProviderBaseUrl { selected, value } => {
-            draw_shell(frame, body, data, Page::Providers);
-            draw_providers(frame, &data.providers, *selected);
+            draw_shell_selected(frame, body, data, Page::Providers, *selected);
             draw_provider_input(frame, "Step 1/3 — Base URL", value, false);
         }
         Screen::ProviderApiKey {
             selected, api_key, ..
         } => {
-            draw_shell(frame, body, data, Page::Providers);
-            draw_providers(frame, &data.providers, *selected);
+            draw_shell_selected(frame, body, data, Page::Providers, *selected);
             draw_provider_input(frame, "Step 2/3 — API key", api_key, true);
         }
         Screen::ProviderPoolKey { selected, api_key } => {
-            draw_shell(frame, body, data, Page::Providers);
-            draw_providers(frame, &data.providers, *selected);
+            draw_shell_selected(
+                frame,
+                body,
+                data,
+                Page::Providers,
+                SourceKind::DETECTED.len() + *selected,
+            );
             draw_provider_input(frame, "Add API key to pool", api_key, true);
         }
         Screen::ProviderLoading { selected } => {
-            draw_shell(frame, body, data, Page::Providers);
-            draw_providers(frame, &data.providers, *selected);
+            draw_shell_selected(frame, body, data, Page::Providers, *selected);
             draw_provider_loading(frame);
+        }
+        Screen::ComboName { value, .. } => {
+            draw_shell(frame, body, data, Page::Providers);
+            draw_combo_name(frame, value);
+        }
+        Screen::ComboStrategy { selected, .. } => {
+            draw_shell(frame, body, data, Page::Providers);
+            draw_combo_strategy(frame, *selected);
+        }
+        Screen::ComboModels {
+            strategy,
+            selected,
+            models,
+            ..
+        } => {
+            draw_shell(frame, body, data, Page::Providers);
+            draw_combo_models(frame, data, *strategy, *selected, models);
+        }
+        Screen::ComboReview {
+            name,
+            strategy,
+            models,
+            ..
+        } => {
+            draw_shell(frame, body, data, Page::Providers);
+            draw_combo_review(frame, name, *strategy, models);
         }
         Screen::UpdateAvailable(tag) => {
             draw_shell(frame, body, data, Page::Overview);
@@ -2306,6 +2939,10 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
         | Screen::ProviderApiKey { .. }
         | Screen::ProviderPoolKey { .. }
         | Screen::ProviderLoading { .. }
+        | Screen::ComboName { .. }
+        | Screen::ComboStrategy { .. }
+        | Screen::ComboModels { .. }
+        | Screen::ComboReview { .. }
         | Screen::UpdateAvailable(_)
         | Screen::Success(_)
         | Screen::Error(_) => unreachable!("modal screens return before global footer rendering"),
@@ -2432,16 +3069,7 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, selected: Page) {
 fn draw_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, page: Page, selected: usize) {
     match page {
         Page::Overview => draw_dashboard(frame, area, data),
-        Page::Providers => draw_read_only_page(
-            frame,
-            area,
-            "Providers",
-            vec![
-                Line::from(format!("{} configured providers", data.provider_count)),
-                Line::from(""),
-                Line::from("Press Enter to open the provider manager."),
-            ],
-        ),
+        Page::Providers => draw_providers_page(frame, area, data, selected),
         Page::Models => draw_models_page(frame, area, data, selected),
         Page::Subagents => draw_subagents_page(frame, area, data, selected),
         Page::CodexSet => draw_codex_set_page(frame, area, data),
@@ -2820,6 +3448,31 @@ mod tests {
 
     use super::*;
 
+    fn empty_dashboard_data() -> DashboardData {
+        DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 0,
+            provider_count: 0,
+            autostart: AutoStartStatus::Off,
+            run_in_background: false,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
+            providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            port_warning: None,
+            runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
+        }
+    }
+
     #[test]
     fn observability_event_refreshes_typed_snapshots() {
         let mut data = DashboardData {
@@ -2833,6 +3486,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -2892,8 +3547,12 @@ mod tests {
             default_model: None,
             key_count: 1,
         }];
-        let mut screen = Screen::Providers { selected: 0 };
-        handle_key_with_providers(&mut screen, KeyCode::Char('\\'), &tx, &providers);
+        let mut data = empty_dashboard_data();
+        data.providers = providers;
+        let mut screen = Screen::Providers {
+            selected: SourceKind::DETECTED.len(),
+        };
+        handle_key_with_data(&mut screen, KeyCode::Char('\\'), &tx, &data);
         assert!(matches!(
             screen,
             Screen::ProviderModels {
@@ -2901,8 +3560,8 @@ mod tests {
                 model_selected: 0
             }
         ));
-        handle_key_with_providers(&mut screen, KeyCode::Down, &tx, &providers);
-        handle_key_with_providers(&mut screen, KeyCode::Enter, &tx, &providers);
+        handle_key_with_data(&mut screen, KeyCode::Down, &tx, &data);
+        handle_key_with_data(&mut screen, KeyCode::Enter, &tx, &data);
         assert!(matches!(
             rx.try_recv(),
             Ok(DashboardCommand::SetDefaultModel { provider, model })
@@ -2969,12 +3628,7 @@ mod tests {
             page: Page::Overview,
         };
         handle_key(&mut screen, KeyCode::Tab, &tx);
-        assert!(matches!(
-            screen,
-            Screen::Base {
-                page: Page::Providers
-            }
-        ));
+        assert!(matches!(screen, Screen::Providers { selected: 0 }));
     }
 
     #[test]
@@ -3027,6 +3681,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![ModelInfo {
                 id: "demo/reasoner".into(),
                 provider: "demo".into(),
@@ -3075,6 +3731,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3152,6 +3810,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3178,14 +3838,102 @@ mod tests {
             + 1;
         assert!(rendered.contains("1 Overview"));
         assert!(rendered.contains(&format!("{logs_index} Logs")));
-        assert!(rendered.contains("No requests have been recorded yet"));
+        assert!(rendered.contains("No requests yet"));
+        assert!(rendered.contains("Requests routed through Joocode will appear here"));
+    }
+
+    #[test]
+    fn logs_page_renders_scannable_request_table() {
+        let backend = TestBackend::new(150, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut data = empty_dashboard_data();
+        data.request_events = vec![DashboardRequestEvent {
+            method: "POST".into(),
+            path: "/v1/chat/completions".into(),
+            status: 200,
+            duration_ms: 8_112,
+            provider: Some("joocode:ai".into()),
+            model: Some("gpt-5.6-sol".into()),
+            retries: 1,
+            failovers: 0,
+            input_tokens: Some(12_400),
+            output_tokens: Some(842),
+        }];
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Base { page: Page::Logs }))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("STATUS"));
+        assert!(rendered.contains("ENDPOINT"));
+        assert!(rendered.contains("PROVIDER"));
+        assert!(rendered.contains("LATENCY"));
+        assert!(rendered.contains("/v1/chat/completions"));
+        assert!(rendered.contains("gpt-5.6-sol"));
+        assert!(rendered.contains("12.4k"));
+        assert!(rendered.contains("8.1s"));
+    }
+
+    #[test]
+    fn combo_builder_walks_name_strategy_models_and_review() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut data = empty_dashboard_data();
+        data.models = vec![
+            ModelInfo {
+                id: "a/model".into(),
+                provider: "a".into(),
+                upstream_id: "model".into(),
+                name: "A".into(),
+                reasoning: false,
+                context_window: None,
+                max_output_tokens: None,
+            },
+            ModelInfo {
+                id: "b/model".into(),
+                provider: "b".into(),
+                upstream_id: "model".into(),
+                name: "B".into(),
+                reasoning: false,
+                context_window: None,
+                max_output_tokens: None,
+            },
+        ];
+        let mut screen = Screen::Providers { selected: 0 };
+        handle_key_with_data(&mut screen, KeyCode::Char('c'), &tx, &data);
+        assert!(matches!(screen, Screen::ComboName { .. }));
+        for character in "coding".chars() {
+            handle_key_with_data(&mut screen, KeyCode::Char(character), &tx, &data);
+        }
+        handle_key_with_data(&mut screen, KeyCode::Enter, &tx, &data);
+        handle_key_with_data(&mut screen, KeyCode::Enter, &tx, &data);
+        handle_key_with_data(&mut screen, KeyCode::Char(' '), &tx, &data);
+        handle_key_with_data(&mut screen, KeyCode::Down, &tx, &data);
+        handle_key_with_data(&mut screen, KeyCode::Char(' '), &tx, &data);
+        handle_key_with_data(&mut screen, KeyCode::Enter, &tx, &data);
+        assert!(matches!(screen, Screen::ComboReview { .. }));
+        handle_key_with_data(&mut screen, KeyCode::Enter, &tx, &data);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DashboardCommand::SaveCombo { combo, .. })
+                if combo.name == "coding" && combo.models.len() == 2
+        ));
     }
 
     #[test]
     fn enter_opens_new_provider_modal() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut screen = Screen::Providers { selected: 1 };
-        handle_key_with_providers(&mut screen, KeyCode::Enter, &tx, &[]);
+        handle_key_with_data(
+            &mut screen,
+            KeyCode::Char('n'),
+            &tx,
+            &empty_dashboard_data(),
+        );
         assert!(matches!(
             screen,
             Screen::ProviderBaseUrl {
@@ -3211,10 +3959,10 @@ mod tests {
     #[test]
     fn space_toggles_selected_detected_provider() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut screen = Screen::Config {
-            selected: FIRST_SOURCE_ITEM,
-        };
-        handle_key(&mut screen, KeyCode::Char(' '), &tx);
+        let mut data = empty_dashboard_data();
+        data.detected_sources.insert(SourceKind::OpenCode, true);
+        let mut screen = Screen::Providers { selected: 0 };
+        handle_key_with_data(&mut screen, KeyCode::Char(' '), &tx, &data);
         assert!(matches!(
             rx.try_recv(),
             Ok(DashboardCommand::ToggleSource {
@@ -3239,6 +3987,8 @@ mod tests {
                 .map(|source| (source, true))
                 .collect(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3249,15 +3999,19 @@ mod tests {
             port_warning: None,
         };
         let mut screen = Screen::Config {
-            selected: FIRST_SOURCE_ITEM,
+            selected: FIRST_PROXY_ITEM,
         };
         let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(DashboardEvent::SourceUpdated {
-            source: SourceKind::OpenCode,
-            enabled: false,
+        let mut detected_sources = data.detected_sources.clone();
+        detected_sources.insert(SourceKind::OpenCode, false);
+        tx.send(DashboardEvent::ProviderControlsUpdated {
             config_sources: vec!["CrabCode".into()],
             model_count: 30,
             provider_count: 5,
+            models: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
+            detected_sources,
         })
         .unwrap();
 
@@ -3287,6 +4041,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3339,6 +4095,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3387,6 +4145,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3444,8 +4204,12 @@ mod tests {
                 key_count: 1,
             },
         ];
-        let mut screen = Screen::Providers { selected: 1 };
-        handle_key_with_providers(&mut screen, KeyCode::Delete, &tx, &providers);
+        let mut data = empty_dashboard_data();
+        data.providers = providers;
+        let mut screen = Screen::Providers {
+            selected: SourceKind::DETECTED.len() + 1,
+        };
+        handle_key_with_data(&mut screen, KeyCode::Delete, &tx, &data);
         assert!(matches!(
             rx.try_recv(),
             Ok(DashboardCommand::RemoveProvider { name }) if name == "openai"
@@ -3484,6 +4248,8 @@ mod tests {
                     key_count: 1,
                 },
             ],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3531,6 +4297,8 @@ mod tests {
                 default_model: None,
                 key_count: 1,
             }],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3548,9 +4316,10 @@ mod tests {
         let rendered = cells.iter().map(|cell| cell.symbol()).collect::<String>();
 
         assert!(rendered.contains("Providers"));
-        assert!(rendered.contains("esc"));
-        assert!(!rendered.contains('┌'));
-        assert!(cells.iter().any(|cell| cell.bg == MODAL_BACKGROUND));
+        assert!(rendered.contains("DETECTED PROVIDERS"));
+        assert!(rendered.contains("CUSTOM PROVIDERS"));
+        assert!(rendered.contains("COMBOS"));
+        assert!(cells.iter().any(|cell| cell.bg == Color::Reset));
         assert!(cells.iter().any(|cell| cell.bg == MODAL_ACCENT));
         assert!(!cells.iter().any(|cell| cell.bg == Color::Black));
     }
@@ -3568,6 +4337,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3651,6 +4422,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3697,6 +4470,8 @@ mod tests {
                 .map(|source| (source, source == SourceKind::OpenCode))
                 .collect(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3719,9 +4494,6 @@ mod tests {
         for label in [
             "Setting",
             "Run in background",
-            "Detected Providers",
-            "OpenCode",
-            "CrabCode",
             "Proxy to",
             "Codex",
             "GitHub Copilot App",
@@ -3756,6 +4528,8 @@ mod tests {
                 .map(|source| (source, true))
                 .collect(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3794,6 +4568,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3828,6 +4604,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3885,6 +4663,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -3966,6 +4746,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -4016,6 +4798,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -4053,6 +4837,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
@@ -4094,6 +4880,8 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            disabled_local_providers: BTreeSet::new(),
+            combos: vec![],
             models: vec![],
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),

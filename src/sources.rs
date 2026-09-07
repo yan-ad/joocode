@@ -628,9 +628,11 @@ pub async fn discover(
 }
 
 fn discover_joocode() -> anyhow::Result<DiscoveredCatalog> {
+    let preferences = crate::target_config::TargetPreferences::load().unwrap_or_default();
     let configured = local_config::load()?;
     let providers = configured
         .into_iter()
+        .filter(|configured| preferences.local_provider_enabled(&configured.name))
         .map(|configured| {
             let public_provider = format!("joocode/{}", configured.name);
             let api_keys = configured.api_keys();

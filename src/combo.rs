@@ -12,6 +12,31 @@ pub enum Strategy {
     LowestLatency,
 }
 
+fn write_to(path: &std::path::Path, combos: &[Combo]) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(combos)?)
+        .with_context(|| format!("failed writing {}", temporary.display()))?;
+    set_private_permissions(&temporary)?;
+    fs::rename(&temporary, path).with_context(|| format!("failed replacing {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_permissions(path: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &std::path::Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
 impl From<&str> for ComboModel {
     fn from(model: &str) -> Self {
         Self::Model(model.to_owned())
@@ -68,6 +93,46 @@ pub fn path() -> anyhow::Result<PathBuf> {
 
 pub fn load() -> anyhow::Result<Vec<Combo>> {
     load_from(&path()?)
+}
+
+pub fn save(combo: Combo, original_name: Option<&str>) -> anyhow::Result<PathBuf> {
+    let path = path()?;
+    save_to(&path, combo, original_name)?;
+    Ok(path)
+}
+
+fn save_to(
+    path: &std::path::Path,
+    combo: Combo,
+    original_name: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut combos = load_from(path)?;
+    if let Some(original_name) = original_name {
+        combos.retain(|existing| existing.name != original_name);
+    }
+    if combos.iter().any(|existing| existing.name == combo.name) {
+        bail!("combo '{}' already exists", combo.name);
+    }
+    combos.push(combo);
+    combos.sort_by(|left, right| left.name.cmp(&right.name));
+    let combos = validate(combos)?;
+    write_to(path, &combos)
+}
+
+pub fn remove(name: &str) -> anyhow::Result<PathBuf> {
+    let path = path()?;
+    remove_from(&path, name)?;
+    Ok(path)
+}
+
+fn remove_from(path: &std::path::Path, name: &str) -> anyhow::Result<()> {
+    let mut combos = load_from(path)?;
+    let original_len = combos.len();
+    combos.retain(|combo| combo.name != name);
+    if combos.len() == original_len {
+        bail!("combo '{name}' was not found");
+    }
+    write_to(path, &combos)
 }
 
 fn load_from(path: &std::path::Path) -> anyhow::Result<Vec<Combo>> {
@@ -185,5 +250,31 @@ mod tests {
             }])
             .is_err()
         );
+    }
+
+    #[test]
+    fn saves_updates_and_removes_combos_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("combos.json");
+        assert!(remove_from(&path, "coding").is_err());
+
+        let combo = Combo {
+            name: "coding".into(),
+            strategy: Strategy::Failover,
+            models: vec!["a/model".into(), "b/model".into()],
+        };
+        save_to(&path, combo.clone(), None).unwrap();
+        assert_eq!(load_from(&path).unwrap()[0].name, "coding");
+
+        let mut updated = combo;
+        updated.strategy = Strategy::LowestLatency;
+        save_to(&path, updated, Some("coding")).unwrap();
+        assert_eq!(
+            load_from(&path).unwrap()[0].strategy,
+            Strategy::LowestLatency
+        );
+
+        write_to(&path, &[]).unwrap();
+        assert!(load_from(&path).unwrap().is_empty());
     }
 }
