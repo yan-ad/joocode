@@ -788,6 +788,16 @@ impl StreamState {
         Ok(events)
     }
 
+    pub fn completed_tool_calls(&self) -> Vec<(Option<String>, String)> {
+        self.calls
+            .values()
+            .map(|call| {
+                let (namespace, name) = self.tool_namespaces.identity(&call.name);
+                (namespace.map(str::to_owned), name.to_owned())
+            })
+            .collect()
+    }
+
     fn output(&self) -> Vec<Value> {
         let mut output = vec![
             json!({ "id": self.message_id, "type": "message", "status": "completed", "role": "assistant",

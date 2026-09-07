@@ -510,6 +510,9 @@ struct Metrics {
     active: Arc<AtomicU64>,
     successes: Arc<AtomicU64>,
     failures: Arc<AtomicU64>,
+    tool_calls: Arc<AtomicU64>,
+    browser_tool_calls: Arc<AtomicU64>,
+    tool_call_breakdown: Arc<std::sync::Mutex<BTreeMap<String, u64>>>,
 }
 
 impl Default for Metrics {
@@ -520,6 +523,45 @@ impl Default for Metrics {
             active: Arc::new(AtomicU64::new(0)),
             successes: Arc::new(AtomicU64::new(0)),
             failures: Arc::new(AtomicU64::new(0)),
+            tool_calls: Arc::new(AtomicU64::new(0)),
+            browser_tool_calls: Arc::new(AtomicU64::new(0)),
+            tool_call_breakdown: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+        }
+    }
+}
+
+impl Metrics {
+    fn record_tool_call(&self, namespace: Option<&str>, name: &str) {
+        self.tool_calls.fetch_add(1, Ordering::Relaxed);
+        let normalized_namespace = namespace.unwrap_or("function");
+        if normalized_namespace.to_ascii_lowercase().contains("browser")
+            || normalized_namespace.to_ascii_lowercase().contains("computer")
+            || name.to_ascii_lowercase().contains("browser")
+            || name.to_ascii_lowercase().contains("computer")
+        {
+            self.browser_tool_calls.fetch_add(1, Ordering::Relaxed);
+        }
+        let key = format!("{normalized_namespace}/{name}");
+        *self
+            .tool_call_breakdown
+            .lock()
+            .expect("tool-call metrics lock poisoned")
+            .entry(key)
+            .or_default() += 1;
+    }
+
+    fn record_responses_tool_calls(&self, response: &Value) {
+        let Some(output) = response.get("output").and_then(Value::as_array) else {
+            return;
+        };
+        for item in output {
+            if item.get("type").and_then(Value::as_str) != Some("function_call") {
+                continue;
+            }
+            let namespace = item.get("namespace").and_then(Value::as_str);
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                self.record_tool_call(namespace, name);
+            }
         }
     }
 }
