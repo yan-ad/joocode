@@ -2193,6 +2193,9 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("joocode_uptime_seconds"));
         assert!(body.contains("joocode_models 1"));
+        assert!(body.contains("joocode_codex_browser_tool_calls_total 0"));
+        assert!(body.contains("joocode_provider_latency_milliseconds"));
+        assert!(body.contains("joocode_provider_consecutive_failures"));
         assert!(body.contains("joocode_provider_available{provider=\"fixture\"} 1"));
         for secret in [
             "api_key",
@@ -2734,6 +2737,26 @@ mod tests {
         let limiter = RateLimiter::new(true, 1, 1);
         assert!(limiter.allow().await);
         assert!(!limiter.allow().await);
+    }
+
+    #[tokio::test]
+    async fn authenticated_remote_requests_are_rate_limited() {
+        let mut remote = policy(true, Some("secret"), &[], DEFAULT_MAX_REQUEST_BYTES);
+        remote.rate_limiter = RateLimiter::new(true, 1, 1);
+        let app = build_router(RegistryStore::new(fixture_registry()), &remote);
+        let request = || {
+            HttpRequest::get("/v1/models")
+                .header(header::AUTHORIZATION, "Bearer secret")
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let limited = app.oneshot(request()).await.unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(limited.headers().get(header::RETRY_AFTER).unwrap(), "1");
     }
 
     #[tokio::test]

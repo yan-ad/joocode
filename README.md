@@ -642,6 +642,11 @@ format. Codex Browser/Computer Use calls are counted separately and by
 namespace/tool name. Arguments, results, prompts, provider URLs, headers, and
 credentials are never recorded.
 
+Joocode also journals the exact configuration resources it owns for Codex, Zed,
+Claude Code, Grok Build, GitHub Copilot App, and background-service definitions.
+If one of those managed resources changes externally, Joocode refuses to
+overwrite it while leaving unrelated user configuration editable.
+
 ```bash
 jcx stats
 jcx reload

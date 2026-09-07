@@ -249,8 +249,8 @@ impl Runtime {
     where
         F: Fn(&T) -> &str,
     {
-        let health = self.inner.health.lock().await;
-        let cooldowns = self.inner.cooldowns.lock().await;
+        let health = self.inner.health.lock().await.clone();
+        let cooldowns = self.inner.cooldowns.lock().await.clone();
         let now = Instant::now();
         candidates.sort_by(|left, right| {
             let score = |candidate: &T| {
@@ -274,17 +274,29 @@ impl Runtime {
 
     pub async fn provider_statuses(&self, providers: &[String]) -> Vec<ProviderStatus> {
         let now = Instant::now();
-        let semaphores = self.inner.semaphores.lock().await;
-        let cooldowns = self.inner.cooldowns.lock().await;
-        let health = self.inner.health.lock().await;
+        let available = {
+            let semaphores = self.inner.semaphores.lock().await;
+            providers
+                .iter()
+                .map(|provider| {
+                    let permits = semaphores
+                        .get(provider)
+                        .map_or(self.inner.concurrency, |semaphore| {
+                            semaphore.available_permits()
+                        });
+                    (provider.clone(), permits)
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let cooldowns = self.inner.cooldowns.lock().await.clone();
+        let health = self.inner.health.lock().await.clone();
         providers
             .iter()
             .map(|provider| {
-                let available = semaphores
+                let available = available
                     .get(provider)
-                    .map_or(self.inner.concurrency, |semaphore| {
-                        semaphore.available_permits()
-                    });
+                    .copied()
+                    .unwrap_or(self.inner.concurrency);
                 let cooldown_ms = cooldowns
                     .get(provider)
                     .and_then(|until| (*until > now).then(|| until.duration_since(now)))

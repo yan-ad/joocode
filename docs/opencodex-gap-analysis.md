@@ -209,7 +209,7 @@ Create a journal containing:
 }
 ```
 
-Joocode should refuse destructive overwrites when a managed field was changed externally and ownership is ambiguous.
+Joocode refuses destructive overwrites when a managed field was changed externally and ownership is ambiguous.
 
 ## P1 — Routing superpowers
 
@@ -217,7 +217,8 @@ This is the highest-value feature group for Joocode's product direction.
 
 ### Model combos
 
-Status: **ordered failover and weighted round-robin shipped**.
+Status: **complete**. Ordered failover, weighted round-robin, cooldown-aware
+fallback, and passive lowest-latency selection are shipped.
 
 Expose virtual models such as:
 
@@ -241,10 +242,9 @@ Example configuration:
 }
 ```
 
-Supported strategies should eventually include:
+Supported strategies include:
 
 - ordered failover;
-- round-robin;
 - weighted round-robin;
 - lowest-latency healthy destination;
 - quota/cooldown-aware selection.
@@ -253,9 +253,9 @@ Supported strategies should eventually include:
 
 Classify upstream failures before retrying:
 
-Status: **generic retries and failover classification shipped**. Provider pacing,
-and adaptive quota-aware cooldown remain pending. Basic provider cooldown and
-per-provider concurrency limits are shipped.
+Status: **complete**. Generic retries, failover classification, proactive pacing,
+bounded exponential error-streak cooldown, `Retry-After`, stream-lifetime
+concurrency permits, and passive lowest-latency routing are shipped.
 
 ```rust
 enum UpstreamFailure {
@@ -407,20 +407,21 @@ Joocode should remain local-first until non-loopback authentication, CORS restri
 
 ## Recommended next three initiatives
 
-### 1. Finish integration ownership journals
+### 1. Add generic credential pools
 
-Extend managed-subtree conflict detection beyond Zed to Codex, Claude Code,
-Grok Build, GitHub Copilot App, and background-service files.
+Support multiple API keys and source-owned OAuth accounts with explicit
+active/failover/round-robin policies, without copying credentials into desktop
+clients.
 
-### 2. Add adaptive routing signals
-
-Record bounded latency, retry, failover, and error-streak metrics, then use them
-for adaptive cooldown, proactive pacing, and lowest-latency healthy combos.
-
-### 3. Deepen native provider protocols
+### 2. Deepen native provider protocols
 
 Add native Responses, Anthropic Messages, and Gemini upstream transports before
 Responses WebSocket and standalone image endpoints.
+
+### 3. Complete request economics observability
+
+Record privacy-safe token counts plus retry/failover/model-distribution counters
+and latency histograms. Never store prompts, tool arguments, or response bodies.
 
 ## Strategic direction
 

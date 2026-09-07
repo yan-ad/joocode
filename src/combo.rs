@@ -144,6 +144,16 @@ mod tests {
         let combo = load_from(&path).unwrap().remove(0);
         assert_eq!(combo.strategy, Strategy::WeightedRoundRobin);
         assert_eq!(combo.models[0].weight(), 3);
+
+        fs::write(
+            &path,
+            r#"[{"name":"fastest","strategy":"lowest-latency","models":["a/model","b/model"]}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_from(&path).unwrap()[0].strategy,
+            Strategy::LowestLatency
+        );
     }
 
     #[test]
