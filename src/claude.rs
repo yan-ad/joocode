@@ -3,13 +3,15 @@ use std::{fs, path::PathBuf};
 use anyhow::Context;
 use serde_json::{Map, Value, json};
 
-use crate::provider::Registry;
+use crate::{integration_journal, provider::Registry};
 
 const LOCAL_TOKEN: &str = "joocode-local";
 
 pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<PathBuf> {
     let path = settings_path()?;
     let mut root = read_settings(&path)?;
+    integration_journal::assert_unchanged("claude", &path, &managed_state(&root))?;
+    integration_journal::assert_unchanged("claude", &path, &managed_state(&root))?;
     let object = root
         .as_object_mut()
         .context("Claude Code settings root must be an object")?;
@@ -37,12 +39,14 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<PathBuf> {
         env.insert("ANTHROPIC_SMALL_FAST_MODEL".into(), Value::String(model));
     }
     write_settings(&path, &root)?;
+    integration_journal::record("claude", &path, &managed_state(&root))?;
     Ok(path)
 }
 
 pub fn uninstall() -> anyhow::Result<()> {
     let path = settings_path()?;
     if !path.is_file() {
+        integration_journal::remove("claude")?;
         return Ok(());
     }
     let mut root = read_settings(&path)?;
@@ -62,7 +66,25 @@ pub fn uninstall() -> anyhow::Result<()> {
             }
         }
     }
-    write_settings(&path, &root)
+    write_settings(&path, &root)?;
+    integration_journal::remove("claude")
+}
+
+fn managed_state(root: &Value) -> Value {
+    let env = root.get("env").and_then(Value::as_object);
+    let mut managed = Map::new();
+    for key in [
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+    ] {
+        if let Some(value) = env.and_then(|env| env.get(key)) {
+            managed.insert(key.into(), value.clone());
+        }
+    }
+    Value::Object(managed)
 }
 
 fn settings_path() -> anyhow::Result<PathBuf> {

@@ -1,6 +1,9 @@
 use std::{fs, path::PathBuf};
 
 use anyhow::Context;
+use serde_json::Value;
+
+use crate::integration_journal;
 
 const LABEL: &str = "dev.joocode.proxy";
 
@@ -222,8 +225,10 @@ fn service_contents() -> anyhow::Result<String> {
 #[cfg(target_os = "macos")]
 fn ensure_runtime_service() -> anyhow::Result<()> {
     let path = runtime_entry_path()?;
-    fs::write(&path, service_contents()?)
-        .with_context(|| format!("failed to write {}", path.display()))
+    let content = service_contents()?;
+    integration_journal::assert_unchanged("autostart", &path, &managed_file(&path)?)?;
+    fs::write(&path, &content).with_context(|| format!("failed to write {}", path.display()))?;
+    integration_journal::record("autostart", &path, &Value::String(content))
 }
 
 #[cfg(target_os = "macos")]
@@ -372,8 +377,10 @@ fn ensure_runtime_service() -> anyhow::Result<()> {
     let parent = path.parent().context("invalid systemd user path")?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let executable = systemd_escape(&executable()?.to_string_lossy());
-    fs::write(&path, systemd_service(&executable))
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    let content = systemd_service(&executable);
+    integration_journal::assert_unchanged("autostart", &path, &managed_file(&path)?)?;
+    fs::write(&path, &content).with_context(|| format!("failed to write {}", path.display()))?;
+    integration_journal::record("autostart", &path, &Value::String(content))?;
     run_systemctl(["daemon-reload"])
 }
 
@@ -464,8 +471,18 @@ fn supervisor_script() -> anyhow::Result<String> {
 #[cfg(target_os = "windows")]
 fn ensure_runtime_service() -> anyhow::Result<()> {
     let path = runtime_entry_path()?;
-    fs::write(&path, supervisor_script()?)
-        .with_context(|| format!("failed to write {}", path.display()))
+    let content = supervisor_script()?;
+    integration_journal::assert_unchanged("autostart", &path, &managed_file(&path)?)?;
+    fs::write(&path, &content).with_context(|| format!("failed to write {}", path.display()))?;
+    integration_journal::record("autostart", &path, &Value::String(content))
+}
+
+fn managed_file(path: &std::path::Path) -> anyhow::Result<Value> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(Value::String(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
+        Err(error) => Err(error).with_context(|| format!("failed reading {}", path.display())),
+    }
 }
 
 #[cfg(target_os = "windows")]

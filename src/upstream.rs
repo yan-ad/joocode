@@ -174,11 +174,7 @@ impl Runtime {
                 let now = Instant::now();
                 let wait = started
                     .get(provider)
-                    .map(|last| {
-                        self.inner
-                            .min_interval
-                            .saturating_sub(now.duration_since(*last))
-                    })
+                    .map(|last| (*last + self.inner.min_interval).saturating_duration_since(now))
                     .unwrap_or_default();
                 started.insert(provider.to_owned(), now + wait);
                 wait
@@ -403,10 +399,12 @@ pub async fn send_json(
             Ok(response) => {
                 let class = classify_status(response.status());
                 let success = response.status().is_success();
-                budget
-                    .runtime
-                    .record_result(budget.provider, started.elapsed(), success)
-                    .await;
+                if success || class != FailureClass::InvalidRequest {
+                    budget
+                        .runtime
+                        .record_result(budget.provider, started.elapsed(), success)
+                        .await;
+                }
                 if attempt < attempts && retry_same_provider(class) {
                     let wait = retry_after(&response)
                         .unwrap_or(delay)

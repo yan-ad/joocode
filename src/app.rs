@@ -2258,6 +2258,7 @@ mod tests {
             remote: true,
             token: Some("secret".into()),
             label: "API",
+            rate_limiter: RateLimiter::new(false, 1, 1),
         };
         let app = Router::new()
             .route("/protected", get(echo_headers))

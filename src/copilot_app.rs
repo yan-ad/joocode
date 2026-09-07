@@ -8,7 +8,7 @@ use keyring::Entry;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 
-use crate::provider::Registry;
+use crate::{integration_journal, provider::Registry};
 
 const PROVIDER_ID: &str = "6a6f6f63-6f64-4565-8000-000000000001";
 const PROVIDER_NAME: &str = "Joocode";
@@ -30,10 +30,12 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<()> {
 pub fn uninstall() -> anyhow::Result<()> {
     let Some(path) = database_path().filter(|path| path.is_file()) else {
         delete_credential(PROVIDER_ID);
+        integration_journal::remove("copilot-app")?;
         return Ok(());
     };
     let mut connection = open_database(&path)?;
     ensure_schema(&connection)?;
+    integration_journal::assert_unchanged("copilot-app", &path, &managed_state(&connection)?)?;
     let transaction = connection.transaction()?;
     let provider_ids = managed_provider_ids(&transaction)?;
     for provider_id in &provider_ids {
@@ -55,6 +57,7 @@ pub fn uninstall() -> anyhow::Result<()> {
         params![MANAGED_PROVIDER_KEY],
     )?;
     transaction.commit()?;
+    integration_journal::remove("copilot-app")?;
     for provider_id in provider_ids {
         delete_credential(&provider_id);
     }
@@ -69,6 +72,7 @@ fn install_at(registry: &Registry, base_url: &str, path: &Path) -> anyhow::Resul
     );
     let mut connection = open_database(path)?;
     ensure_schema(&connection)?;
+    integration_journal::assert_unchanged("copilot-app", path, &managed_state(&connection)?)?;
     let transaction = connection.transaction()?;
     let provider_id = resolve_provider_id(&transaction, base_url)?;
     let settings = json!({
@@ -161,7 +165,59 @@ fn install_at(registry: &Registry, base_url: &str, path: &Path) -> anyhow::Resul
     }
     invalidate_model_cache(&transaction)?;
     transaction.commit()?;
+    integration_journal::record("copilot-app", path, &managed_state(&connection)?)?;
     Ok(provider_id)
+}
+
+fn managed_state(connection: &Connection) -> anyhow::Result<serde_json::Value> {
+    let mut providers = Vec::new();
+    let mut provider_ids = vec![PROVIDER_ID.to_owned()];
+    if let Some(provider_id) = connection
+        .query_row(
+            "SELECT value FROM app_state WHERE key = ?1",
+            params![MANAGED_PROVIDER_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        && !provider_ids.contains(&provider_id)
+    {
+        provider_ids.push(provider_id);
+    }
+    for provider_id in provider_ids {
+        let provider = connection
+            .query_row(
+                "SELECT name, type, settings_json FROM model_providers WHERE id = ?1",
+                params![provider_id],
+                |row| {
+                    Ok(json!({
+                        "id": provider_id,
+                        "name": row.get::<_, String>(0)?,
+                        "type": row.get::<_, String>(1)?,
+                        "settings": row.get::<_, String>(2)?,
+                    }))
+                },
+            )
+            .optional()?;
+        let mut models = Vec::new();
+        let mut statement = connection.prepare(
+            "SELECT model_id, display_name, max_prompt_tokens, max_output_tokens, supported_reasoning_efforts
+             FROM provider_models WHERE provider_id = ?1 ORDER BY model_id",
+        )?;
+        let rows = statement.query_map(params![provider_id], |row| {
+            Ok(json!({
+                "model_id": row.get::<_, String>(0)?,
+                "display_name": row.get::<_, String>(1)?,
+                "max_prompt_tokens": row.get::<_, Option<i64>>(2)?,
+                "max_output_tokens": row.get::<_, Option<i64>>(3)?,
+                "reasoning": row.get::<_, Option<String>>(4)?,
+            }))
+        })?;
+        for row in rows {
+            models.push(row?);
+        }
+        providers.push(json!({"provider": provider, "models": models}));
+    }
+    Ok(json!({"providers": providers}))
 }
 
 fn resolve_provider_id(

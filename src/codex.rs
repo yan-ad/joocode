@@ -7,9 +7,13 @@ use std::{
 
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
+use sha2::Digest;
 use toml_edit::{DocumentMut, Item, Table, value};
 
-use crate::provider::{ModelInfo, Registry};
+use crate::{
+    integration_journal,
+    provider::{ModelInfo, Registry},
+};
 
 const PROVIDER_ID: &str = "joocode";
 const JOC_PROVIDER_ID: &str = "joc";
@@ -24,6 +28,32 @@ pub struct InstallResult {
     pub total_model_count: usize,
 }
 
+fn managed_state(document: &DocumentMut, catalog_path: &Path) -> Value {
+    let provider = document
+        .get("model_providers")
+        .and_then(Item::as_table)
+        .and_then(|providers| providers.get(PROVIDER_ID))
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let selected_provider = document
+        .get("model_provider")
+        .and_then(Item::as_str)
+        .filter(|provider| *provider == PROVIDER_ID)
+        .unwrap_or_default();
+    let selected_catalog = document
+        .get("model_catalog_json")
+        .and_then(Item::as_str)
+        .filter(|path| Path::new(path) == catalog_path)
+        .unwrap_or_default();
+    let catalog = fs::read(catalog_path).unwrap_or_default();
+    json!({
+        "provider": provider,
+        "selected_provider": selected_provider,
+        "selected_catalog": selected_catalog,
+        "catalog_sha256": format!("{:x}", sha2::Sha256::digest(catalog)),
+    })
+}
+
 pub fn uninstall() -> anyhow::Result<()> {
     let home = codex_home()?;
     let config_path = home.join("config.toml");
@@ -32,6 +62,16 @@ pub fn uninstall() -> anyhow::Result<()> {
         let mut document = fs::read_to_string(&config_path)?
             .parse::<DocumentMut>()
             .context("Codex config.toml is not valid TOML")?;
+        integration_journal::assert_unchanged(
+            "codex",
+            &config_path,
+            &managed_state(&document, &catalog_path),
+        )?;
+        integration_journal::assert_unchanged(
+            "codex",
+            &config_path,
+            &managed_state(&document, &catalog_path),
+        )?;
         if let Some(providers) = document
             .get_mut("model_providers")
             .and_then(Item::as_table_mut)
@@ -54,8 +94,14 @@ pub fn uninstall() -> anyhow::Result<()> {
         fs::write(&config_path, document.to_string())?;
     }
     match fs::remove_file(catalog_path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => {
+            integration_journal::remove("codex")?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            integration_journal::remove("codex")?;
+            Ok(())
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -121,6 +167,11 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
 
     fs::write(&config_path, document.to_string())
         .with_context(|| format!("failed to write {}", config_path.display()))?;
+    integration_journal::record(
+        "codex",
+        &config_path,
+        &managed_state(&document, &catalog_path),
+    )?;
 
     for legacy_catalog in [
         home.join("joc-models.json"),

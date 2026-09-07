@@ -6,13 +6,15 @@ use std::{
 use anyhow::Context;
 use toml_edit::{DocumentMut, Item, Table, value};
 
-use crate::provider::Registry;
+use crate::{integration_journal, provider::Registry};
 
 const MODEL_PREFIX: &str = "joocode/";
 
 pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<PathBuf> {
     let path = config_path()?;
     let mut document = read_document(&path)?;
+    integration_journal::assert_unchanged("grok", &path, &managed_state(&document))?;
+    integration_journal::assert_unchanged("grok", &path, &managed_state(&document))?;
     if document.get("model").is_none() {
         document.insert("model", Item::Table(Table::new()));
     }
@@ -37,19 +39,43 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<PathBuf> {
         models[&model.id] = Item::Table(entry);
     }
     write_document(&path, &document)?;
+    integration_journal::record("grok", &path, &managed_state(&document))?;
     Ok(path)
 }
 
 pub fn uninstall() -> anyhow::Result<()> {
     let path = config_path()?;
     if !path.is_file() {
+        integration_journal::remove("grok")?;
         return Ok(());
     }
     let mut document = read_document(&path)?;
     if let Some(models) = document.get_mut("model").and_then(Item::as_table_mut) {
         remove_managed_models(models);
     }
-    write_document(&path, &document)
+    write_document(&path, &document)?;
+    integration_journal::remove("grok")
+}
+
+fn managed_state(document: &DocumentMut) -> serde_json::Value {
+    let mut managed = serde_json::Map::new();
+    if let Some(models) = document.get("model").and_then(Item::as_table) {
+        for (key, item) in models {
+            let Some(table) = item.as_table() else {
+                continue;
+            };
+            let owned = key.starts_with(MODEL_PREFIX)
+                || table.get("api_key").and_then(Item::as_str) == Some("joocode-local")
+                || table
+                    .get("description")
+                    .and_then(Item::as_str)
+                    .is_some_and(|description| description.ends_with(" via Joocode"));
+            if owned {
+                managed.insert(key.to_owned(), serde_json::Value::String(item.to_string()));
+            }
+        }
+    }
+    serde_json::Value::Object(managed)
 }
 
 fn remove_managed_models(models: &mut Table) {

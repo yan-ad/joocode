@@ -69,7 +69,7 @@ Status legend: **Complete**, **Partial**, **Planned**, or **Intentional**.
 | Security | Remote rate limiting | Yes | Configurable token-bucket admission limiter | **Complete** |
 | Security | Separate management-plane credential | Yes | Dedicated management token required remotely | **Complete** |
 | Integrations | Desktop auto-configuration | Yes | Codex, Zed, Claude Code, Grok Build, GitHub Copilot App; JetBrains endpoint guidance | **Complete/Partial by client** |
-| Integrations | Configuration ownership journal | Yes | Managed-subtree conflict detection for Zed | **Partial** — other clients pending |
+| Integrations | Configuration ownership journal | Yes | Managed-resource conflict detection for Codex, Zed, Claude Code, Grok Build, Copilot App and service definitions | **Complete** |
 | Integrations | Background service and auto-start | Yes | macOS, Linux, Windows lifecycle controls | **Complete** |
 | Integrations | Self-update | Yes | Check, checksum, replace/relaunch on Unix and Windows | **Complete** |
 | Catalog | Model capability metadata | Yes | Context/output/reasoning and direct-tool compatibility | **Partial** — deeper provider metadata pending |
@@ -178,6 +178,11 @@ client request. Invented or undeclared tool names produce an explicit protocol
 error; streaming responses never finish successfully with an undeclared call.
 
 ### Integration ownership journal
+
+**Status: implemented.** Joocode fingerprints only the configuration subtree,
+catalog, database rows, or service definition it owns. Unrelated user settings
+remain editable; externally modified managed values are rejected rather than
+silently overwritten.
 
 Joocode increasingly edits external configuration and state:
 
