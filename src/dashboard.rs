@@ -17,6 +17,34 @@ pub struct DashboardProviderRuntimeSnapshot {
     pub consecutive_failures: u32,
 }
 
+fn draw_success(frame: &mut Frame<'_>, message: &str) {
+    let modal = draw_modal_shell(
+        frame,
+        "Operation complete",
+        76,
+        16,
+        Line::from(Span::styled(
+            "Enter return",
+            Style::default().fg(MODAL_ACCENT),
+        )),
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Success",
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(message, Style::default().fg(Color::Gray))),
+        ])
+        .style(Style::default().bg(MODAL_BACKGROUND))
+        .wrap(Wrap { trim: true }),
+        modal.content,
+    );
+}
+
 fn draw_codex_set_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
     let advertised = data.subagent_catalog.resolve(&data.models).len();
     let enabled = data
@@ -523,10 +551,10 @@ fn draw_provider_models(frame: &mut Frame<'_>, provider: &ProviderSummary, selec
 // terminals advertise colour support inconsistently and render RGB values as
 // solid magenta/green surfaces. The ANSI palette remains readable across
 // Terminal.app, iTerm2, Windows Terminal, tmux, SSH, and 16-colour terminals.
-const MODAL_BACKGROUND: Color = Color::Black;
+const MODAL_BACKGROUND: Color = Color::Reset;
 const MODAL_OVERLAY: Color = Color::Reset;
 const MODAL_ACCENT: Color = Color::LightBlue;
-const PANEL_BACKGROUND: Color = Color::Black;
+const PANEL_BACKGROUND: Color = Color::Reset;
 const PANEL_BORDER: Color = Color::DarkGray;
 const MUTED_TEXT: Color = Color::Gray;
 
@@ -1613,6 +1641,7 @@ enum Screen {
     ProviderLoading {
         selected: usize,
     },
+    Success(String),
     Error(String),
     UpdateAvailable(String),
     Updating {
@@ -1832,7 +1861,7 @@ fn receive_events(
                 data.disabled_models = disabled_models;
                 data.subagent_catalog = subagent_catalog;
             }
-            Ok(DashboardEvent::ProviderTested(message)) => *screen = Screen::Error(message),
+            Ok(DashboardEvent::ProviderTested(message)) => *screen = Screen::Success(message),
             Ok(DashboardEvent::UpdateAvailable(tag)) => *screen = Screen::UpdateAvailable(tag),
             Ok(DashboardEvent::UpdateInstalled) => return Some(DashboardExit::Restart),
             Ok(DashboardEvent::ShutdownRequested) => return Some(DashboardExit::Quit),
@@ -2144,7 +2173,9 @@ fn handle_key_with_providers(
                 *screen = Screen::Error("update channel is unavailable".into());
             }
         }
-        Screen::Error(_) | Screen::EasterEgg { .. } if key == KeyCode::Enter => {
+        Screen::Success(_) | Screen::Error(_) | Screen::EasterEgg { .. }
+            if key == KeyCode::Enter =>
+        {
             *screen = Screen::Base {
                 page: Page::Overview,
             };
@@ -2233,6 +2264,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             unreachable!("updating is rendered as a full-screen animated scene")
         }
         Screen::EasterEgg { .. } => unreachable!("easter egg is rendered as a full-screen scene"),
+        Screen::Success(message) => draw_success(frame, message),
         Screen::Error(error) => draw_error(frame, error),
     }
 
@@ -2275,6 +2307,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
         | Screen::ProviderPoolKey { .. }
         | Screen::ProviderLoading { .. }
         | Screen::UpdateAvailable(_)
+        | Screen::Success(_)
         | Screen::Error(_) => unreachable!("modal screens return before global footer rendering"),
         Screen::Updating { .. } => {
             unreachable!("updating has its own full-screen progress scene")
@@ -3519,6 +3552,54 @@ mod tests {
         assert!(!rendered.contains('┌'));
         assert!(cells.iter().any(|cell| cell.bg == MODAL_BACKGROUND));
         assert!(cells.iter().any(|cell| cell.bg == MODAL_ACCENT));
+        assert!(!cells.iter().any(|cell| cell.bg == Color::Black));
+    }
+
+    #[test]
+    fn successful_operation_uses_success_modal_instead_of_error_modal() {
+        let mut data = DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 0,
+            provider_count: 0,
+            autostart: AutoStartStatus::Off,
+            run_in_background: true,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
+            providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
+            port_warning: None,
+        };
+        let mut screen = Screen::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(DashboardEvent::ProviderTested(
+            "Codex synchronized: 52 Joocode models.".into(),
+        ))
+        .unwrap();
+
+        receive_events(&mut data, &mut screen, &rx);
+        assert!(matches!(screen, Screen::Success(_)));
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &data, &screen)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Operation complete"));
+        assert!(rendered.contains("Success"));
+        assert!(!rendered.contains("Something went wrong"));
     }
 
     #[test]
