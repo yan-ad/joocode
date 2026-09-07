@@ -133,26 +133,93 @@ fn draw_usage_page(frame: &mut Frame<'_>, area: Rect, runtime: &DashboardRuntime
 }
 
 fn draw_storage_page(frame: &mut Frame<'_>, area: Rect, storage: &DashboardStorageSnapshot) {
-    let lines = if storage.entries.is_empty() {
-        vec![Line::from("Storage paths are unavailable.")]
+    let mut lines = vec![
+        Line::from(format!(
+            "Tracked files: {}   Total size: {}",
+            storage.entries.len(),
+            format_bytes(storage.total_bytes())
+        )),
+        Line::from(""),
+    ];
+    if storage.entries.is_empty() {
+        lines.push(Line::from("Storage paths are unavailable."));
     } else {
-        storage
-            .entries
-            .iter()
-            .map(|entry| {
-                Line::from(format!(
-                    "{:<20} {:>10}  {}",
-                    entry.label,
-                    entry
-                        .size_bytes
-                        .map(format_bytes)
-                        .unwrap_or_else(|| "missing".into()),
-                    entry.path,
-                ))
-            })
-            .collect()
-    };
+        lines.extend(storage.entries.iter().map(|entry| {
+            Line::from(format!(
+                "{:<20} {:>10}  {}",
+                entry.label,
+                entry
+                    .size_bytes
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "missing".into()),
+                entry.path,
+            ))
+        }));
+    }
     draw_read_only_page(frame, area, "Storage", lines);
+}
+
+fn draw_system_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
+    let system = &data.system;
+    let lines = vec![
+        Line::from(Span::styled(
+            "RUNTIME",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("Mode                     {}", system.mode)),
+        Line::from(format!("Listener                 {}", data.listening)),
+        Line::from(format!(
+            "Background handoff       {}",
+            if data.run_in_background { "On" } else { "Off" }
+        )),
+        Line::from(format!(
+            "Auto-start               {}",
+            data.autostart.label()
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "SECURITY",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("Data-plane auth          {}", system.data_auth)),
+        Line::from(format!(
+            "Management auth          {}",
+            system.management_auth
+        )),
+        Line::from(format!(
+            "Allowed CORS origins     {}",
+            system.allowed_origins
+        )),
+        Line::from(format!("Remote rate limit        {}", system.rate_limit)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "BOUNDS",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!(
+            "Request body             {}",
+            format_bytes(system.max_request_bytes as u64)
+        )),
+        Line::from(format!(
+            "SSE event                {}",
+            format_bytes(system.max_sse_event_bytes as u64)
+        )),
+        Line::from(format!(
+            "Tool arguments           {}",
+            format_bytes(system.max_tool_argument_bytes as u64)
+        )),
+        Line::from(format!(
+            "Stream idle timeout      {}s",
+            system.stream_idle_timeout_secs
+        )),
+    ];
+    draw_read_only_page(frame, area, "System", lines);
 }
 
 fn draw_logs_page(frame: &mut Frame<'_>, area: Rect, events: &[DashboardRequestEvent]) {
@@ -240,6 +307,28 @@ pub struct DashboardStorageSnapshot {
     pub entries: Vec<DashboardStorageEntry>,
 }
 
+impl DashboardStorageSnapshot {
+    fn total_bytes(&self) -> u64 {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.size_bytes)
+            .sum()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DashboardSystemSnapshot {
+    pub mode: String,
+    pub data_auth: String,
+    pub management_auth: String,
+    pub allowed_origins: usize,
+    pub max_request_bytes: usize,
+    pub max_sse_event_bytes: usize,
+    pub max_tool_argument_bytes: usize,
+    pub stream_idle_timeout_secs: u64,
+    pub rate_limit: String,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DashboardRequestEvent {
     pub method: String,
@@ -294,6 +383,7 @@ pub struct DashboardData {
     pub port_warning: Option<String>,
     pub runtime: DashboardRuntimeSnapshot,
     pub storage: DashboardStorageSnapshot,
+    pub system: DashboardSystemSnapshot,
     pub request_events: Vec<DashboardRequestEvent>,
 }
 
@@ -325,10 +415,11 @@ enum Page {
     Usage,
     Storage,
     Integrations,
+    System,
 }
 
 impl Page {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Overview,
         Self::Providers,
         Self::Models,
@@ -338,6 +429,7 @@ impl Page {
         Self::Usage,
         Self::Storage,
         Self::Integrations,
+        Self::System,
     ];
 
     const fn label(self) -> &'static str {
@@ -351,6 +443,7 @@ impl Page {
             Self::Usage => "Usage",
             Self::Storage => "Storage",
             Self::Integrations => "Integrations",
+            Self::System => "System",
         }
     }
 
@@ -368,6 +461,9 @@ impl Page {
     }
 
     fn from_number(character: char) -> Option<Self> {
+        if character == '0' {
+            return Some(Self::System);
+        }
         character
             .to_digit(10)
             .and_then(|number| number.checked_sub(1))
@@ -1396,6 +1492,7 @@ impl DashboardData {
             port_warning,
             runtime: DashboardRuntimeSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             request_events: Vec::new(),
         }
     }
@@ -2331,6 +2428,7 @@ fn draw_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, page: Page
                 Line::from("Press Enter to open configuration."),
             ],
         ),
+        Page::System => draw_system_page(frame, area, data),
     }
 }
 
@@ -2707,6 +2805,7 @@ mod tests {
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             port_warning: None,
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
         };
@@ -2852,12 +2951,7 @@ mod tests {
             page: Page::Overview,
         };
         handle_key(&mut screen, KeyCode::BackTab, &tx);
-        assert!(matches!(
-            screen,
-            Screen::Base {
-                page: Page::Integrations
-            }
-        ));
+        assert!(matches!(screen, Screen::Base { page: Page::System }));
         handle_key(&mut screen, KeyCode::Tab, &tx);
         assert!(matches!(
             screen,
@@ -2912,6 +3006,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -2933,6 +3028,83 @@ mod tests {
     }
 
     #[test]
+    fn system_and_storage_pages_show_runtime_policy_and_totals() {
+        let backend = TestBackend::new(110, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut data = DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: "http://0.0.0.0:10100".into(),
+            model_count: 1,
+            provider_count: 1,
+            autostart: AutoStartStatus::On,
+            run_in_background: true,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
+            providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot {
+                mode: "Remote hub".into(),
+                data_auth: "Required".into(),
+                management_auth: "Separate token".into(),
+                allowed_origins: 2,
+                max_request_bytes: 16 * 1024 * 1024,
+                max_sse_event_bytes: 1024 * 1024,
+                max_tool_argument_bytes: 1024 * 1024,
+                stream_idle_timeout_secs: 90,
+                rate_limit: "20/s burst 40".into(),
+            },
+            storage: DashboardStorageSnapshot {
+                entries: vec![DashboardStorageEntry {
+                    label: "settings.json".into(),
+                    path: "/tmp/settings.json".into(),
+                    size_bytes: Some(2048),
+                }],
+            },
+            request_events: vec![],
+            port_warning: None,
+        };
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Base { page: Page::System }))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Remote hub"));
+        assert!(rendered.contains("Separate token"));
+        assert!(rendered.contains("16.0 MiB"));
+
+        data.listening = "http://127.0.0.1:10100".into();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &data,
+                    &Screen::Base {
+                        page: Page::Storage,
+                    },
+                )
+            })
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Tracked files: 1"));
+        assert!(rendered.contains("2.0 KiB"));
+    }
+
+    #[test]
     fn narrow_shell_uses_top_tabs() {
         let backend = TestBackend::new(72, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2951,6 +3123,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3037,6 +3210,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3084,6 +3258,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3135,6 +3310,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3182,6 +3358,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3278,6 +3455,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3324,6 +3502,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3395,6 +3574,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3440,6 +3620,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3498,6 +3679,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3535,6 +3717,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3568,6 +3751,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3624,6 +3808,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3704,6 +3889,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3753,6 +3939,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3789,6 +3976,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,
@@ -3829,6 +4017,7 @@ mod tests {
             disabled_models: BTreeSet::new(),
             subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
             runtime: DashboardRuntimeSnapshot::default(),
+            system: DashboardSystemSnapshot::default(),
             storage: DashboardStorageSnapshot::default(),
             request_events: vec![],
             port_warning: None,

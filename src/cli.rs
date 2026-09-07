@@ -63,6 +63,17 @@ mod tests {
     }
 
     #[test]
+    fn accepts_authenticated_hub_command() {
+        let cli =
+            Cli::try_parse_from(["jcx", "hub", "--host", "0.0.0.0", "--port", "18125"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Hub { host, port })
+                if host == "0.0.0.0".parse::<IpAddr>().unwrap() && port == 18125
+        ));
+    }
+
+    #[test]
     fn flagship_command_name_is_jcx() {
         assert_eq!(Cli::command().get_name(), "jcx");
     }
@@ -180,6 +191,15 @@ pub enum Command {
     Serve {
         #[arg(long, default_value = "127.0.0.1")]
         host: IpAddr,
+        #[arg(long, default_value_t = 10100)]
+        port: u16,
+    },
+    /// Run Joocode as an authenticated remote hub.
+    Hub {
+        /// Address exposed to the LAN, VPN, or tailnet.
+        #[arg(long, default_value = "0.0.0.0")]
+        host: IpAddr,
+        /// Remote hub port.
         #[arg(long, default_value_t = 10100)]
         port: u16,
     },

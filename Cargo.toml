@@ -35,6 +35,7 @@ semver = "1"
 sha2 = "0.10"
 tar = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "sync"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["io"] }
 toml_edit = "0.23"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
@@ -44,7 +45,6 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
-tokio-tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(windows)'.build-dependencies]

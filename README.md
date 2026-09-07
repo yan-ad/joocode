@@ -684,6 +684,16 @@ The connection supports repeated turns and bounded `previous_response_id`
 history for routed Chat-compatible models. Native Responses providers retain
 their upstream conversation semantics.
 
+Server-to-server Realtime WebSocket relay is also available for native
+OpenAI-compatible providers:
+
+```text
+ws://127.0.0.1:10100/v1/realtime?model=provider/model
+```
+
+Joocode relays Realtime events and audio payloads bidirectionally. WebRTC and
+SIP session orchestration remain provider/client responsibilities.
+
 ### LAN or remote binding
 
 Loopback keeps the zero-configuration placeholder-key behavior. Binding to a
@@ -695,8 +705,12 @@ export JOOCODE_MANAGEMENT_AUTH_TOKEN='replace-with-a-different-random-token'
 export JOOCODE_ALLOWED_ORIGINS='https://app.example.com,https://admin.example.com'
 export JOOCODE_REMOTE_REQUESTS_PER_SECOND=20
 export JOOCODE_REMOTE_REQUEST_BURST=40
-jcx serve --host 0.0.0.0 --port 10100
+jcx hub --host 0.0.0.0 --port 10100
 ```
+
+`jcx hub` is the lightweight remote mode for LAN, VPN, and tailnet use. It
+reuses the same authenticated data and management planes without adding a web
+dashboard; Ratatui remains Joocode's primary control plane.
 
 Remote clients must send either:
 

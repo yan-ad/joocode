@@ -128,6 +128,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     match command {
         Command::Serve { host, port } => app::serve(host, port, registry, selection).await,
+        Command::Hub { host, port } => app::serve_hub(host, port, registry, selection).await,
         Command::Models => {
             for model in registry.models() {
                 println!("{}\t{}", model.id, model.name);

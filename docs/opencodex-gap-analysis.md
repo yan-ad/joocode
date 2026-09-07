@@ -41,10 +41,10 @@ Status legend: **Complete**, **Partial**, **Planned**, or **Intentional**.
 | Gateway | OpenAI Responses | Yes | Native routed Responses plus compatibility translation for Chat providers | **Complete** |
 | Gateway | Anthropic Messages | Yes | Native routed Messages plus compatibility translation for Chat providers | **Complete** |
 | Gateway | Gemini/Cloud Code bridge | Yes | Native Gemini routing, OpenAI-compatible translation and Cloud Code bridge | **Complete** |
-| Gateway | Responses compaction | Yes | Native OpenAI/ChatGPT passthrough | **Partial** — routed providers pending |
+| Gateway | Responses compaction | Yes | Native OpenAI/ChatGPT and routed native Responses providers | **Complete for compatible native providers** |
 | Gateway | Responses WebSocket | Yes | Persistent `/v1/responses` transport with bounded multi-turn history | **Complete** |
 | Gateway | Image generation/editing | Yes | `/v1/images/generations` and `/v1/images/edits` | **Complete** |
-| Gateway | Realtime/Live API | Yes | No | **Planned P5** |
+| Gateway | Realtime/Live API | Yes | Server-to-server WebSocket relay for native OpenAI-compatible providers | **Complete for WebSocket relay** |
 | Tools | Function tools | Yes | Yes | **Complete** |
 | Tools | Namespace/MCP tools | Yes | Reversible namespace flattening for routed models | **Complete** |
 | Tools | Undeclared tool rejection | Yes | Non-streaming and streaming validation | **Complete** |
@@ -59,7 +59,7 @@ Status legend: **Complete**, **Partial**, **Planned**, or **Intentional**.
 | Routing | Lowest-latency/health-aware selection | Yes | Passive EWMA latency and health-aware combo routing | **Complete** |
 | Credentials | Source-owned credentials | Yes | Reuses each source's credential store without copying secrets | **Complete** |
 | Credentials | Generic API-key pools | Yes | Secret-safe pool editing and round-robin bearer selection | **Complete** |
-| Credentials | Multi-account OAuth pools | Yes | Limited source-specific support | **Planned P2** |
+| Credentials | Multi-account OAuth pools | Yes | Delegated to source-owned stores such as OCX and Copilot | **Intentional delegation** |
 | Security | Non-loopback admission auth | Yes | Mandatory `JOOCODE_API_AUTH_TOKEN` | **Complete** |
 | Security | Restrictive remote CORS | Yes | Explicit remote origin allowlist | **Complete** |
 | Security | Request body limits | Yes | Configurable, default 16 MiB | **Complete** |
@@ -82,8 +82,8 @@ Status legend: **Complete**, **Partial**, **Planned**, or **Intentional**.
 | Observability | Codex browser/computer tool calls | No/limited | Privacy-safe total and per-tool Prometheus metrics | **Complete — Joocode advantage** |
 | Observability | Token/retry/failover breakdown | Yes | Token totals, retry/failover counters, latency buckets and route distribution | **Complete** |
 | UI | Browser management dashboard | Yes | Multi-page Ratatui control plane for overview, providers, models, Codex, logs, usage, storage and integrations | **Intentional TUI-first difference** |
-| Ecosystem | Remote authenticated hub | Yes | No | **Planned P5** |
-| Ecosystem | Web-search/vision sidecars | Yes | No | **Planned P5** |
+| Ecosystem | Remote authenticated hub | Yes | `jcx hub` with separate data/management credentials and rate limiting | **Complete for lightweight remote mode** |
+| Ecosystem | Web-search/vision sidecars | Yes | Delegated to Codex Apps/MCP or a dedicated agent runtime | **Intentional boundary** |
 | Ecosystem | On-demand Codex shim | Yes | `jcx codex -- <args>` | **Complete** |
 
 ## P0 — Security and correctness
@@ -284,10 +284,10 @@ Maintain runtime state per provider route:
 
 ## P2 — Credential and catalog controls
 
-**Status: mostly complete.** Generic API-key pools, provider health tests,
+**Status: complete for Joocode's credential boundary.** Generic API-key pools, provider health tests,
 disabled models, featured/fallback subagent catalogs, advertised-entry limits,
-and reasoning-effort caps are managed from the Ratatui control plane. Full
-multi-account OAuth rotation remains source-specific and is the main P2 gap.
+and reasoning-effort caps are managed from the Ratatui control plane. OAuth
+rotation remains source-owned so Joocode never copies private login sessions.
 
 ### API-key pools
 
@@ -324,11 +324,9 @@ providers that do not expose their native wire API.
 
 Remaining protocol work:
 
-1. Routed `/v1/responses/compact` for providers with a compatible native
-   compaction contract.
-2. Provider-specific preservation of encrypted reasoning and prompt-cache
+1. Provider-specific preservation of encrypted reasoning and prompt-cache
    metadata where upstream APIs expose it.
-3. Realtime/Live relay only if there is concrete demand.
+2. WebRTC/SIP-specific Realtime orchestration only if there is concrete demand.
 
 Native adapters should preserve:
 
@@ -388,16 +386,15 @@ gateway rather than a browser management application or full agent runtime.
 
 Shipped:
 
-- authenticated non-loopback operation;
+- authenticated non-loopback hub mode through `jcx hub`;
 - on-demand Codex shim through `jcx codex -- <args>`;
 - desktop integration management from Ratatui.
 
 Only pursue these with concrete demand:
 
-- authenticated remote hub;
-- Responses Realtime/Live relay;
-- web-search sidecars;
-- vision sidecars for text-only models;
+- WebRTC/SIP-specific Realtime orchestration;
+- web-search and vision orchestration, delegated to Codex Apps/MCP or a
+  dedicated agent runtime;
 - additional desktop clients;
 - browser management dashboard (currently an intentional exclusion).
 
@@ -423,13 +420,14 @@ Joocode should remain local-first until non-loopback authentication, CORS restri
 
 ### 1. Complete source-specific OAuth pooling
 
-Generic API-key pools are shipped. The remaining work is opt-in multi-account
-OAuth rotation for sources whose public authentication contracts support it.
+Generic API-key pools are shipped. Multi-account OAuth rotation intentionally
+stays in the source that owns the account, quota, and refresh-token lifecycle.
 
-### 2. Complete routed Responses compaction
+### 2. Deepen provider-specific metadata preservation
 
-Native Responses, Anthropic, Gemini, image endpoints, and Responses WebSocket
-are shipped. Compaction remains limited to native OpenAI/ChatGPT passthrough.
+Native Responses, Anthropic, Gemini, image endpoints, Responses WebSocket, and
+native Responses compaction are shipped. Remaining work is provider-specific
+reasoning, prompt-cache, and service-tier metadata preservation.
 
 ### 3. Evaluate sidecars only with a clear runtime boundary
 

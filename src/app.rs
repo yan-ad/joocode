@@ -10,6 +10,9 @@ use std::{
 };
 
 use axum::extract::ws::{Message as WebSocketMessage, WebSocket, WebSocketUpgrade};
+use tokio_tungstenite::tungstenite::{
+    Message as UpstreamWebSocketMessage, client::IntoClientRequest,
+};
 
 pub async fn wait_until_ready(base_url: &str, timeout: Duration) -> anyhow::Result<()> {
     let root = base_url
@@ -28,11 +31,168 @@ pub async fn wait_until_ready(base_url: &str, timeout: Duration) -> anyhow::Resu
         {
             return Ok(());
         }
+
         if Instant::now() >= deadline {
             anyhow::bail!("Joocode did not become ready at {url} within {timeout:?}");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn realtime_websocket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    websocket: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let model = reqwest::Url::parse(&format!("http://joocode.local{uri}"))
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find_map(|(name, value)| (name == "model").then(|| value.into_owned()))
+        })
+        .ok_or_else(|| ApiError::bad_request("Realtime WebSocket requires a model query"))?;
+    let registry = state.registry.snapshot();
+    let (base_url, upstream_model, upstream_headers) = if model.contains('/') {
+        let (_, provider, upstream_model, wire_api) = registry
+            .resolve_candidates(&model)
+            .map_err(|error| ApiError::not_found(error.to_string()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ApiError::not_found(format!("unknown model '{model}'")))?;
+        if !matches!(
+            wire_api,
+            crate::provider::WireApi::OpenAiChat | crate::provider::WireApi::OpenAiResponses
+        ) {
+            return Err(ApiError {
+                status: StatusCode::NOT_IMPLEMENTED,
+                kind: "unsupported_feature",
+                message: format!("provider wire API {wire_api:?} does not support Realtime relay"),
+            });
+        }
+        let (base_url, headers) = provider
+            .request_parts(registry.client())
+            .await
+            .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
+        (base_url, upstream_model, headers)
+    } else {
+        let mut forwarded = headers.clone();
+        for name in [
+            header::HOST,
+            header::CONTENT_LENGTH,
+            header::CONTENT_TYPE,
+            header::CONNECTION,
+            header::UPGRADE,
+            header::SEC_WEBSOCKET_KEY,
+            header::SEC_WEBSOCKET_VERSION,
+            header::SEC_WEBSOCKET_PROTOCOL,
+        ] {
+            forwarded.remove(name);
+        }
+        ("https://api.openai.com/v1".into(), model, forwarded)
+    };
+    let url = realtime_upstream_url(&base_url, &upstream_model)?;
+    Ok(websocket
+        .max_message_size(state.max_request_bytes)
+        .max_frame_size(state.max_request_bytes)
+        .on_upgrade(move |socket| relay_realtime(socket, url, upstream_headers)))
+}
+
+fn realtime_upstream_url(base_url: &str, model: &str) -> Result<String, ApiError> {
+    let mut url = reqwest::Url::parse(base_url)
+        .map_err(|error| ApiError::bad_request(format!("invalid provider base URL: {error}")))?;
+    let scheme = match url.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        "ws" => "ws",
+        "wss" => "wss",
+        scheme => {
+            return Err(ApiError::bad_request(format!(
+                "unsupported Realtime URL scheme '{scheme}'"
+            )));
+        }
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| ApiError::bad_request("failed to build Realtime WebSocket URL"))?;
+    let path = format!("{}/realtime", url.path().trim_end_matches('/'));
+    url.set_path(&path);
+    url.set_query(None);
+    url.query_pairs_mut().append_pair("model", model);
+    Ok(url.to_string())
+}
+
+async fn relay_realtime(socket: WebSocket, url: String, headers: HeaderMap) {
+    let mut request = match url.into_client_request() {
+        Ok(request) => request,
+        Err(_) => return,
+    };
+    for (name, value) in headers.iter() {
+        if !matches!(
+            name.as_str(),
+            "host"
+                | "connection"
+                | "upgrade"
+                | "sec-websocket-key"
+                | "sec-websocket-version"
+                | "sec-websocket-protocol"
+        ) {
+            request.headers_mut().insert(name, value.clone());
+        }
+    }
+    let Ok((upstream, _)) = tokio_tungstenite::connect_async(request).await else {
+        return;
+    };
+    let (mut client_tx, mut client_rx) = socket.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream.split();
+    loop {
+        tokio::select! {
+            client = client_rx.next() => match client {
+                Some(Ok(message)) => {
+                    let Some(message) = client_to_upstream_message(message) else { break; };
+                    if upstream_tx.send(message).await.is_err() { break; }
+                }
+                _ => break,
+            },
+            upstream = upstream_rx.next() => match upstream {
+                Some(Ok(message)) => {
+                    let Some(message) = upstream_to_client_message(message) else { break; };
+                    if client_tx.send(message).await.is_err() { break; }
+                }
+                _ => break,
+            }
+        }
+    }
+}
+
+fn client_to_upstream_message(message: WebSocketMessage) -> Option<UpstreamWebSocketMessage> {
+    Some(match message {
+        WebSocketMessage::Text(text) => UpstreamWebSocketMessage::Text(text.to_string().into()),
+        WebSocketMessage::Binary(bytes) => UpstreamWebSocketMessage::Binary(bytes),
+        WebSocketMessage::Ping(bytes) => UpstreamWebSocketMessage::Ping(bytes),
+        WebSocketMessage::Pong(bytes) => UpstreamWebSocketMessage::Pong(bytes),
+        WebSocketMessage::Close(frame) => UpstreamWebSocketMessage::Close(frame.map(|frame| {
+            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: frame.code.into(),
+                reason: frame.reason.to_string().into(),
+            }
+        })),
+    })
+}
+
+fn upstream_to_client_message(message: UpstreamWebSocketMessage) -> Option<WebSocketMessage> {
+    Some(match message {
+        UpstreamWebSocketMessage::Text(text) => WebSocketMessage::Text(text.to_string().into()),
+        UpstreamWebSocketMessage::Binary(bytes) => WebSocketMessage::Binary(bytes),
+        UpstreamWebSocketMessage::Ping(bytes) => WebSocketMessage::Ping(bytes),
+        UpstreamWebSocketMessage::Pong(bytes) => WebSocketMessage::Pong(bytes),
+        UpstreamWebSocketMessage::Close(frame) => {
+            WebSocketMessage::Close(frame.map(|frame| axum::extract::ws::CloseFrame {
+                code: frame.code.into(),
+                reason: frame.reason.to_string().into(),
+            }))
+        }
+        UpstreamWebSocketMessage::Frame(_) => return None,
+    })
 }
 
 fn gemini_operation(uri: &axum::http::Uri) -> Option<(&str, bool)> {
@@ -762,6 +922,23 @@ pub async fn reload(url: &str, token: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub async fn serve_hub(
+    host: IpAddr,
+    port: u16,
+    registry: Registry,
+    selection: SourceSelection,
+) -> anyhow::Result<()> {
+    validate_hub_host(host)?;
+    serve(host, port, registry, selection).await
+}
+
+fn validate_hub_host(host: IpAddr) -> anyhow::Result<()> {
+    if host.is_loopback() {
+        anyhow::bail!("`jcx hub` requires a non-loopback --host; use `jcx` or `jcx serve` locally");
+    }
+    Ok(())
+}
+
 async fn api_reload(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let selection = state.source_selection.clone().ok_or_else(|| ApiError {
         status: StatusCode::CONFLICT,
@@ -978,14 +1155,51 @@ async fn compact_responses(
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("missing 'model'"))?;
-    if model.contains('/') {
-        return Err(ApiError {
-            status: StatusCode::NOT_IMPLEMENTED,
-            kind: "unsupported_feature",
-            message: "routed models do not expose native Responses compaction; use an OpenAI native model or shorten the conversation client-side".into(),
-        });
-    }
     let registry = state.registry.snapshot();
+    if model.contains('/') {
+        let local_key = headers
+            .get("x-joocode-api-key")
+            .or_else(|| headers.get("x-joc-api-key"))
+            .or_else(|| headers.get("x-open-initiative-api-key"))
+            .cloned();
+        let response = send_routed_with_url(
+            &registry,
+            model,
+            &state.retry_policy,
+            &state.upstream_runtime,
+            &state.metrics,
+            local_key,
+            |base_url, upstream_model, wire_api| {
+                if wire_api != crate::provider::WireApi::OpenAiResponses {
+                    return Err(ApiError {
+                        status: StatusCode::NOT_IMPLEMENTED,
+                        kind: "unsupported_feature",
+                        message: "this routed provider does not expose native Responses compaction; choose a native Responses provider or shorten the conversation client-side".into(),
+                    });
+                }
+                let mut body = request.clone();
+                body["model"] = Value::String(upstream_model.to_owned());
+                Ok((
+                    format!("{}/responses/compact", base_url.trim_end_matches('/')),
+                    body,
+                ))
+            },
+        )
+        .await?;
+        let status = response.response.status();
+        let body = response
+            .response
+            .json::<Value>()
+            .await
+            .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
+        if !status.is_success() {
+            return Err(ApiError::upstream(
+                StatusCode::BAD_GATEWAY,
+                format!("upstream returned {status}: {body}"),
+            ));
+        }
+        return Ok(ResponseBody::Json(Json(body)));
+    }
     let url = compact_upstream_url(headers.contains_key("chatgpt-account-id"));
     for name in [header::HOST, header::CONTENT_LENGTH, header::CONTENT_TYPE] {
         headers.remove(name);
@@ -1149,7 +1363,7 @@ use axum::{
     routing::{any, get, post},
 };
 use bytes::Bytes;
-use futures_util::{Stream, StreamExt, TryStreamExt};
+use futures_util::{SinkExt, Stream, StreamExt, TryStreamExt};
 use serde_json::{Value, json};
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -1442,6 +1656,42 @@ impl RateLimiter {
 }
 
 impl ServerPolicy {
+    fn dashboard_snapshot(&self) -> dashboard::DashboardSystemSnapshot {
+        dashboard::DashboardSystemSnapshot {
+            mode: if self.remote {
+                "Remote hub"
+            } else {
+                "Local gateway"
+            }
+            .into(),
+            data_auth: if self.remote {
+                "Required"
+            } else {
+                "Local placeholder"
+            }
+            .into(),
+            management_auth: if self.remote {
+                "Separate token"
+            } else {
+                "Local access"
+            }
+            .into(),
+            allowed_origins: self.allowed_origins.len(),
+            max_request_bytes: self.max_request_bytes,
+            max_sse_event_bytes: self.max_sse_event_bytes,
+            max_tool_argument_bytes: self.max_tool_argument_bytes,
+            stream_idle_timeout_secs: self.stream_idle_timeout.as_secs(),
+            rate_limit: if self.remote {
+                format!(
+                    "{:.0}/s burst {:.0}",
+                    self.rate_limiter.rate_per_second, self.rate_limiter.burst
+                )
+            } else {
+                "Loopback only".into()
+            },
+        }
+    }
+
     fn from_host(host: IpAddr) -> anyhow::Result<Self> {
         let remote = !host.is_loopback();
         let auth_token = std::env::var("JOOCODE_API_AUTH_TOKEN")
@@ -2019,6 +2269,7 @@ pub async fn serve(
         port_warning,
         metrics: _,
         upstream_runtime: _,
+        system: _,
     } = prepare_server(
         host,
         port,
@@ -2059,6 +2310,7 @@ pub async fn serve_dashboard(
         port_warning,
         metrics,
         upstream_runtime,
+        system,
     } = prepare_server(
         host,
         port,
@@ -2076,6 +2328,7 @@ pub async fn serve_dashboard(
     let mut dashboard_data =
         DashboardData::new(&registry, &targets, &selection, address, port_warning);
     dashboard_data.storage = dashboard_storage_snapshot();
+    dashboard_data.system = *system;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let mut server = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -2611,6 +2864,7 @@ async fn prepare_server(
     reclaim_requested_port: bool,
 ) -> anyhow::Result<PreparedServer> {
     let policy = ServerPolicy::from_host(host)?;
+    let system = policy.dashboard_snapshot();
     let (app, metrics) =
         build_router_with_selection_and_metrics(registry, &policy, source_selection);
     match bind_available(host, port, reclaim_requested_port).await? {
@@ -2624,6 +2878,7 @@ async fn prepare_server(
                 app,
                 metrics: Box::new(metrics),
                 upstream_runtime: Box::new(policy.upstream_runtime.clone()),
+                system: Box::new(system),
                 address,
                 port_warning,
             })
@@ -2672,6 +2927,7 @@ fn build_router_with_selection_and_metrics(
         .route("/v1/models", get(models))
         .route("/v1/responses", post(responses).get(responses_websocket))
         .route("/v1/responses/compact", post(compact_responses))
+        .route("/v1/realtime", get(realtime_websocket))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/images/generations", post(image_generations))
         .route("/v1/images/edits", post(image_edits))
@@ -2723,6 +2979,7 @@ enum PreparedServer {
         port_warning: Option<String>,
         metrics: Box<Metrics>,
         upstream_runtime: Box<upstream::Runtime>,
+        system: Box<dashboard::DashboardSystemSnapshot>,
     },
     ExistingJoocode,
 }
@@ -3517,6 +3774,57 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn realtime_websocket_relays_bidirectional_events() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message};
+
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = upstream_listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let message = socket.next().await.unwrap().unwrap();
+            let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(value["type"], "session.update");
+            socket
+                .send(Message::Text(
+                    json!({"type":"session.created","session":{"id":"sess_1"}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let app = build_router(
+            RegistryStore::new(fixture_registry_at(&format!(
+                "http://{upstream_address}/v1"
+            ))),
+            &policy(false, None, &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let (mut socket, _) = connect_async(format!(
+            "ws://{address}/v1/realtime?model=fixture%2Fmodel-a"
+        ))
+        .await
+        .unwrap();
+        socket
+            .send(Message::Text(
+                json!({"type":"session.update","session":{"instructions":"hello"}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let response = socket.next().await.unwrap().unwrap();
+        let response: Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+        assert_eq!(response["type"], "session.created");
+    }
+
     #[test]
     fn websocket_rejects_unknown_previous_response_ids_for_routed_models() {
         let state = AppState {
@@ -3577,6 +3885,10 @@ mod tests {
     }
 
     fn fixture_registry_at(base_url: &str) -> Registry {
+        fixture_registry_with_wire(base_url, crate::provider::WireApi::OpenAiChat)
+    }
+
+    fn fixture_registry_with_wire(base_url: &str, wire_api: crate::provider::WireApi) -> Registry {
         use crate::sources::{DiscoveredCatalog, DiscoveredModel, DiscoveredProvider};
         use reqwest::{Client, header::HeaderMap};
 
@@ -3595,13 +3907,13 @@ mod tests {
                 source: "fixture".into(),
                 detail: None,
                 providers: vec![DiscoveredProvider {
-                    wire_api: crate::provider::WireApi::OpenAiChat,
+                    wire_api,
                     key: "fixture".into(),
                     provider: crate::provider::Provider {
                         base_url: base_url.into(),
                         credential: crate::provider::Credential::None,
                         headers: HeaderMap::new(),
-                        wire_api: crate::provider::WireApi::OpenAiChat,
+                        wire_api,
                     },
                     models: vec![DiscoveredModel { info: model }],
                 }],
@@ -3632,6 +3944,12 @@ mod tests {
     #[tokio::test]
     async fn health_route_is_available() {
         assert_eq!(healthz().await.into_response().status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn hub_rejects_loopback_bindings() {
+        let error = validate_hub_host("127.0.0.1".parse().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("non-loopback"));
     }
 
     #[tokio::test]
@@ -3956,6 +4274,51 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("native Responses compaction"));
+    }
+
+    #[tokio::test]
+    async fn native_responses_provider_receives_routed_compaction() {
+        let received = Arc::new(tokio::sync::Mutex::new(Value::Null));
+        let captured = received.clone();
+        let upstream = Router::new().route(
+            "/v1/responses/compact",
+            post(move |Json(body): Json<Value>| {
+                let captured = captured.clone();
+                async move {
+                    *captured.lock().await = body;
+                    Json(json!({
+                        "type":"compaction",
+                        "encrypted_content":"opaque"
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let app = build_router(
+            RegistryStore::new(fixture_registry_with_wire(
+                &format!("http://{address}/v1"),
+                crate::provider::WireApi::OpenAiResponses,
+            )),
+            &policy(false, None, &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let response = app
+            .oneshot(
+                HttpRequest::post("/v1/responses/compact")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"model":"fixture/model-a","input":"history"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["encrypted_content"], "opaque");
+        assert_eq!(received.lock().await["model"], "model-a");
     }
 
     #[test]
