@@ -2249,25 +2249,54 @@ fn draw_sidebar(frame: &mut Frame<'_>, area: Rect, selected: Page) {
 }
 
 fn draw_tabs(frame: &mut Frame<'_>, area: Rect, selected: Page) {
-    let line = Page::ALL
-        .iter()
-        .enumerate()
-        .flat_map(|(index, page)| {
-            let style = if *page == selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(MODAL_ACCENT)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(MUTED_TEXT)
-            };
-            [
-                Span::styled(format!(" {} {} ", index + 1, page.label()), style),
-                Span::raw(" "),
-            ]
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(Line::from(line)), area);
+    let mut lines = Vec::<Line<'static>>::new();
+    let mut spans = Vec::<Span<'static>>::new();
+    let mut line_width = 0usize;
+    let mut selected_line = 0usize;
+    for (index, page) in Page::ALL.iter().enumerate() {
+        let style = if *page == selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(MODAL_ACCENT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(MUTED_TEXT)
+        };
+        let label = format!(" {} {} ", index + 1, page.label());
+        let tab_width = label.len() + usize::from(!spans.is_empty());
+        if !spans.is_empty() && line_width + tab_width > area.width as usize {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            line_width = 0;
+        }
+        if *page == selected {
+            selected_line = lines.len();
+        }
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+            line_width += 1;
+        }
+        spans.push(Span::styled(label, style));
+        line_width += tab_width - usize::from(line_width > 0);
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+
+    let visible_height = area.height.max(1) as usize;
+    let start = selected_line
+        .saturating_add(1)
+        .saturating_sub(visible_height)
+        .min(lines.len().saturating_sub(visible_height));
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(start)
+                .take(visible_height)
+                .collect::<Vec<_>>(),
+        ),
+        area,
+    );
 }
 
 fn draw_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, page: Page, selected: usize) {
