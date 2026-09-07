@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     convert::Infallible,
     net::{IpAddr, SocketAddr},
     sync::{
@@ -8,6 +8,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+use axum::extract::ws::{Message as WebSocketMessage, WebSocket, WebSocketUpgrade};
 
 pub async fn wait_until_ready(base_url: &str, timeout: Duration) -> anyhow::Result<()> {
     let root = base_url
@@ -897,13 +899,14 @@ pub async fn stats(url: &str, token: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn next_bounded_sse_line<S>(
+async fn next_bounded_sse_line<S, E>(
     upstream: &mut S,
     buffer: &mut Vec<u8>,
     max_bytes: usize,
 ) -> Result<Option<String>, String>
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
 {
     loop {
         if let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
@@ -1170,6 +1173,7 @@ use crate::{
 struct AppState {
     registry: RegistryStore,
     source_selection: Option<SourceSelection>,
+    max_request_bytes: usize,
     stream_idle_timeout: Duration,
     max_sse_event_bytes: usize,
     max_tool_argument_bytes: usize,
@@ -2642,6 +2646,7 @@ fn build_router_with_selection_and_metrics(
     let state = AppState {
         registry,
         source_selection,
+        max_request_bytes: policy.max_request_bytes,
         stream_idle_timeout: policy.stream_idle_timeout,
         max_sse_event_bytes: policy.max_sse_event_bytes,
         max_tool_argument_bytes: policy.max_tool_argument_bytes,
@@ -2665,7 +2670,7 @@ fn build_router_with_selection_and_metrics(
         ));
     let data_plane = Router::new()
         .route("/v1/models", get(models))
-        .route("/v1/responses", post(responses))
+        .route("/v1/responses", post(responses).get(responses_websocket))
         .route("/v1/responses/compact", post(compact_responses))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/images/generations", post(image_generations))
@@ -3025,6 +3030,259 @@ async fn responses(
     }
 }
 
+async fn responses_websocket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    websocket: WebSocketUpgrade,
+) -> Response {
+    websocket
+        .max_message_size(state.max_request_bytes)
+        .max_frame_size(state.max_request_bytes)
+        .on_upgrade(move |socket| handle_responses_websocket(socket, state, headers))
+}
+
+async fn handle_responses_websocket(mut socket: WebSocket, state: AppState, headers: HeaderMap) {
+    let mut history = VecDeque::<(String, Vec<Value>)>::new();
+    while let Some(message) = socket.recv().await {
+        let message = match message {
+            Ok(message) => message,
+            Err(_) => break,
+        };
+        let text = match message {
+            WebSocketMessage::Text(text) => text.to_string(),
+            WebSocketMessage::Binary(bytes) => match String::from_utf8(bytes.to_vec()) {
+                Ok(text) => text,
+                Err(error) => {
+                    if send_websocket_error(&mut socket, "invalid_request_error", error.to_string())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+            },
+            WebSocketMessage::Ping(payload) => {
+                if socket.send(WebSocketMessage::Pong(payload)).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+            WebSocketMessage::Pong(_) => continue,
+            WebSocketMessage::Close(_) => break,
+        };
+        let mut request = match websocket_response_request(&text, &state, &history) {
+            Ok(request) => request,
+            Err(error) => {
+                state.metrics.failures.fetch_add(1, Ordering::Relaxed);
+                state.metrics.record_duration(started.elapsed());
+                if send_websocket_error(&mut socket, error.kind, error.message)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+        };
+        let started = Instant::now();
+        state.metrics.requests.fetch_add(1, Ordering::Relaxed);
+        state.metrics.active.fetch_add(1, Ordering::Relaxed);
+        let _active = ActiveRequest {
+            metrics: state.metrics.clone(),
+        };
+        request["stream"] = Value::Bool(true);
+        let response =
+            responses(State(state.clone()), headers.clone(), Json(request.clone())).await;
+        let response = match response {
+            Ok(ResponseBody::Stream(response)) => response,
+            Ok(ResponseBody::Json(Json(value))) => {
+                if socket
+                    .send(WebSocketMessage::Text(value.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            Err(error) => {
+                if send_websocket_error(&mut socket, error.kind, error.message)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+        };
+        let mut stream = response.into_body().into_data_stream();
+        let mut buffer = Vec::new();
+        let mut completed = None::<Value>;
+        loop {
+            let line = match tokio::time::timeout(
+                state.stream_idle_timeout,
+                next_bounded_sse_line(&mut stream, &mut buffer, state.max_sse_event_bytes),
+            )
+            .await
+            {
+                Ok(Ok(Some(line))) => line,
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => {
+                    let _ = send_websocket_error(&mut socket, "upstream_error", error).await;
+                    break;
+                }
+                Err(_) => {
+                    let _ = send_websocket_error(
+                        &mut socket,
+                        "upstream_error",
+                        format!(
+                            "upstream stream was idle for {} seconds",
+                            state.stream_idle_timeout.as_secs()
+                        ),
+                    )
+                    .await;
+                    break;
+                }
+            };
+            let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+                continue;
+            };
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            if event.get("type").and_then(Value::as_str) == Some("response.completed") {
+                completed = event.get("response").cloned();
+            }
+            if socket
+                .send(WebSocketMessage::Text(event.to_string().into()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        if let Some(response) = completed {
+            record_websocket_history(&mut history, &request, &response);
+            state.metrics.successes.fetch_add(1, Ordering::Relaxed);
+        } else {
+            state.metrics.failures.fetch_add(1, Ordering::Relaxed);
+        }
+        state.metrics.record_duration(started.elapsed());
+    }
+}
+
+fn websocket_response_request(
+    text: &str,
+    state: &AppState,
+    history: &VecDeque<(String, Vec<Value>)>,
+) -> Result<Value, ApiError> {
+    let mut event: Value = serde_json::from_str(text)
+        .map_err(|error| ApiError::bad_request(format!("invalid WebSocket JSON: {error}")))?;
+    if event.get("type").and_then(Value::as_str) != Some("response.create") {
+        return Err(ApiError::bad_request(
+            "WebSocket messages must use type 'response.create'",
+        ));
+    }
+    let object = event
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("response.create must be a JSON object"))?;
+    object.remove("type");
+    object.remove("background");
+    object.remove("stream");
+    let requested_model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing 'model'"))?;
+    if websocket_uses_local_history(state, requested_model) {
+        if let Some(previous_id) = object
+            .remove("previous_response_id")
+            .and_then(|value| value.as_str().map(str::to_owned))
+        {
+            let (_, prior) = history
+                .iter()
+                .find(|(id, _)| id == &previous_id)
+                .ok_or_else(|| {
+                    ApiError::not_found(format!(
+                        "unknown WebSocket previous_response_id '{previous_id}'"
+                    ))
+                })?;
+            let mut input = prior.clone();
+            input.extend(response_input_items(object.get("input"))?);
+            object.insert("input".into(), Value::Array(input));
+        }
+    }
+    Ok(event)
+}
+
+fn websocket_uses_local_history(state: &AppState, model: &str) -> bool {
+    if !model.contains('/') {
+        return false;
+    }
+    state
+        .registry
+        .snapshot()
+        .resolve_candidates(model)
+        .ok()
+        .and_then(|candidates| candidates.into_iter().next())
+        .is_some_and(|candidate| candidate.3 != crate::provider::WireApi::OpenAiResponses)
+}
+
+fn response_input_items(input: Option<&Value>) -> Result<Vec<Value>, ApiError> {
+    match input {
+        Some(Value::Array(items)) => Ok(items.clone()),
+        Some(Value::String(text)) => Ok(vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": [{"type":"input_text","text":text}]
+        })]),
+        Some(_) => Err(ApiError::bad_request("'input' must be a string or array")),
+        None => Err(ApiError::bad_request("missing 'input'")),
+    }
+}
+
+fn record_websocket_history(
+    history: &mut VecDeque<(String, Vec<Value>)>,
+    request: &Value,
+    response: &Value,
+) {
+    let Some(id) = response.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let mut items = response_input_items(request.get("input")).unwrap_or_default();
+    items.extend(
+        response
+            .get("output")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    history.push_back((id.to_owned(), items));
+    while history.len() > 32 {
+        history.pop_front();
+    }
+}
+
+async fn send_websocket_error(
+    socket: &mut WebSocket,
+    kind: &str,
+    message: impl Into<String>,
+) -> Result<(), axum::Error> {
+    socket
+        .send(WebSocketMessage::Text(
+            json!({
+                "type":"error",
+                "error":{"type":kind,"code":null,"message":message.into()}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+}
+
 enum ResponseBody {
     Json(Json<Value>),
     Stream(Response),
@@ -3164,6 +3422,10 @@ mod tests {
     }
 
     fn fixture_registry() -> Registry {
+        fixture_registry_at("https://example.test/v1")
+    }
+
+    fn fixture_registry_at(base_url: &str) -> Registry {
         use crate::sources::{DiscoveredCatalog, DiscoveredModel, DiscoveredProvider};
         use reqwest::{Client, header::HeaderMap};
 
@@ -3185,7 +3447,7 @@ mod tests {
                     wire_api: crate::provider::WireApi::OpenAiChat,
                     key: "fixture".into(),
                     provider: crate::provider::Provider {
-                        base_url: "https://example.test/v1".into(),
+                        base_url: base_url.into(),
                         credential: crate::provider::Credential::None,
                         headers: HeaderMap::new(),
                         wire_api: crate::provider::WireApi::OpenAiChat,

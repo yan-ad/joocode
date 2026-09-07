@@ -16,7 +16,7 @@ homepage = "https://github.com/yan-ad/joocode"
 [dependencies]
 anyhow = "1"
 async-stream = "0.3"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.29"
@@ -44,6 +44,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
+tokio-tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(windows)'.build-dependencies]
