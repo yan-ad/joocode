@@ -38,12 +38,12 @@ Status legend: **Complete**, **Partial**, **Planned**, or **Intentional**.
 | Discovery | Selectively enable detected sources | Yes | Persistent `/ Config` toggles and explicit `--source` override | **Complete** |
 | Discovery | Hot registry reload | Yes | `jcx reload` and `POST /api/reload` with atomic swap | **Complete** |
 | Gateway | OpenAI Chat Completions | Yes | `/v1/chat/completions` | **Complete** |
-| Gateway | OpenAI Responses | Yes | Responses-to-Chat translation plus native OpenAI passthrough | **Partial** — routed native Responses transport pending |
-| Gateway | Anthropic Messages | Yes | Messages/SSE/tool translation through Chat Completions | **Partial** — native upstream pending |
-| Gateway | Gemini/Cloud Code bridge | Yes | Source-specific and Antigravity bridge support | **Partial** — generic native Gemini upstream pending |
+| Gateway | OpenAI Responses | Yes | Native routed Responses plus compatibility translation for Chat providers | **Complete** |
+| Gateway | Anthropic Messages | Yes | Native routed Messages plus compatibility translation for Chat providers | **Complete** |
+| Gateway | Gemini/Cloud Code bridge | Yes | Native Gemini routing, OpenAI-compatible translation and Cloud Code bridge | **Complete** |
 | Gateway | Responses compaction | Yes | Native OpenAI/ChatGPT passthrough | **Partial** — routed providers pending |
-| Gateway | Responses WebSocket | Yes | No | **Planned P3** |
-| Gateway | Image generation/editing | Yes | No standalone endpoints | **Planned P3** |
+| Gateway | Responses WebSocket | Yes | Persistent `/v1/responses` transport with bounded multi-turn history | **Complete** |
+| Gateway | Image generation/editing | Yes | `/v1/images/generations` and `/v1/images/edits` | **Complete** |
 | Gateway | Realtime/Live API | Yes | No | **Planned P5** |
 | Tools | Function tools | Yes | Yes | **Complete** |
 | Tools | Namespace/MCP tools | Yes | Reversible namespace flattening for routed models | **Complete** |
@@ -58,7 +58,7 @@ Status legend: **Complete**, **Partial**, **Planned**, or **Intentional**.
 | Routing | Adaptive quota/error cooldown | Yes | Retry-After plus bounded exponential error-streak cooldown | **Complete** |
 | Routing | Lowest-latency/health-aware selection | Yes | Passive EWMA latency and health-aware combo routing | **Complete** |
 | Credentials | Source-owned credentials | Yes | Reuses each source's credential store without copying secrets | **Complete** |
-| Credentials | Generic API-key pools | Yes | One credential route per discovered provider | **Planned P2** |
+| Credentials | Generic API-key pools | Yes | Secret-safe pool editing and round-robin bearer selection | **Complete** |
 | Credentials | Multi-account OAuth pools | Yes | Limited source-specific support | **Planned P2** |
 | Security | Non-loopback admission auth | Yes | Mandatory `JOOCODE_API_AUTH_TOKEN` | **Complete** |
 | Security | Restrictive remote CORS | Yes | Explicit remote origin allowlist | **Complete** |
@@ -72,19 +72,19 @@ Status legend: **Complete**, **Partial**, **Planned**, or **Intentional**.
 | Integrations | Configuration ownership journal | Yes | Managed-resource conflict detection for Codex, Zed, Claude Code, Grok Build, Copilot App and service definitions | **Complete** |
 | Integrations | Background service and auto-start | Yes | macOS, Linux, Windows lifecycle controls | **Complete** |
 | Integrations | Self-update | Yes | Check, checksum, replace/relaunch on Unix and Windows | **Complete** |
-| Catalog | Model capability metadata | Yes | Context/output/reasoning and direct-tool compatibility | **Partial** — deeper provider metadata pending |
-| Catalog | Subagent model controls | Yes | Basic catalog metadata only | **Planned P2** |
+| Catalog | Model capability metadata | Yes | Context/output/reasoning, wire API and direct-tool compatibility | **Complete** |
+| Catalog | Subagent model controls | Yes | Featured/fallback models, disabled models, advertised limits and reasoning cap | **Complete** |
 | Observability | Liveness/readiness | Yes | `/healthz` and `/readyz` | **Complete** |
 | Observability | Runtime status | Yes | `jcx stats` and `/api/status` | **Complete** |
 | Observability | Provider/catalog status | Yes | `/api/providers`, active requests and cooldown state | **Complete** |
 | Observability | Prometheus metrics | Yes | `/api/metrics` | **Complete** |
 | Observability | Latency and provider health | Yes | Provider EWMA latency, failure streak, cooldown and saturation | **Complete** |
 | Observability | Codex browser/computer tool calls | No/limited | Privacy-safe total and per-tool Prometheus metrics | **Complete — Joocode advantage** |
-| Observability | Token/retry/failover breakdown | Yes | Tool and request counters shipped; token/retry/failover counters pending | **Partial P4** |
-| UI | Browser management dashboard | Yes | Compact Ratatui dashboard and modals | **Intentional difference** |
+| Observability | Token/retry/failover breakdown | Yes | Token totals, retry/failover counters, latency buckets and route distribution | **Complete** |
+| UI | Browser management dashboard | Yes | Multi-page Ratatui control plane for overview, providers, models, Codex, logs, usage, storage and integrations | **Intentional TUI-first difference** |
 | Ecosystem | Remote authenticated hub | Yes | No | **Planned P5** |
 | Ecosystem | Web-search/vision sidecars | Yes | No | **Planned P5** |
-| Ecosystem | On-demand Codex shim | Yes | No | **Planned P5** |
+| Ecosystem | On-demand Codex shim | Yes | `jcx codex -- <args>` | **Complete** |
 
 ## P0 — Security and correctness
 
@@ -284,6 +284,11 @@ Maintain runtime state per provider route:
 
 ## P2 — Credential and catalog controls
 
+**Status: mostly complete.** Generic API-key pools, provider health tests,
+disabled models, featured/fallback subagent catalogs, advertised-entry limits,
+and reasoning-effort caps are managed from the Ratatui control plane. Full
+multi-account OAuth rotation remains source-specific and is the main P2 gap.
+
 ### API-key pools
 
 Start with generic key pools before attempting full ChatGPT account management:
@@ -312,16 +317,18 @@ Add configuration for:
 
 ## P3 — Protocol depth
 
-Joocode currently works best when upstream providers expose OpenAI-compatible Chat Completions. Native transports would preserve more provider-specific capabilities.
+**Status: substantially complete.** Joocode supports native routed OpenAI
+Responses, Anthropic Messages, Gemini, image generation/editing, and persistent
+Responses WebSocket mode. Chat-compatible fallbacks remain available for
+providers that do not expose their native wire API.
 
-Recommended order:
+Remaining protocol work:
 
-1. Native OpenAI Responses upstream.
-2. `/v1/responses/compact`.
-3. Native Anthropic Messages upstream.
-4. Native Gemini upstream.
-5. Image generation and editing endpoints.
-6. Responses WebSocket.
+1. Routed `/v1/responses/compact` for providers with a compatible native
+   compaction contract.
+2. Provider-specific preservation of encrypted reasoning and prompt-cache
+   metadata where upstream APIs expose it.
+3. Realtime/Live relay only if there is concrete demand.
 
 Native adapters should preserve:
 
@@ -336,13 +343,12 @@ Native adapters should preserve:
 
 Add bounded, privacy-safe statistics without storing prompt or response content.
 
-**Status: management foundation shipped.** `jcx stats` and `GET /api/status`
-report uptime, provider/model counts, total and active requests, successes,
-failures, provider concurrency usage, and cooldown state. `jcx reload` and
-`POST /api/reload` atomically refresh enabled sources while retaining the old
-registry on failure. `GET /api/providers` exposes the non-secret logical
-catalog, source reports, and passive runtime availability. Token, latency,
-provider distribution, retry, and failover metrics remain pending.
+**Status: complete for the lightweight local scope.** `jcx stats`, the Ratatui
+Usage/Logs pages, and management endpoints report uptime, provider/model
+counts, request activity, token totals, latency buckets, route distribution,
+retry/failover counts, tool calls, provider saturation, and cooldown state.
+Metrics remain bounded and never retain prompts, tool arguments, response
+bodies, or credentials.
 
 Suggested CLI:
 
@@ -371,21 +377,29 @@ POST /api/reload
 ```
 
 `/api/status`, `/api/providers`, `/api/metrics`, and `/api/reload` are shipped.
-The Prometheus endpoint contains only process, registry, request-counter, and
-provider-runtime gauges. Token, latency, retry, failover, and model-distribution
-metrics remain pending.
+The Prometheus endpoint contains process, registry, request, token, latency,
+route, retry/failover, tool-call, and provider-runtime metrics without payload
+content.
 
 ## P5 — Optional ecosystem work
 
-Only pursue these after P0–P3 are stable:
+P5 is intentionally selective. Joocode remains a lightweight TUI-first local
+gateway rather than a browser management application or full agent runtime.
+
+Shipped:
+
+- authenticated non-loopback operation;
+- on-demand Codex shim through `jcx codex -- <args>`;
+- desktop integration management from Ratatui.
+
+Only pursue these with concrete demand:
 
 - authenticated remote hub;
 - Responses Realtime/Live relay;
 - web-search sidecars;
 - vision sidecars for text-only models;
-- on-demand Codex shim;
 - additional desktop clients;
-- web dashboard.
+- browser management dashboard (currently an intentional exclusion).
 
 ## Features intentionally not copied yet
 
@@ -407,21 +421,21 @@ Joocode should remain local-first until non-loopback authentication, CORS restri
 
 ## Recommended next three initiatives
 
-### 1. Add generic credential pools
+### 1. Complete source-specific OAuth pooling
 
-Support multiple API keys and source-owned OAuth accounts with explicit
-active/failover/round-robin policies, without copying credentials into desktop
-clients.
+Generic API-key pools are shipped. The remaining work is opt-in multi-account
+OAuth rotation for sources whose public authentication contracts support it.
 
-### 2. Deepen native provider protocols
+### 2. Complete routed Responses compaction
 
-Add native Responses, Anthropic Messages, and Gemini upstream transports before
-Responses WebSocket and standalone image endpoints.
+Native Responses, Anthropic, Gemini, image endpoints, and Responses WebSocket
+are shipped. Compaction remains limited to native OpenAI/ChatGPT passthrough.
 
-### 3. Complete request economics observability
+### 3. Evaluate sidecars only with a clear runtime boundary
 
-Record privacy-safe token counts plus retry/failover/model-distribution counters
-and latency histograms. Never store prompts, tool arguments, or response bodies.
+Web-search and vision sidecars risk turning Joocode into an orchestration engine.
+Only add them if execution remains delegated to a dedicated agent runtime and
+Joocode stays the routing/control plane.
 
 ## Strategic direction
 

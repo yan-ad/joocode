@@ -672,6 +672,18 @@ curl http://127.0.0.1:10100/v1/responses \
 Use `POST /v1/chat/completions` for OpenAI-compatible clients. Both endpoints
 support SSE streaming and tool calls.
 
+Responses WebSocket mode is available on the same resource. Send
+`response.create` JSON events and receive the standard `response.*` streaming
+events as WebSocket messages:
+
+```text
+ws://127.0.0.1:10100/v1/responses
+```
+
+The connection supports repeated turns and bounded `previous_response_id`
+history for routed Chat-compatible models. Native Responses providers retain
+their upstream conversation semantics.
+
 ### LAN or remote binding
 
 Loopback keeps the zero-configuration placeholder-key behavior. Binding to a

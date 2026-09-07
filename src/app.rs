@@ -3071,6 +3071,12 @@ async fn handle_responses_websocket(mut socket: WebSocket, state: AppState, head
             WebSocketMessage::Pong(_) => continue,
             WebSocketMessage::Close(_) => break,
         };
+        let started = Instant::now();
+        state.metrics.requests.fetch_add(1, Ordering::Relaxed);
+        state.metrics.active.fetch_add(1, Ordering::Relaxed);
+        let _active = ActiveRequest {
+            metrics: state.metrics.clone(),
+        };
         let mut request = match websocket_response_request(&text, &state, &history) {
             Ok(request) => request,
             Err(error) => {
@@ -3084,12 +3090,6 @@ async fn handle_responses_websocket(mut socket: WebSocket, state: AppState, head
                 }
                 continue;
             }
-        };
-        let started = Instant::now();
-        state.metrics.requests.fetch_add(1, Ordering::Relaxed);
-        state.metrics.active.fetch_add(1, Ordering::Relaxed);
-        let _active = ActiveRequest {
-            metrics: state.metrics.clone(),
         };
         request["stream"] = Value::Bool(true);
         let response =
@@ -3408,6 +3408,158 @@ mod tests {
             parse_token_usage(&json!({"prompt":"private", "tool":{"arguments":"private"}}))
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_streams_events_and_reuses_previous_response_history() {
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let upstream_requests = requests.clone();
+        let upstream_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let upstream_requests = upstream_requests.clone();
+                async move {
+                    upstream_requests.lock().await.push(body);
+                    let chunks = [
+                        format!(
+                            "data: {}\n\n",
+                            json!({"choices":[{"delta":{"content":"hello"}}]})
+                        ),
+                        format!(
+                            "data: {}\n\n",
+                            json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
+                        ),
+                        "data: [DONE]\n\n".into(),
+                    ];
+                    (
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        Body::from_stream(futures_util::stream::iter(
+                            chunks.into_iter().map(Ok::<_, Infallible>),
+                        )),
+                    )
+                }
+            }),
+        );
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(upstream_listener, upstream_app).await.unwrap() });
+
+        let app = build_router(
+            RegistryStore::new(fixture_registry_at(&format!(
+                "http://{upstream_address}/v1"
+            ))),
+            &policy(false, None, &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let (mut socket, _) = connect_async(format!("ws://{address}/v1/responses"))
+            .await
+            .unwrap();
+        socket
+            .send(Message::Text(
+                json!({
+                    "type":"response.create",
+                    "model":"fixture/model-a",
+                    "input":"first turn"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let mut first_id = None;
+        while let Some(message) = socket.next().await {
+            let value: Value = serde_json::from_str(message.unwrap().to_text().unwrap()).unwrap();
+            if value["type"] == "response.completed" {
+                first_id = value
+                    .pointer("/response/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                break;
+            }
+        }
+        let first_id = first_id.expect("completed response id");
+        socket
+            .send(Message::Text(
+                json!({
+                    "type":"response.create",
+                    "model":"fixture/model-a",
+                    "previous_response_id":first_id,
+                    "input":"second turn"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        while let Some(message) = socket.next().await {
+            let value: Value = serde_json::from_str(message.unwrap().to_text().unwrap()).unwrap();
+            if value["type"] == "response.completed" {
+                break;
+            }
+        }
+
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        let second_messages = requests[1]["messages"].as_array().unwrap();
+        assert!(second_messages.len() >= 3);
+        assert!(second_messages.iter().any(|message| {
+            message["role"] == "assistant"
+                && message["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|part| part["text"] == "hello"))
+        }));
+    }
+
+    #[test]
+    fn websocket_rejects_unknown_previous_response_ids_for_routed_models() {
+        let state = AppState {
+            registry: RegistryStore::new(fixture_registry()),
+            source_selection: None,
+            max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
+            stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+            max_sse_event_bytes: DEFAULT_MAX_SSE_EVENT_BYTES,
+            max_tool_argument_bytes: DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
+            metrics: Metrics::default(),
+            retry_policy: upstream::RetryPolicy::default(),
+            upstream_runtime: upstream::Runtime::new(8, Duration::ZERO),
+        };
+        let error = websocket_response_request(
+            &json!({
+                "type":"response.create",
+                "model":"fixture/model-a",
+                "previous_response_id":"resp_missing",
+                "input":"continue"
+            })
+            .to_string(),
+            &state,
+            &VecDeque::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert!(error.message.contains("resp_missing"));
+    }
+
+    #[test]
+    fn websocket_history_is_bounded_to_thirty_two_turns() {
+        let mut history = VecDeque::new();
+        for index in 0..40 {
+            record_websocket_history(
+                &mut history,
+                &json!({"input":format!("turn {index}")}),
+                &json!({"id":format!("resp_{index}"),"output":[]}),
+            );
+        }
+        assert_eq!(history.len(), 32);
+        assert_eq!(history.front().unwrap().0, "resp_8");
+        assert_eq!(history.back().unwrap().0, "resp_39");
     }
 
     #[test]
