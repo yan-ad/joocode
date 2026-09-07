@@ -17,25 +17,49 @@ fn assert_or_adopt_managed_service(path: &std::path::Path) -> anyhow::Result<()>
     let managed = managed_file(path)?;
     match integration_journal::assert_unchanged("autostart", path, &managed) {
         Ok(()) => Ok(()),
-        Err(error) if is_semantically_managed_service(&managed) => {
-            // Joocode upgrades can legitimately move the executable from a
-            // versioned build/package path to a stable `jcx` path. Adopt only
-            // definitions that still describe our exact loopback service;
-            // arbitrary external edits remain protected by the journal.
-            integration_journal::record("autostart", path, &managed)
+        Err(error) => {
+            if is_semantically_managed_service(&managed) {
+                // Joocode upgrades can legitimately move the executable from
+                // a versioned build/package path to a stable `jcx` path. Adopt
+                // only definitions that still describe our exact loopback
+                // service; arbitrary external edits remain protected.
+                integration_journal::record("autostart", path, &managed)
+            } else {
+                Err(error)
+            }
         }
-        Err(error) => Err(error),
     }
 }
-
 fn is_semantically_managed_service(managed: &Value) -> bool {
     let Some(content) = managed.as_str() else {
         return false;
     };
-    content.contains(LABEL)
-        && content.contains("serve")
-        && content.contains("127.0.0.1")
-        && content.contains("10100")
+
+    #[cfg(target_os = "macos")]
+    {
+        return content.contains(&format!("<key>Label</key><string>{LABEL}</string>"))
+            && content.contains("<string>serve</string>")
+            && content.contains("<string>--host</string><string>127.0.0.1</string>")
+            && content.contains("<string>--port</string><string>10100</string>")
+            && content.contains("<key>KeepAlive</key><true/>");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return content.contains("ExecStart=")
+            && content.contains(" serve --host 127.0.0.1 --port 10100")
+            && content.contains("Restart=always");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return content.contains(":joocode_loop")
+            && content.contains(" serve --host 127.0.0.1 --port 10100")
+            && content.contains("goto joocode_loop");
+    }
+
+    #[allow(unreachable_code)]
+    false
 }
 
 #[cfg(target_os = "macos")]
@@ -619,5 +643,50 @@ mod tests {
         let service = systemd_service("/tmp/jcx");
         assert!(service.contains("ExecStart=/tmp/jcx serve"));
         assert!(service.contains("Restart=always"));
+    }
+
+    #[test]
+    fn managed_service_recognizes_only_the_joocode_runtime_shape() {
+        #[cfg(target_os = "macos")]
+        let valid = macos_plist("/old/location/jcx", "/tmp/out", "/tmp/err");
+        #[cfg(target_os = "linux")]
+        let valid = systemd_service("/old/location/jcx");
+        #[cfg(target_os = "windows")]
+        let valid = "@echo off\r\n:joocode_loop\r\n\"C:\\old\\jcx.exe\" serve --host 127.0.0.1 --port 10100\r\ngoto joocode_loop\r\n".to_owned();
+
+        assert!(is_semantically_managed_service(&Value::String(
+            valid.clone()
+        )));
+        assert!(!is_semantically_managed_service(&Value::String(
+            valid.replace("10100", "20100")
+        )));
+    }
+
+    #[test]
+    fn adopts_an_executable_path_migration_but_rejects_service_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("service-definition");
+
+        #[cfg(target_os = "macos")]
+        let original = macos_plist("/old/location/jcx", "/tmp/out", "/tmp/err");
+        #[cfg(target_os = "macos")]
+        let migrated = macos_plist("/new/location/jcx", "/tmp/out", "/tmp/err");
+        #[cfg(target_os = "linux")]
+        let original = systemd_service("/old/location/jcx");
+        #[cfg(target_os = "linux")]
+        let migrated = systemd_service("/new/location/jcx");
+        #[cfg(target_os = "windows")]
+        let original = "@echo off\r\n:joocode_loop\r\n\"C:\\old\\jcx.exe\" serve --host 127.0.0.1 --port 10100\r\ngoto joocode_loop\r\n".to_owned();
+        #[cfg(target_os = "windows")]
+        let migrated = original.replace("C:\\old", "C:\\new");
+
+        fs::write(&path, &original).unwrap();
+        integration_journal::record("autostart", &path, &Value::String(original)).unwrap();
+        fs::write(&path, &migrated).unwrap();
+        assert_or_adopt_managed_service(&path).unwrap();
+
+        fs::write(&path, migrated.replace("10100", "20100")).unwrap();
+        assert!(assert_or_adopt_managed_service(&path).is_err());
+        integration_journal::remove("autostart").unwrap();
     }
 }
