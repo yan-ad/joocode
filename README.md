@@ -605,6 +605,7 @@ curl http://127.0.0.1:10100/healthz
 curl http://127.0.0.1:10100/readyz
 curl http://127.0.0.1:10100/api/status
 curl http://127.0.0.1:10100/api/providers
+curl http://127.0.0.1:10100/api/metrics
 curl http://127.0.0.1:10100/v1/models
 ```
 
@@ -618,6 +619,10 @@ response content.
 `/api/providers` exposes the non-secret logical provider/model catalog, source
 discovery reports, and passive runtime availability. Provider URLs, headers,
 and credentials are never included.
+
+`/api/metrics` exposes the same privacy-safe process, request-counter, registry,
+and provider-runtime data in Prometheus text format. It does not contain request
+content, provider URLs, headers, or credentials.
 
 ```bash
 jcx stats

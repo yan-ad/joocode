@@ -20,6 +20,107 @@ async fn antigravity_bridge(
     antigravity::handle(&registry, method, uri, headers, body).await
 }
 
+fn prometheus_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+async fn api_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let registry = state.registry.snapshot();
+    let provider_statuses = state
+        .upstream_runtime
+        .provider_statuses(&registry.provider_keys())
+        .await;
+    let mut output = String::new();
+    macro_rules! metric {
+        ($name:literal, $help:literal, $kind:literal, $value:expr) => {
+            output.push_str(concat!("# HELP ", $name, " ", $help, "\n"));
+            output.push_str(concat!("# TYPE ", $name, " ", $kind, "\n"));
+            output.push_str(&format!(concat!($name, " {}\n"), $value));
+        };
+    }
+    metric!(
+        "joocode_uptime_seconds",
+        "Seconds since the Joocode process started.",
+        "gauge",
+        state.metrics.started.elapsed().as_secs()
+    );
+    metric!(
+        "joocode_providers",
+        "Number of discovered logical providers.",
+        "gauge",
+        registry.provider_count()
+    );
+    metric!(
+        "joocode_models",
+        "Number of discovered routable models.",
+        "gauge",
+        registry.models().len()
+    );
+    metric!(
+        "joocode_requests_total",
+        "Total protected data-plane and management requests.",
+        "counter",
+        state.metrics.requests.load(Ordering::Relaxed)
+    );
+    metric!(
+        "joocode_active_requests",
+        "Requests currently executing.",
+        "gauge",
+        state.metrics.active.load(Ordering::Relaxed)
+    );
+    metric!(
+        "joocode_responses_success_total",
+        "Successful protected responses.",
+        "counter",
+        state.metrics.successes.load(Ordering::Relaxed)
+    );
+    metric!(
+        "joocode_responses_failure_total",
+        "Failed protected responses.",
+        "counter",
+        state.metrics.failures.load(Ordering::Relaxed)
+    );
+    output.push_str(
+        "# HELP joocode_provider_active_requests Active requests for a provider route.\n\
+# TYPE joocode_provider_active_requests gauge\n\
+# HELP joocode_provider_concurrency_limit Configured concurrency limit for a provider route.\n\
+# TYPE joocode_provider_concurrency_limit gauge\n\
+# HELP joocode_provider_cooldown_seconds Remaining provider cooldown in seconds.\n\
+# TYPE joocode_provider_cooldown_seconds gauge\n\
+# HELP joocode_provider_available Whether a provider route is currently available.\n\
+# TYPE joocode_provider_available gauge\n",
+    );
+    for provider in provider_statuses {
+        let name = prometheus_label(&provider.provider);
+        output.push_str(&format!(
+            "joocode_provider_active_requests{{provider=\"{name}\"}} {}\n",
+            provider.active_requests
+        ));
+        output.push_str(&format!(
+            "joocode_provider_concurrency_limit{{provider=\"{name}\"}} {}\n",
+            provider.concurrency_limit
+        ));
+        output.push_str(&format!(
+            "joocode_provider_cooldown_seconds{{provider=\"{name}\"}} {:.3}\n",
+            provider.cooldown_ms as f64 / 1000.0
+        ));
+        output.push_str(&format!(
+            "joocode_provider_available{{provider=\"{name}\"}} {}\n",
+            u8::from(provider.state == "available")
+        ));
+    }
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        output,
+    )
+}
+
 pub async fn reload(url: &str, token: Option<&str>) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let mut request = client.post(url);
@@ -159,6 +260,7 @@ pub async fn stats(url: &str, token: Option<&str>) -> anyhow::Result<()> {
             );
         }
     }
+
     Ok(())
 }
 
@@ -1329,6 +1431,7 @@ fn build_router_with_selection(
     let protected = Router::new()
         .route("/api/status", get(api_status))
         .route("/api/providers", get(api_providers))
+        .route("/api/metrics", get(api_metrics))
         .route("/api/reload", post(api_reload))
         .route("/v1/models", get(models))
         .route("/v1/responses", post(responses))
@@ -1850,6 +1953,40 @@ mod tests {
         let rendered = serde_json::to_string(&body).unwrap();
         for secret_field in ["api_key", "authorization", "base_url", "headers"] {
             assert!(!rendered.contains(secret_field));
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_api_exposes_prometheus_counters_without_secrets() {
+        let app = build_router(
+            RegistryStore::new(fixture_registry()),
+            &policy(false, None, &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let response = app
+            .oneshot(
+                HttpRequest::get("/api/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+        let body = to_bytes(response.into_body(), 32_768).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("joocode_uptime_seconds"));
+        assert!(body.contains("joocode_models 1"));
+        assert!(body.contains("joocode_provider_available{provider=\"fixture\"} 1"));
+        for secret in [
+            "api_key",
+            "authorization",
+            "base_url",
+            "https://example.test",
+        ] {
+            assert!(!body.contains(secret));
         }
     }
 

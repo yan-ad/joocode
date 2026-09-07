@@ -30,36 +30,59 @@ Joocode should not become:
 
 ## Capability comparison
 
-| Capability | OpenCodex | Joocode | Priority |
-|---|---:|---:|---:|
-| Model/provider discovery | Yes | Yes, multi-source | Complete |
-| OpenAI-compatible local gateway | Yes | Yes | Complete |
-| Desktop-client auto-configuration | Yes | Codex, Zed, Claude Code, GitHub Copilot App, Grok Build, others | Stronger/different |
-| Combo failover routing | Yes | Yes, ordered candidates | Complete |
-| Weighted round-robin | Yes | Yes, deterministic weighted selection | Complete |
-| Generic request retry/backoff | Yes | Yes, configurable with `Retry-After` | Complete |
-| Provider pacing and cooldown | Yes | Cooldown shipped; pacing pending | P1 |
-| Non-loopback authentication | Yes | Yes, token required | Complete |
-| Restrictive remote CORS | Yes | Yes, explicit origin allowlist | Complete |
-| Readiness endpoint | Yes | Yes, `/readyz` | Complete |
-| Request body limits | Yes | Yes, configurable | Complete |
-| Stream stall/idle timeout | Yes | Yes, configurable incomplete semantics | Complete |
-| Integration ownership journal | Yes | Foundation shipped for Zed; more targets pending | P0 |
-| Credential/API-key pools | Yes | One credential route per discovered provider | P2 |
-| Multi-account OAuth pools | Yes | Limited source-specific support | P2 |
-| Native Anthropic upstream | Yes | Mostly translated through Chat Completions | P3 |
-| Native Gemini upstream | Yes | Partial/source-specific | P3 |
-| Native Responses upstream | Yes | Partial | P3 |
-| Responses compact endpoint | Yes | Native OpenAI passthrough; routed models pending | P3 |
-| Responses WebSocket | Yes | No | P3 |
-| Image generation/edit endpoints | Yes | No | P3 |
-| Realtime/Live API | Yes | No | P5 |
-| Browser management dashboard | Yes | TUI only | Intentionally different |
-| Usage and latency analytics | Yes | Privacy-safe uptime/request counters shipped; token/latency breakdown pending | P4 |
-| Remote authenticated hub | Yes | No | P5 |
-| Web-search/vision sidecars | Yes | No | P5 |
-| Subagent catalog controls | Yes | Basic catalog metadata | P2 |
-| On-demand Codex shim | Yes | No | P5 |
+Status legend: **Complete**, **Partial**, **Planned**, or **Intentional**.
+
+| Area | Capability | OpenCodex | Joocode | Status / next work |
+|---|---|---:|---:|---|
+| Discovery | Multi-source provider/model discovery | Yes | OpenCode, CrabCode, OpenCodex, Hermes, Copilot, Antigravity, local providers | **Complete** |
+| Discovery | Selectively enable detected sources | Yes | Persistent `/ Config` toggles and explicit `--source` override | **Complete** |
+| Discovery | Hot registry reload | Yes | `jcx reload` and `POST /api/reload` with atomic swap | **Complete** |
+| Gateway | OpenAI Chat Completions | Yes | `/v1/chat/completions` | **Complete** |
+| Gateway | OpenAI Responses | Yes | Responses-to-Chat translation plus native OpenAI passthrough | **Partial** — routed native Responses transport pending |
+| Gateway | Anthropic Messages | Yes | Messages/SSE/tool translation through Chat Completions | **Partial** — native upstream pending |
+| Gateway | Gemini/Cloud Code bridge | Yes | Source-specific and Antigravity bridge support | **Partial** — generic native Gemini upstream pending |
+| Gateway | Responses compaction | Yes | Native OpenAI/ChatGPT passthrough | **Partial** — routed providers pending |
+| Gateway | Responses WebSocket | Yes | No | **Planned P3** |
+| Gateway | Image generation/editing | Yes | No standalone endpoints | **Planned P3** |
+| Gateway | Realtime/Live API | Yes | No | **Planned P5** |
+| Tools | Function tools | Yes | Yes | **Complete** |
+| Tools | Namespace/MCP tools | Yes | Reversible namespace flattening for routed models | **Complete** |
+| Tools | Undeclared tool rejection | Yes | Non-streaming and streaming validation | **Complete** |
+| Tools | Structured MCP output preservation | Yes | Yes | **Complete** |
+| Routing | Ordered combo failover | Yes | `combo/name` | **Complete** |
+| Routing | Weighted round-robin | Yes | Deterministic weighted selection | **Complete** |
+| Routing | Generic retries/backoff | Yes | Retryable transport/status classification and `Retry-After` | **Complete** |
+| Routing | Provider cooldown | Yes | Fixed cooldown and combo skip | **Complete** |
+| Routing | Per-provider concurrency budgets | Yes | Stream-lifetime permits | **Complete** |
+| Routing | Request pacing | Yes | No proactive pacing | **Planned P1** |
+| Routing | Adaptive quota/error cooldown | Yes | Fixed/basic cooldown only | **Planned P1** |
+| Routing | Lowest-latency/health-aware selection | Yes | No latency scoring yet | **Planned P1/P4** |
+| Credentials | Source-owned credentials | Yes | Reuses each source's credential store without copying secrets | **Complete** |
+| Credentials | Generic API-key pools | Yes | One credential route per discovered provider | **Planned P2** |
+| Credentials | Multi-account OAuth pools | Yes | Limited source-specific support | **Planned P2** |
+| Security | Non-loopback admission auth | Yes | Mandatory `JOOCODE_API_AUTH_TOKEN` | **Complete** |
+| Security | Restrictive remote CORS | Yes | Explicit remote origin allowlist | **Complete** |
+| Security | Request body limits | Yes | Configurable, default 16 MiB | **Complete** |
+| Security | SSE event/tool argument limits | Yes | Configurable, default 1 MiB each | **Complete** |
+| Security | Stream idle timeout/incomplete semantics | Yes | Configurable timeout and explicit protocol errors | **Complete** |
+| Security | Downstream cancellation propagation | Yes | Upstream stream dropped on client disconnect | **Complete** |
+| Security | Remote rate limiting | Yes | No admission rate limiter yet | **Planned P0** |
+| Security | Separate management-plane credential | Yes | Management shares data-plane admission token | **Planned P0** |
+| Integrations | Desktop auto-configuration | Yes | Codex, Zed, Claude Code, Grok Build, GitHub Copilot App; JetBrains endpoint guidance | **Complete/Partial by client** |
+| Integrations | Configuration ownership journal | Yes | Managed-subtree conflict detection for Zed | **Partial** — other clients pending |
+| Integrations | Background service and auto-start | Yes | macOS, Linux, Windows lifecycle controls | **Complete** |
+| Integrations | Self-update | Yes | Check, checksum, replace/relaunch on Unix and Windows | **Complete** |
+| Catalog | Model capability metadata | Yes | Context/output/reasoning and direct-tool compatibility | **Partial** — deeper provider metadata pending |
+| Catalog | Subagent model controls | Yes | Basic catalog metadata only | **Planned P2** |
+| Observability | Liveness/readiness | Yes | `/healthz` and `/readyz` | **Complete** |
+| Observability | Runtime status | Yes | `jcx stats` and `/api/status` | **Complete** |
+| Observability | Provider/catalog status | Yes | `/api/providers`, active requests and cooldown state | **Complete** |
+| Observability | Prometheus metrics | Yes | `/api/metrics` | **Complete** |
+| Observability | Token/latency/retry/failover breakdown | Yes | Not recorded yet | **Planned P4** |
+| UI | Browser management dashboard | Yes | Compact Ratatui dashboard and modals | **Intentional difference** |
+| Ecosystem | Remote authenticated hub | Yes | No | **Planned P5** |
+| Ecosystem | Web-search/vision sidecars | Yes | No | **Planned P5** |
+| Ecosystem | On-demand Codex shim | Yes | No | **Planned P5** |
 
 ## P0 — Security and correctness
 
@@ -340,8 +363,10 @@ GET  /api/metrics
 POST /api/reload
 ```
 
-`/api/status`, `/api/providers`, and `/api/reload` are shipped. A dedicated
-metrics endpoint remains pending.
+`/api/status`, `/api/providers`, `/api/metrics`, and `/api/reload` are shipped.
+The Prometheus endpoint contains only process, registry, request-counter, and
+provider-runtime gauges. Token, latency, retry, failover, and model-distribution
+metrics remain pending.
 
 ## P5 — Optional ecosystem work
 
@@ -375,17 +400,20 @@ Joocode should remain local-first until non-loopback authentication, CORS restri
 
 ## Recommended next three initiatives
 
-### 1. Secure non-loopback binding
+### 1. Finish integration ownership journals
 
-Implement mandatory access tokens, restrictive CORS, and safe startup guards before promoting LAN access.
+Extend managed-subtree conflict detection beyond Zed to Codex, Claude Code,
+Grok Build, GitHub Copilot App, and background-service files.
 
-### 2. Combo routing with retries and failover
+### 2. Add adaptive routing signals
 
-This provides the largest user-facing improvement while remaining within Joocode's provider-gateway responsibility.
+Record bounded latency, retry, failover, and error-streak metrics, then use them
+for adaptive cooldown, proactive pacing, and lowest-latency healthy combos.
 
-### 3. Readiness and hardened streaming
+### 3. Deepen native provider protocols
 
-Add `/readyz`, stream deadlines, explicit incomplete-response semantics, and cancellation propagation.
+Add native Responses, Anthropic Messages, and Gemini upstream transports before
+Responses WebSocket and standalone image endpoints.
 
 ## Strategic direction
 
