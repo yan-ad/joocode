@@ -1,10 +1,163 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::IsTerminal,
     net::SocketAddr,
     sync::mpsc::{Receiver, TryRecvError},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DashboardProviderRuntimeSnapshot {
+    pub provider: String,
+    pub state: String,
+    pub active_requests: usize,
+    pub concurrency_limit: usize,
+    pub cooldown_ms: u64,
+    pub latency_ms: Option<f64>,
+    pub consecutive_failures: u32,
+}
+
+fn draw_usage_page(frame: &mut Frame<'_>, area: Rect, runtime: &DashboardRuntimeSnapshot) {
+    let mut lines = vec![
+        Line::from(format!("Uptime: {}", format_duration(runtime.uptime_secs))),
+        Line::from(format!(
+            "Requests: {}   Active: {}",
+            runtime.requests, runtime.active
+        )),
+        Line::from(format!(
+            "Successes: {}   Failures: {}",
+            runtime.successes, runtime.failures
+        )),
+        Line::from(format!(
+            "Tool calls: {}   Browser/computer: {}",
+            runtime.tool_calls, runtime.browser_tool_calls
+        )),
+        Line::from(""),
+        Line::from("Provider                  State          Latency   Cooldown"),
+    ];
+    if runtime.providers.is_empty() {
+        lines.push(Line::from("No provider traffic has been observed yet."));
+    } else {
+        lines.extend(runtime.providers.iter().map(|provider| {
+            Line::from(format!(
+                "{:<25} {:<14} {:>7}   {:>8}",
+                provider.provider,
+                provider.state,
+                provider
+                    .latency_ms
+                    .map(|value| format!("{value:.0}ms"))
+                    .unwrap_or_else(|| "—".into()),
+                if provider.cooldown_ms == 0 {
+                    "—".into()
+                } else {
+                    format!("{}ms", provider.cooldown_ms)
+                },
+            ))
+        }));
+    }
+
+    draw_read_only_page(frame, area, "Usage", lines);
+}
+
+fn draw_storage_page(frame: &mut Frame<'_>, area: Rect, storage: &DashboardStorageSnapshot) {
+    let lines = if storage.entries.is_empty() {
+        vec![Line::from("Storage paths are unavailable.")]
+    } else {
+        storage
+            .entries
+            .iter()
+            .map(|entry| {
+                Line::from(format!(
+                    "{:<20} {:>10}  {}",
+                    entry.label,
+                    entry
+                        .size_bytes
+                        .map(format_bytes)
+                        .unwrap_or_else(|| "missing".into()),
+                    entry.path,
+                ))
+            })
+            .collect()
+    };
+    draw_read_only_page(frame, area, "Storage", lines);
+}
+
+fn draw_logs_page(frame: &mut Frame<'_>, area: Rect, events: &[DashboardRequestEvent]) {
+    let lines = if events.is_empty() {
+        vec![Line::from("No requests have been recorded yet.")]
+    } else {
+        events
+            .iter()
+            .rev()
+            .map(|event| {
+                let route = match (&event.provider, &event.model) {
+                    (Some(provider), Some(model)) => format!(" {provider}/{model}"),
+                    (Some(provider), None) => format!(" {provider}"),
+                    _ => String::new(),
+                };
+                Line::from(format!(
+                    "{:<6} {:<30} {:>3} {:>6}ms{}",
+                    event.method, event.path, event.status, event.duration_ms, route
+                ))
+            })
+            .collect()
+    };
+    draw_read_only_page(frame, area, "Logs", lines);
+}
+
+fn format_duration(seconds: u64) -> String {
+    format!(
+        "{}d {:02}:{:02}:{:02}",
+        seconds / 86_400,
+        (seconds / 3_600) % 24,
+        (seconds / 60) % 60,
+        seconds % 60
+    )
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DashboardRuntimeSnapshot {
+    pub uptime_secs: u64,
+    pub requests: u64,
+    pub active: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub tool_calls: u64,
+    pub browser_tool_calls: u64,
+    pub providers: Vec<DashboardProviderRuntimeSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DashboardStorageEntry {
+    pub label: String,
+    pub path: String,
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DashboardStorageSnapshot {
+    pub entries: Vec<DashboardStorageEntry>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DashboardRequestEvent {
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub duration_ms: u64,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -23,7 +176,7 @@ use crate::{
     autostart::{self, Status as AutoStartStatus},
     desktop::DesktopTargets,
     local_config::{self, ProviderSummary},
-    provider::Registry,
+    provider::{ModelInfo, Registry},
     sources::{SourceKind, SourceSelection},
     target_config::ProxyTarget,
 };
@@ -40,7 +193,89 @@ pub struct DashboardData {
     pub proxy_targets: BTreeMap<ProxyTarget, bool>,
     pub detected_sources: BTreeMap<SourceKind, bool>,
     pub providers: Vec<ProviderSummary>,
+    pub models: Vec<ModelInfo>,
+    pub disabled_models: BTreeSet<String>,
+    pub subagent_catalog: crate::target_config::SubagentCatalogPolicy,
     pub port_warning: Option<String>,
+    pub runtime: DashboardRuntimeSnapshot,
+    pub storage: DashboardStorageSnapshot,
+    pub request_events: Vec<DashboardRequestEvent>,
+}
+
+fn page_screen(page: Page) -> Screen {
+    match page {
+        Page::Models => Screen::Models { selected: 0 },
+        Page::Subagents => Screen::Subagents { selected: 0 },
+        page => Screen::Base { page },
+    }
+}
+
+impl Default for Screen {
+    fn default() -> Self {
+        Self::Base {
+            page: Page::Overview,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Page {
+    #[default]
+    Overview,
+    Providers,
+    Models,
+    Subagents,
+    Logs,
+    Usage,
+    Storage,
+    Integrations,
+}
+
+impl Page {
+    const ALL: [Self; 8] = [
+        Self::Overview,
+        Self::Providers,
+        Self::Models,
+        Self::Subagents,
+        Self::Logs,
+        Self::Usage,
+        Self::Storage,
+        Self::Integrations,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Providers => "Providers",
+            Self::Models => "Models",
+            Self::Subagents => "Subagents",
+            Self::Logs => "Logs",
+            Self::Usage => "Usage",
+            Self::Storage => "Storage",
+            Self::Integrations => "Integrations",
+        }
+    }
+
+    fn adjacent(self, forward: bool) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|page| *page == self)
+            .unwrap_or_default();
+        let next = if forward {
+            (index + 1) % Self::ALL.len()
+        } else {
+            (index + Self::ALL.len() - 1) % Self::ALL.len()
+        };
+        Self::ALL[next]
+    }
+
+    fn from_number(character: char) -> Option<Self> {
+        character
+            .to_digit(10)
+            .and_then(|number| number.checked_sub(1))
+            .and_then(|index| Self::ALL.get(index as usize))
+            .copied()
+    }
 }
 
 fn draw_provider_models(frame: &mut Frame<'_>, provider: &ProviderSummary, selected: usize) {
@@ -350,6 +585,13 @@ fn draw_providers(frame: &mut Frame<'_>, providers: &[ProviderSummary], selected
                 Some(model) => format!(" {model}"),
                 None => " Set default model".to_owned(),
             }),
+            Span::raw("    "),
+            Span::styled("k", Style::default().fg(MODAL_ACCENT)),
+            Span::raw(" add key    "),
+            Span::styled("x", Style::default().fg(Color::LightRed)),
+            Span::raw(" remove key    "),
+            Span::styled("t", Style::default().fg(Color::LightGreen)),
+            Span::raw(" test"),
         ]),
     );
     let items = if providers.is_empty() {
@@ -369,6 +611,10 @@ fn draw_providers(frame: &mut Frame<'_>, providers: &[ProviderSummary], selected
                     ),
                     Span::styled(
                         format!("  {} models", provider.model_count),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("  {} key(s)", provider.key_count),
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::styled(
@@ -955,7 +1201,10 @@ fn draw_easter_egg(frame: &mut Frame<'_>, tick: usize) {
 }
 
 fn detect_easter_egg(screen: &mut Screen, input: &mut String, key: KeyCode) -> bool {
-    if !matches!(screen, Screen::Dashboard) {
+    if !matches!(
+        screen,
+        Screen::Base { .. } | Screen::Models { .. } | Screen::Subagents { .. }
+    ) {
         input.clear();
         return false;
     }
@@ -996,6 +1245,7 @@ fn handle_paste(screen: &mut Screen, value: &str) {
             value: base_url, ..
         } => base_url.push_str(&value),
         Screen::ProviderApiKey { api_key, .. } => api_key.push_str(&value),
+        Screen::ProviderPoolKey { api_key, .. } => api_key.push_str(&value),
         _ => {}
     }
 }
@@ -1008,6 +1258,23 @@ impl DashboardData {
         address: SocketAddr,
         port_warning: Option<String>,
     ) -> Self {
+        let preferences = crate::target_config::TargetPreferences::load().unwrap_or_default();
+        let mut models = registry.models().to_vec();
+        for id in &preferences.disabled_models {
+            if !models.iter().any(|model| &model.id == id) {
+                let (provider, upstream_id) = id.split_once('/').unwrap_or(("disabled", id));
+                models.push(ModelInfo {
+                    id: id.clone(),
+                    provider: provider.to_owned(),
+                    upstream_id: upstream_id.to_owned(),
+                    name: format!("{upstream_id} (disabled)"),
+                    reasoning: false,
+                    context_window: None,
+                    max_output_tokens: None,
+                });
+            }
+        }
+        models.sort_by(|left, right| left.id.cmp(&right.id));
         Self {
             config_sources: config_sources(registry),
             ide_targets: targets.names().into_iter().map(str::to_owned).collect(),
@@ -1015,9 +1282,7 @@ impl DashboardData {
             model_count: registry.models().len(),
             provider_count: registry.provider_count(),
             autostart: autostart::status(),
-            run_in_background: crate::target_config::TargetPreferences::load()
-                .unwrap_or_default()
-                .run_in_background,
+            run_in_background: preferences.run_in_background,
             proxy_targets: ProxyTarget::ALL
                 .into_iter()
                 .map(|target| (target, targets.enabled(target)))
@@ -1027,7 +1292,13 @@ impl DashboardData {
                 .map(|source| (source, selection.enabled(source)))
                 .collect(),
             providers: local_config::summaries().unwrap_or_default(),
+            models,
+            disabled_models: preferences.disabled_models,
+            subagent_catalog: preferences.subagent_catalog,
             port_warning,
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: Vec::new(),
         }
     }
 }
@@ -1035,17 +1306,29 @@ impl DashboardData {
 #[derive(Debug)]
 pub enum DashboardCommand {
     AddProvider { base_url: String, api_key: String },
+    AddProviderKey { provider: String, api_key: String },
+    RemoveProviderKey { provider: String },
     RemoveProvider { name: String },
     SetDefaultModel { provider: String, model: String },
     ToggleAutoStart,
     ToggleRunInBackground,
     ToggleSource { source: SourceKind },
     ToggleProxyTarget { target: ProxyTarget },
+    ToggleModel { model: String },
+    ToggleSubagentFeatured { model: String },
+    ToggleSubagentFallback { model: String },
+    AdjustSubagentMaxEntries { delta: i8 },
+    TestProvider { name: String },
     InstallUpdate { tag: String },
 }
 
 #[derive(Debug)]
 pub enum DashboardEvent {
+    ObservabilityUpdated {
+        runtime: DashboardRuntimeSnapshot,
+        storage: DashboardStorageSnapshot,
+        request_events: Vec<DashboardRequestEvent>,
+    },
     ProviderAdded {
         provider: String,
         config_sources: Vec<String>,
@@ -1077,6 +1360,15 @@ pub enum DashboardEvent {
         target: ProxyTarget,
         enabled: bool,
     },
+    CatalogUpdated {
+        models: Vec<ModelInfo>,
+        model_count: usize,
+        provider_count: usize,
+        config_sources: Vec<String>,
+        disabled_models: BTreeSet<String>,
+        subagent_catalog: crate::target_config::SubagentCatalogPolicy,
+    },
+    ProviderTested(String),
     UpdateAvailable(String),
     UpdateInstalled,
     ShutdownRequested,
@@ -1088,10 +1380,16 @@ pub enum DashboardExit {
     Restart,
 }
 
-#[derive(Default)]
 enum Screen {
-    #[default]
-    Dashboard,
+    Base {
+        page: Page,
+    },
+    Models {
+        selected: usize,
+    },
+    Subagents {
+        selected: usize,
+    },
     Config {
         selected: usize,
     },
@@ -1109,6 +1407,10 @@ enum Screen {
     ProviderApiKey {
         selected: usize,
         base_url: String,
+        api_key: String,
+    },
+    ProviderPoolKey {
+        selected: usize,
         api_key: String,
     },
     ProviderLoading {
@@ -1146,7 +1448,7 @@ pub fn run(
     command_tx: UnboundedSender<DashboardCommand>,
     event_rx: Receiver<DashboardEvent>,
 ) -> anyhow::Result<DashboardExit> {
-    let mut screen = Screen::Dashboard;
+    let mut screen = Screen::default();
     let mut secret_input = String::new();
     let exit = ratatui::run(|terminal| {
         loop {
@@ -1179,18 +1481,29 @@ pub fn run(
                 if matches!(screen, Screen::Updating { .. }) {
                     continue;
                 }
-                if matches!(screen, Screen::Dashboard) {
+                if matches!(screen, Screen::Base { .. }) {
                     return Ok::<DashboardExit, std::io::Error>(DashboardExit::Quit);
                 }
                 screen = match screen {
                     Screen::ProviderBaseUrl { selected, .. }
-                    | Screen::ProviderApiKey { selected, .. } => Screen::Providers { selected },
+                    | Screen::ProviderApiKey { selected, .. }
+                    | Screen::ProviderPoolKey { selected, .. } => Screen::Providers { selected },
                     Screen::ProviderModels {
                         provider_selected, ..
                     } => Screen::Providers {
                         selected: provider_selected,
                     },
-                    _ => Screen::Dashboard,
+                    Screen::Providers { .. } => Screen::Base {
+                        page: Page::Providers,
+                    },
+                    Screen::Models { .. } => Screen::Base { page: Page::Models },
+                    Screen::Subagents { .. } => Screen::Base {
+                        page: Page::Subagents,
+                    },
+                    Screen::Config { .. } => Screen::Base {
+                        page: Page::Integrations,
+                    },
+                    _ => Screen::default(),
                 };
                 continue;
             }
@@ -1200,7 +1513,7 @@ pub fn run(
             if detect_easter_egg(&mut screen, &mut secret_input, key.code) {
                 continue;
             }
-            handle_key_with_providers(&mut screen, key.code, &command_tx, &data.providers);
+            handle_key_with_data(&mut screen, key.code, &command_tx, &data);
         }
     })?;
     Ok(exit)
@@ -1213,6 +1526,15 @@ fn receive_events(
 ) -> Option<DashboardExit> {
     loop {
         match event_rx.try_recv() {
+            Ok(DashboardEvent::ObservabilityUpdated {
+                runtime,
+                storage,
+                request_events,
+            }) => {
+                data.runtime = runtime;
+                data.storage = storage;
+                data.request_events = request_events;
+            }
             Ok(DashboardEvent::ProviderAdded {
                 provider,
                 config_sources,
@@ -1244,7 +1566,8 @@ fn receive_events(
                 let selected = match screen {
                     Screen::Providers { selected }
                     | Screen::ProviderBaseUrl { selected, .. }
-                    | Screen::ProviderApiKey { selected, .. } => *selected,
+                    | Screen::ProviderApiKey { selected, .. }
+                    | Screen::ProviderPoolKey { selected, .. } => *selected,
                     _ => 0,
                 };
                 *screen = Screen::Providers {
@@ -1288,6 +1611,31 @@ fn receive_events(
                     .map(|target| target.label().to_owned())
                     .collect();
             }
+            Ok(DashboardEvent::CatalogUpdated {
+                models,
+                model_count,
+                provider_count,
+                config_sources,
+                disabled_models,
+                subagent_catalog,
+            }) => {
+                let old_models = std::mem::take(&mut data.models);
+                data.models = models;
+                for model in old_models {
+                    if disabled_models.contains(&model.id)
+                        && !data.models.iter().any(|candidate| candidate.id == model.id)
+                    {
+                        data.models.push(model);
+                    }
+                }
+                data.models.sort_by(|left, right| left.id.cmp(&right.id));
+                data.model_count = model_count;
+                data.provider_count = provider_count;
+                data.config_sources = config_sources;
+                data.disabled_models = disabled_models;
+                data.subagent_catalog = subagent_catalog;
+            }
+            Ok(DashboardEvent::ProviderTested(message)) => *screen = Screen::Error(message),
             Ok(DashboardEvent::UpdateAvailable(tag)) => *screen = Screen::UpdateAvailable(tag),
             Ok(DashboardEvent::UpdateInstalled) => return Some(DashboardExit::Restart),
             Ok(DashboardEvent::ShutdownRequested) => return Some(DashboardExit::Quit),
@@ -1302,6 +1650,63 @@ fn handle_key(screen: &mut Screen, key: KeyCode, command_tx: &UnboundedSender<Da
     handle_key_with_providers(screen, key, command_tx, &[]);
 }
 
+fn handle_key_with_data(
+    screen: &mut Screen,
+    key: KeyCode,
+    command_tx: &UnboundedSender<DashboardCommand>,
+    data: &DashboardData,
+) {
+    match screen {
+        Screen::Models { selected } => {
+            *selected = (*selected).min(data.models.len().saturating_sub(1));
+            match key {
+                KeyCode::Up => *selected = selected.saturating_sub(1),
+                KeyCode::Down => {
+                    *selected = selected
+                        .saturating_add(1)
+                        .min(data.models.len().saturating_sub(1));
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(model) = data.models.get(*selected) {
+                        let _ = command_tx.send(DashboardCommand::ToggleModel {
+                            model: model.id.clone(),
+                        });
+                    }
+                }
+                _ => handle_key_with_providers(screen, key, command_tx, &data.providers),
+            }
+        }
+        Screen::Subagents { selected } => {
+            *selected = (*selected).min(data.models.len().saturating_sub(1));
+            let command = match key {
+                KeyCode::Char(' ') => data.models.get(*selected).map(|model| {
+                    DashboardCommand::ToggleSubagentFeatured {
+                        model: model.id.clone(),
+                    }
+                }),
+                KeyCode::Char('f') => data.models.get(*selected).map(|model| {
+                    DashboardCommand::ToggleSubagentFallback {
+                        model: model.id.clone(),
+                    }
+                }),
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    Some(DashboardCommand::AdjustSubagentMaxEntries { delta: 1 })
+                }
+                KeyCode::Char('-') => {
+                    Some(DashboardCommand::AdjustSubagentMaxEntries { delta: -1 })
+                }
+                _ => None,
+            };
+            if let Some(command) = command {
+                let _ = command_tx.send(command);
+            } else {
+                handle_key_with_providers(screen, key, command_tx, &data.providers);
+            }
+        }
+        _ => handle_key_with_providers(screen, key, command_tx, &data.providers),
+    }
+}
+
 fn handle_key_with_providers(
     screen: &mut Screen,
     key: KeyCode,
@@ -1309,8 +1714,75 @@ fn handle_key_with_providers(
     providers: &[ProviderSummary],
 ) {
     match screen {
-        Screen::Dashboard if key == KeyCode::Tab => *screen = Screen::Providers { selected: 0 },
-        Screen::Dashboard if key == KeyCode::Char('/') => *screen = Screen::Config { selected: 0 },
+        Screen::Base { page } => match key {
+            KeyCode::Tab => *screen = page_screen(page.adjacent(true)),
+            KeyCode::BackTab => *screen = page_screen(page.adjacent(false)),
+            KeyCode::Char(character) if Page::from_number(character).is_some() => {
+                *screen = page_screen(Page::from_number(character).unwrap_or(*page));
+            }
+            KeyCode::Enter if *page == Page::Providers => {
+                *screen = Screen::Providers { selected: 0 };
+            }
+            KeyCode::Char('t') if *page == Page::Providers => {
+                if let Some(provider) = providers.first() {
+                    let _ = command_tx.send(DashboardCommand::TestProvider {
+                        name: provider.name.clone(),
+                    });
+                }
+            }
+            KeyCode::Enter if *page == Page::Integrations => {
+                *screen = Screen::Config { selected: 0 };
+            }
+            KeyCode::Char('/') => *screen = Screen::Config { selected: 0 },
+            _ => {}
+        },
+        Screen::ProviderPoolKey { selected, api_key } => match key {
+            KeyCode::Enter if !api_key.trim().is_empty() => {
+                if let Some(provider) = providers.get(*selected) {
+                    let command = DashboardCommand::AddProviderKey {
+                        provider: provider.name.clone(),
+                        api_key: api_key.clone(),
+                    };
+                    if command_tx.send(command).is_ok() {
+                        *screen = Screen::ProviderLoading {
+                            selected: *selected,
+                        };
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                api_key.pop();
+            }
+            KeyCode::Char(character) => api_key.push(character),
+            _ => {}
+        },
+        Screen::Models { selected } => match key {
+            KeyCode::Up => *selected = selected.saturating_sub(1),
+            KeyCode::Down => {
+                // The worker validates the ID; selection is clamped while drawing/event updates.
+                *selected = selected.saturating_add(1);
+            }
+            KeyCode::Char(' ') => {
+                // Models are supplied separately because provider-manager models use local IDs.
+                // The caller passes an empty slice only in narrow unit tests.
+            }
+            KeyCode::Tab => *screen = page_screen(Page::Subagents),
+            KeyCode::BackTab => *screen = page_screen(Page::Providers),
+            KeyCode::Char(character) if Page::from_number(character).is_some() => {
+                *screen = page_screen(Page::from_number(character).unwrap_or(Page::Models));
+            }
+            _ => {}
+        },
+        Screen::Subagents { selected } => match key {
+            KeyCode::Up => *selected = selected.saturating_sub(1),
+            KeyCode::Down => *selected = selected.saturating_add(1),
+            KeyCode::Tab => *screen = page_screen(Page::Logs),
+            KeyCode::BackTab => *screen = page_screen(Page::Models),
+            KeyCode::Char(character) if Page::from_number(character).is_some() => {
+                *screen = page_screen(Page::from_number(character).unwrap_or(Page::Subagents));
+            }
+            _ => {}
+        },
         Screen::Config { selected } => match key {
             KeyCode::Up => *selected = adjacent_config_item(*selected, false),
             KeyCode::Down => *selected = adjacent_config_item(*selected, true),
@@ -1390,6 +1862,28 @@ fn handle_key_with_providers(
                     };
                 }
             }
+            KeyCode::Char('k') => {
+                if providers.get(*selected).is_some() {
+                    *screen = Screen::ProviderPoolKey {
+                        selected: *selected,
+                        api_key: String::new(),
+                    };
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Some(provider) = providers.get(*selected) {
+                    let _ = command_tx.send(DashboardCommand::RemoveProviderKey {
+                        provider: provider.name.clone(),
+                    });
+                }
+            }
+            KeyCode::Char('t') => {
+                if let Some(provider) = providers.get(*selected) {
+                    let _ = command_tx.send(DashboardCommand::TestProvider {
+                        name: provider.name.clone(),
+                    });
+                }
+            }
             _ => {}
         },
         Screen::ProviderBaseUrl { selected, value } => match key {
@@ -1442,7 +1936,9 @@ fn handle_key_with_providers(
             }
         }
         Screen::Error(_) | Screen::EasterEgg { .. } if key == KeyCode::Enter => {
-            *screen = Screen::Dashboard;
+            *screen = Screen::Base {
+                page: Page::Overview,
+            };
         }
         _ => {}
     }
@@ -1463,50 +1959,65 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
     } else {
         3
     };
-    let warning_height = u16::from(data.port_warning.is_some()) * 4;
-    let dashboard_height = if frame.area().width >= 76 { 12 } else { 19 } + warning_height;
-    let [header, body, footer, _spacer] = Layout::vertical([
+    let [header, body, footer] = Layout::vertical([
         Constraint::Length(header_height),
-        Constraint::Length(dashboard_height.min(frame.area().height.saturating_sub(header_height))),
+        Constraint::Min(1),
         Constraint::Length(2),
-        Constraint::Min(0),
     ])
     .areas(frame.area());
 
     draw_header(frame, header, header_animation_tick());
 
     match screen {
-        Screen::Dashboard => draw_dashboard(frame, body, data),
+        Screen::Base { page } => draw_shell(frame, body, data, *page),
+        Screen::Models { selected } => {
+            draw_shell_selected(frame, body, data, Page::Models, *selected);
+        }
+        Screen::Subagents { selected } => {
+            draw_shell_selected(frame, body, data, Page::Subagents, *selected);
+        }
         Screen::Config { selected } => {
-            draw_dashboard(frame, body, data);
+            draw_shell(frame, body, data, Page::Integrations);
             draw_config(frame, data, *selected);
         }
-        Screen::Providers { selected } => draw_providers(frame, &data.providers, *selected),
+        Screen::Providers { selected } => {
+            draw_shell(frame, body, data, Page::Providers);
+            draw_providers(frame, &data.providers, *selected);
+        }
         Screen::ProviderModels {
             provider_selected,
             model_selected,
         } => {
+            draw_shell(frame, body, data, Page::Providers);
             draw_providers(frame, &data.providers, *provider_selected);
             if let Some(provider) = data.providers.get(*provider_selected) {
                 draw_provider_models(frame, provider, *model_selected);
             }
         }
         Screen::ProviderBaseUrl { selected, value } => {
+            draw_shell(frame, body, data, Page::Providers);
             draw_providers(frame, &data.providers, *selected);
             draw_provider_input(frame, "Step 1/3 — Base URL", value, false);
         }
         Screen::ProviderApiKey {
             selected, api_key, ..
         } => {
+            draw_shell(frame, body, data, Page::Providers);
             draw_providers(frame, &data.providers, *selected);
             draw_provider_input(frame, "Step 2/3 — API key", api_key, true);
         }
+        Screen::ProviderPoolKey { selected, api_key } => {
+            draw_shell(frame, body, data, Page::Providers);
+            draw_providers(frame, &data.providers, *selected);
+            draw_provider_input(frame, "Add API key to pool", api_key, true);
+        }
         Screen::ProviderLoading { selected } => {
+            draw_shell(frame, body, data, Page::Providers);
             draw_providers(frame, &data.providers, *selected);
             draw_provider_loading(frame);
         }
         Screen::UpdateAvailable(tag) => {
-            draw_dashboard(frame, body, data);
+            draw_shell(frame, body, data, Page::Overview);
             draw_update_prompt(frame, tag);
         }
         Screen::Updating { .. } => {
@@ -1516,12 +2027,12 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
         Screen::Error(error) => draw_error(frame, error),
     }
 
-    if !matches!(screen, Screen::Dashboard) {
+    if !matches!(screen, Screen::Base { .. }) {
         return;
     }
 
     let help = match screen {
-        Screen::Dashboard => vec![
+        Screen::Base { .. } | Screen::Models { .. } | Screen::Subagents { .. } => vec![
             Span::styled(
                 " esc ",
                 Style::default()
@@ -1531,27 +2042,28 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             ),
             Span::styled("  Exit    ", Style::default().fg(MUTED_TEXT)),
             Span::styled(
-                " tab ",
+                " tab/shift+tab ",
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Providers    ", Style::default().fg(MUTED_TEXT)),
+            Span::styled("  Navigate    ", Style::default().fg(MUTED_TEXT)),
             Span::styled(
-                " / ",
+                " 1-8 ",
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Config", Style::default().fg(MUTED_TEXT)),
+            Span::styled("  Jump    Enter open", Style::default().fg(MUTED_TEXT)),
         ],
         Screen::Config { .. }
         | Screen::Providers { .. }
         | Screen::ProviderModels { .. }
         | Screen::ProviderBaseUrl { .. }
         | Screen::ProviderApiKey { .. }
+        | Screen::ProviderPoolKey { .. }
         | Screen::ProviderLoading { .. }
         | Screen::UpdateAvailable(_)
         | Screen::Error(_) => unreachable!("modal screens return before global footer rendering"),
@@ -1564,6 +2076,246 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
         Paragraph::new(Line::from(help)),
         footer.inner(Margin::new(1, 0)),
     );
+}
+
+fn draw_shell(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, page: Page) {
+    draw_shell_selected(frame, area, data, page, 0);
+}
+
+fn draw_shell_selected(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    page: Page,
+    selected: usize,
+) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Reset)),
+        area,
+    );
+    if area.width >= 86 {
+        let [navigation, content] = Layout::horizontal([
+            Constraint::Length(20.min(area.width / 3)),
+            Constraint::Min(1),
+        ])
+        .spacing(1)
+        .areas(area);
+        draw_sidebar(frame, navigation, page);
+        draw_page(frame, content, data, page, selected);
+    } else {
+        let [navigation, content] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+        draw_tabs(frame, navigation, page);
+        draw_page(frame, content, data, page, selected);
+    }
+}
+
+fn draw_sidebar(frame: &mut Frame<'_>, area: Rect, selected: Page) {
+    let items = Page::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, page)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{} ", index + 1),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(page.label()),
+            ]))
+            .style(selected_style(*page == selected))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(" JOOCODE ")
+                .borders(Borders::RIGHT)
+                .border_style(Style::default().fg(PANEL_BORDER)),
+        ),
+        area,
+    );
+}
+
+fn draw_tabs(frame: &mut Frame<'_>, area: Rect, selected: Page) {
+    let line = Page::ALL
+        .iter()
+        .enumerate()
+        .flat_map(|(index, page)| {
+            let style = if *page == selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(MODAL_ACCENT)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED_TEXT)
+            };
+            [
+                Span::styled(format!(" {} {} ", index + 1, page.label()), style),
+                Span::raw(" "),
+            ]
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Line::from(line)), area);
+}
+
+fn draw_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, page: Page, selected: usize) {
+    match page {
+        Page::Overview => draw_dashboard(frame, area, data),
+        Page::Providers => draw_read_only_page(
+            frame,
+            area,
+            "Providers",
+            vec![
+                Line::from(format!("{} configured providers", data.provider_count)),
+                Line::from(""),
+                Line::from("Press Enter to open the provider manager."),
+            ],
+        ),
+        Page::Models => draw_models_page(frame, area, data, selected),
+        Page::Subagents => draw_subagents_page(frame, area, data, selected),
+        Page::Logs => draw_logs_page(frame, area, &data.request_events),
+        Page::Usage => draw_usage_page(frame, area, &data.runtime),
+        Page::Storage => draw_storage_page(frame, area, &data.storage),
+        Page::Integrations => draw_read_only_page(
+            frame,
+            area,
+            "Integrations",
+            vec![
+                Line::from(format!(
+                    "{} desktop targets enabled",
+                    data.ide_targets.len()
+                )),
+                Line::from(""),
+                Line::from("Press Enter to open configuration."),
+            ],
+        ),
+    }
+}
+
+fn draw_read_only_page(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &'static str,
+    lines: Vec<Line<'static>>,
+) {
+    let panel = dashboard_panel(title, Color::LightCyan);
+    let inner = panel.inner(area.inner(Margin::new(1, 1)));
+    let panel_area = area.inner(Margin::new(1, 1));
+    frame.render_widget(panel, panel_area);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+fn draw_models_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, selected: usize) {
+    let panel_area = area.inner(Margin::new(1, 1));
+    let panel = dashboard_panel(
+        "Models — ↑/↓ select, Space enable/disable",
+        Color::LightCyan,
+    );
+    let inner = panel.inner(panel_area);
+    frame.render_widget(panel, panel_area);
+    let resolved = data.subagent_catalog.resolve(&data.models);
+    let [summary, inner] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Advertised: {}/{}   Featured: {}   Fallback: {}",
+            resolved.len(),
+            data.subagent_catalog.max_entries,
+            data.subagent_catalog.featured_models.len(),
+            data.subagent_catalog.fallback_models.len()
+        )),
+        summary,
+    );
+    let [status, inner] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Maximum catalog entries: {}",
+            data.subagent_catalog.max_entries
+        )),
+        status,
+    );
+    if data.models.is_empty() {
+        frame.render_widget(Paragraph::new("No models are currently loaded."), inner);
+        return;
+    }
+    let items = data
+        .models
+        .iter()
+        .enumerate()
+        .map(|(index, model)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if data.disabled_models.contains(&model.id) {
+                        "○ "
+                    } else {
+                        "● "
+                    },
+                    Style::default().fg(if data.disabled_models.contains(&model.id) {
+                        Color::DarkGray
+                    } else {
+                        Color::Green
+                    }),
+                ),
+                Span::styled(
+                    model.id.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  {}", model.name), Style::default().fg(MUTED_TEXT)),
+                Span::styled(
+                    if model.reasoning { "  reasoning" } else { "" },
+                    Style::default().fg(Color::LightCyan),
+                ),
+            ]))
+            .style(selected_style(index == selected))
+        })
+        .collect::<Vec<_>>();
+    let selected = selected.min(data.models.len().saturating_sub(1));
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(List::new(items).highlight_symbol("› "), inner, &mut state);
+    draw_modal_scrollbar(frame, inner, data.models.len(), selected);
+}
+
+fn draw_subagents_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, selected: usize) {
+    let panel_area = area.inner(Margin::new(1, 1));
+    let panel = dashboard_panel(
+        "Subagents — Space featured, f fallback, +/- adjusts max",
+        Color::LightCyan,
+    );
+    let inner = panel.inner(panel_area);
+    frame.render_widget(panel, panel_area);
+    if data.models.is_empty() {
+        frame.render_widget(Paragraph::new("No models are currently loaded."), inner);
+        return;
+    }
+    let items = data
+        .models
+        .iter()
+        .enumerate()
+        .map(|(index, model)| {
+            let featured = data.subagent_catalog.featured_models.contains(&model.id);
+            let fallback = data.subagent_catalog.fallback_models.contains(&model.id);
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if featured { "★ " } else { "  " },
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    if fallback { "F " } else { "  " },
+                    Style::default().fg(Color::LightCyan),
+                ),
+                Span::raw(model.id.clone()),
+                Span::styled(format!("  {}", model.name), Style::default().fg(MUTED_TEXT)),
+            ]))
+            .style(selected_style(index == selected))
+        })
+        .collect::<Vec<_>>();
+    let selected = selected.min(data.models.len().saturating_sub(1));
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(List::new(items).highlight_symbol("› "), inner, &mut state);
+    draw_modal_scrollbar(frame, inner, data.models.len(), selected);
 }
 
 fn draw_dashboard(frame: &mut Frame<'_>, area: ratatui::layout::Rect, data: &DashboardData) {
@@ -1796,6 +2548,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn observability_event_refreshes_typed_snapshots() {
+        let mut data = DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: String::new(),
+            model_count: 0,
+            provider_count: 0,
+            autostart: AutoStartStatus::Off,
+            run_in_background: false,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
+            providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            port_warning: None,
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(DashboardEvent::ObservabilityUpdated {
+            runtime: DashboardRuntimeSnapshot {
+                requests: 7,
+                ..Default::default()
+            },
+            storage: DashboardStorageSnapshot {
+                entries: vec![DashboardStorageEntry {
+                    label: "settings.json".into(),
+                    path: "/tmp/settings.json".into(),
+                    size_bytes: Some(42),
+                }],
+            },
+            request_events: vec![DashboardRequestEvent {
+                method: "POST".into(),
+                path: "/v1/responses".into(),
+                status: 200,
+                duration_ms: 12,
+                provider: None,
+                model: None,
+            }],
+        })
+        .unwrap();
+        receive_events(&mut data, &mut Screen::default(), &rx);
+        assert_eq!(data.runtime.requests, 7);
+        assert_eq!(data.storage.entries[0].size_bytes, Some(42));
+        assert_eq!(data.request_events[0].path, "/v1/responses");
+    }
+
+    #[test]
+    fn observability_formatters_are_compact() {
+        assert_eq!(format_duration(90_061), "1d 01:01:01");
+        assert_eq!(format_bytes(1536), "1.5 KiB");
+    }
+
+    #[test]
     fn backslash_opens_default_model_picker_and_enter_selects_model() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let providers = vec![ProviderSummary {
@@ -1804,6 +2612,7 @@ mod tests {
             model_count: 2,
             models: vec!["gpt-5.4".into(), "gpt-5.5".into()],
             default_model: None,
+            key_count: 1,
         }];
         let mut screen = Screen::Providers { selected: 0 };
         handle_key_with_providers(&mut screen, KeyCode::Char('\\'), &tx, &providers);
@@ -1876,11 +2685,143 @@ mod tests {
     }
 
     #[test]
-    fn tab_opens_provider_manager() {
+    fn tab_navigates_to_providers_page() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut screen = Screen::Dashboard;
+        let mut screen = Screen::Base {
+            page: Page::Overview,
+        };
         handle_key(&mut screen, KeyCode::Tab, &tx);
-        assert!(matches!(screen, Screen::Providers { selected: 0 }));
+        assert!(matches!(
+            screen,
+            Screen::Base {
+                page: Page::Providers
+            }
+        ));
+    }
+
+    #[test]
+    fn shell_navigation_wraps_and_number_keys_select_pages() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = Screen::Base {
+            page: Page::Overview,
+        };
+        handle_key(&mut screen, KeyCode::BackTab, &tx);
+        assert!(matches!(
+            screen,
+            Screen::Base {
+                page: Page::Integrations
+            }
+        ));
+        handle_key(&mut screen, KeyCode::Tab, &tx);
+        assert!(matches!(
+            screen,
+            Screen::Base {
+                page: Page::Overview
+            }
+        ));
+        handle_key(&mut screen, KeyCode::Char('4'), &tx);
+        assert!(matches!(screen, Screen::Subagents { selected: 0 }));
+    }
+
+    #[test]
+    fn enter_opens_page_specific_existing_modals() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut providers = Screen::Base {
+            page: Page::Providers,
+        };
+        handle_key(&mut providers, KeyCode::Enter, &tx);
+        assert!(matches!(providers, Screen::Providers { selected: 0 }));
+
+        let mut integrations = Screen::Base {
+            page: Page::Integrations,
+        };
+        handle_key(&mut integrations, KeyCode::Enter, &tx);
+        assert!(matches!(integrations, Screen::Config { selected: 0 }));
+    }
+
+    #[test]
+    fn wide_shell_renders_sidebar_and_models_from_dashboard_data() {
+        let backend = TestBackend::new(110, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 1,
+            provider_count: 1,
+            autostart: AutoStartStatus::Off,
+            run_in_background: true,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
+            providers: vec![],
+            models: vec![ModelInfo {
+                id: "demo/reasoner".into(),
+                provider: "demo".into(),
+                upstream_id: "reasoner".into(),
+                name: "Demo Reasoner".into(),
+                reasoning: true,
+                context_window: Some(128_000),
+                max_output_tokens: Some(8_192),
+            }],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
+            port_warning: None,
+        };
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Base { page: Page::Models }))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Overview"));
+        assert!(rendered.contains("Integrations"));
+        assert!(rendered.contains("demo/reasoner"));
+        assert!(rendered.contains("Demo Reasoner"));
+    }
+
+    #[test]
+    fn narrow_shell_uses_top_tabs() {
+        let backend = TestBackend::new(72, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = DashboardData {
+            config_sources: vec![],
+            ide_targets: vec![],
+            listening: "http://127.0.0.1:10100".into(),
+            model_count: 0,
+            provider_count: 0,
+            autostart: AutoStartStatus::Off,
+            run_in_background: true,
+            proxy_targets: BTreeMap::new(),
+            detected_sources: BTreeMap::new(),
+            providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
+            port_warning: None,
+        };
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Base { page: Page::Logs }))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("1 Overview"));
+        assert!(rendered.contains("5 Logs"));
+        assert!(rendered.contains("No requests have been recorded yet"));
     }
 
     #[test]
@@ -1941,6 +2882,12 @@ mod tests {
                 .map(|source| (source, true))
                 .collect(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
         let mut screen = Screen::Config {
@@ -1982,11 +2929,25 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
 
         terminal
-            .draw(|frame| draw(frame, &data, &Screen::Dashboard))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &data,
+                    &Screen::Base {
+                        page: Page::Overview,
+                    },
+                )
+            })
             .unwrap();
         let rendered = terminal
             .backend()
@@ -2019,11 +2980,25 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
 
         terminal
-            .draw(|frame| draw(frame, &data, &Screen::Dashboard))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &data,
+                    &Screen::Base {
+                        page: Page::Overview,
+                    },
+                )
+            })
             .unwrap();
         let rendered = terminal
             .backend()
@@ -2052,11 +3027,25 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
 
         terminal
-            .draw(|frame| draw(frame, &data, &Screen::Dashboard))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &data,
+                    &Screen::Base {
+                        page: Page::Overview,
+                    },
+                )
+            })
             .unwrap();
         let rendered = terminal
             .backend()
@@ -2083,6 +3072,7 @@ mod tests {
                 model_count: 10,
                 models: vec!["gpt-5.5".into()],
                 default_model: None,
+                key_count: 1,
             },
             ProviderSummary {
                 name: "openai".into(),
@@ -2090,6 +3080,7 @@ mod tests {
                 model_count: 4,
                 models: vec!["gpt-5.4".into()],
                 default_model: None,
+                key_count: 1,
             },
         ];
         let mut screen = Screen::Providers { selected: 1 };
@@ -2121,6 +3112,7 @@ mod tests {
                     model_count: 10,
                     models: vec!["gpt-5.5".into()],
                     default_model: Some("gpt-5.5".into()),
+                    key_count: 1,
                 },
                 ProviderSummary {
                     name: "openai".into(),
@@ -2128,8 +3120,15 @@ mod tests {
                     model_count: 4,
                     models: vec!["gpt-5.4".into()],
                     default_model: None,
+                    key_count: 1,
                 },
             ],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
         terminal
@@ -2168,7 +3167,14 @@ mod tests {
                 model_count: 10,
                 models: vec!["gpt-5.5".into()],
                 default_model: None,
+                key_count: 1,
             }],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
 
@@ -2188,7 +3194,9 @@ mod tests {
     #[test]
     fn slash_opens_configuration_modal() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut screen = Screen::Dashboard;
+        let mut screen = Screen::Base {
+            page: Page::Overview,
+        };
         handle_key(&mut screen, KeyCode::Char('/'), &tx);
         assert!(matches!(screen, Screen::Config { selected: 0 }));
     }
@@ -2232,9 +3240,17 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
-        let mut screen = Screen::Dashboard;
+        let mut screen = Screen::Base {
+            page: Page::Overview,
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(DashboardEvent::ProxyTargetUpdated {
             target: ProxyTarget::GrokBuild,
@@ -2269,6 +3285,12 @@ mod tests {
                 .map(|source| (source, source == SourceKind::OpenCode))
                 .collect(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
         terminal
@@ -2321,6 +3343,12 @@ mod tests {
                 .map(|source| (source, true))
                 .collect(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
         let selected = FIRST_PROXY_ITEM + ProxyTarget::ALL.len() - 1;
@@ -2352,9 +3380,17 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
-        let mut screen = Screen::Dashboard;
+        let mut screen = Screen::Base {
+            page: Page::Overview,
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(DashboardEvent::AutoStartUpdated(AutoStartStatus::On))
             .unwrap();
@@ -2377,9 +3413,17 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
-        let mut screen = Screen::Dashboard;
+        let mut screen = Screen::Base {
+            page: Page::Overview,
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(DashboardEvent::RunInBackgroundUpdated(false))
             .unwrap();
@@ -2425,9 +3469,17 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
-        let mut screen = Screen::Dashboard;
+        let mut screen = Screen::Base {
+            page: Page::Overview,
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(DashboardEvent::ProviderAdded {
             provider: "local".into(),
@@ -2440,6 +3492,7 @@ mod tests {
                 model_count: 1,
                 models: vec!["model-a".into()],
                 default_model: None,
+                key_count: 1,
             }],
         })
         .unwrap();
@@ -2455,7 +3508,9 @@ mod tests {
     #[test]
     fn hidden_words_open_easter_egg_modal() {
         for trigger in EASTER_EGG_TRIGGERS {
-            let mut screen = Screen::Dashboard;
+            let mut screen = Screen::Base {
+                page: Page::Overview,
+            };
             let mut input = String::new();
             for character in trigger.chars() {
                 detect_easter_egg(&mut screen, &mut input, KeyCode::Char(character));
@@ -2466,12 +3521,19 @@ mod tests {
 
     #[test]
     fn unrelated_input_does_not_open_easter_egg_modal() {
-        let mut screen = Screen::Dashboard;
+        let mut screen = Screen::Base {
+            page: Page::Overview,
+        };
         let mut input = String::new();
         for character in "joocode".chars() {
             detect_easter_egg(&mut screen, &mut input, KeyCode::Char(character));
         }
-        assert!(matches!(screen, Screen::Dashboard));
+        assert!(matches!(
+            screen,
+            Screen::Base {
+                page: Page::Overview
+            }
+        ));
     }
 
     #[test]
@@ -2487,9 +3549,17 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
-        let mut screen = Screen::Dashboard;
+        let mut screen = Screen::Base {
+            page: Page::Overview,
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(DashboardEvent::UpdateAvailable("v0.2.0".into()))
             .unwrap();
@@ -2528,6 +3598,12 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
         let mut screen = Screen::Updating {
@@ -2558,6 +3634,12 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
 
@@ -2592,6 +3674,12 @@ mod tests {
             proxy_targets: BTreeMap::new(),
             detected_sources: BTreeMap::new(),
             providers: vec![],
+            models: vec![],
+            disabled_models: BTreeSet::new(),
+            subagent_catalog: crate::target_config::SubagentCatalogPolicy::default(),
+            runtime: DashboardRuntimeSnapshot::default(),
+            storage: DashboardStorageSnapshot::default(),
+            request_events: vec![],
             port_warning: None,
         };
 

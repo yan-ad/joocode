@@ -20,7 +20,7 @@ struct Record {
 }
 
 #[cfg(test)]
-fn path() -> anyhow::Result<PathBuf> {
+pub(crate) fn path() -> anyhow::Result<PathBuf> {
     let root = std::env::temp_dir().join(format!("joocode-journal-tests-{}", std::process::id()));
     Ok(root.join("integrations.json"))
 }
@@ -118,7 +118,7 @@ fn fingerprint(value: &Value) -> anyhow::Result<String> {
 }
 
 #[cfg(not(test))]
-fn path() -> anyhow::Result<PathBuf> {
+pub(crate) fn path() -> anyhow::Result<PathBuf> {
     if let Some(path) = std::env::var_os("JOOCODE_INTEGRATION_JOURNAL") {
         return Ok(PathBuf::from(path));
     }

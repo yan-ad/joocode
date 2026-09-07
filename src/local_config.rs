@@ -1,5 +1,6 @@
 use std::{fs, path::PathBuf};
 
+use crate::provider::WireApi;
 use anyhow::{Context, bail};
 use reqwest::{Client, Url, header};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,64 @@ pub struct LocalProvider {
     pub models: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    #[serde(
+        default,
+        alias = "wireApi",
+        skip_serializing_if = "is_default_wire_api"
+    )]
+    pub wire_api: WireApi,
+}
+
+pub fn add_api_key(name: &str, api_key: &str) -> anyhow::Result<PathBuf> {
+    let path = path()?;
+    add_api_key_to(&path, name, api_key)?;
+    Ok(path)
+}
+
+fn add_api_key_to(path: &std::path::Path, name: &str, api_key: &str) -> anyhow::Result<()> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        bail!("API key cannot be empty");
+    }
+
+    let mut providers = load_from(path)?;
+    let provider = providers
+        .iter_mut()
+        .find(|provider| provider.name == name)
+        .context("selected provider was not found")?;
+    let mut keys = provider.api_keys();
+    if !keys.iter().any(|key| key == api_key) {
+        keys.push(api_key.to_owned());
+    }
+    provider.api_key.clear();
+    provider.api_keys = keys;
+    write_providers(path, &providers)
+}
+
+pub fn remove_last_api_key(name: &str) -> anyhow::Result<PathBuf> {
+    let path = path()?;
+    remove_last_api_key_from(&path, name)?;
+    Ok(path)
+}
+
+fn remove_last_api_key_from(path: &std::path::Path, name: &str) -> anyhow::Result<()> {
+    let mut providers = load_from(path)?;
+    let provider = providers
+        .iter_mut()
+        .find(|provider| provider.name == name)
+        .context("selected provider was not found")?;
+    let mut keys = provider.api_keys();
+    if keys.len() <= 1 {
+        bail!("provider must retain at least one API key");
+    }
+    keys.pop();
+    provider.api_key.clear();
+    provider.api_keys = keys;
+    write_providers(path, &providers)
+}
+
+fn is_default_wire_api(value: &WireApi) -> bool {
+    *value == WireApi::OpenAiChat
 }
 
 pub fn set_default_model(name: &str, model: &str) -> anyhow::Result<PathBuf> {
@@ -50,6 +109,7 @@ pub struct ProviderSummary {
     pub model_count: usize,
     pub models: Vec<String>,
     pub default_model: Option<String>,
+    pub key_count: usize,
 }
 
 impl LocalProvider {
@@ -74,6 +134,7 @@ impl LocalProvider {
             model_count: self.models.len(),
             models: self.models.clone(),
             default_model: self.default_model.clone(),
+            key_count: self.api_keys().len(),
         }
     }
 }
@@ -139,6 +200,7 @@ pub async fn probe(
         api_keys: Vec::new(),
         models,
         default_model: None,
+        wire_api: WireApi::OpenAiChat,
     })
 }
 
@@ -331,6 +393,7 @@ mod tests {
             api_keys: Vec::new(),
             models: vec!["model-a".into()],
             default_model: None,
+            wire_api: WireApi::OpenAiChat,
         }];
         fs::write(&path, serde_json::to_vec_pretty(&providers).unwrap()).unwrap();
         let loaded = load_from(&path).unwrap();
@@ -355,6 +418,21 @@ mod tests {
     }
 
     #[test]
+    fn wire_api_is_backward_compatible_and_accepts_responses() {
+        let legacy: LocalProvider = serde_json::from_value(serde_json::json!({
+            "name":"legacy", "base_url":"https://example.test/v1", "models":["m"]
+        }))
+        .unwrap();
+        assert_eq!(legacy.wire_api, WireApi::OpenAiChat);
+        let native: LocalProvider = serde_json::from_value(serde_json::json!({
+            "name":"native", "base_url":"https://example.test/v1", "models":["m"],
+            "wire_api":"open_ai_responses"
+        }))
+        .unwrap();
+        assert_eq!(native.wire_api, WireApi::OpenAiResponses);
+    }
+
+    #[test]
     fn removes_provider_without_exposing_other_entries() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("providers.json");
@@ -366,6 +444,7 @@ mod tests {
                 api_keys: Vec::new(),
                 models: vec!["model-a".into()],
                 default_model: None,
+                wire_api: WireApi::OpenAiChat,
             },
             LocalProvider {
                 name: "openai".into(),
@@ -374,6 +453,7 @@ mod tests {
                 api_keys: Vec::new(),
                 models: vec!["model-b".into()],
                 default_model: None,
+                wire_api: WireApi::OpenAiChat,
             },
         ];
         write_providers(&path, &providers).unwrap();
@@ -396,6 +476,7 @@ mod tests {
                 api_keys: Vec::new(),
                 models: vec!["gpt-5.5".into()],
                 default_model: None,
+                wire_api: WireApi::OpenAiChat,
             },
             LocalProvider {
                 name: "openai".into(),
@@ -404,6 +485,7 @@ mod tests {
                 api_keys: Vec::new(),
                 models: vec!["gpt-5.4".into()],
                 default_model: Some("gpt-5.4".into()),
+                wire_api: WireApi::OpenAiChat,
             },
         ];
         write_providers(&path, &providers).unwrap();
@@ -422,6 +504,35 @@ mod tests {
         let result = load_from(&path).unwrap();
         assert_eq!(result[0].default_model.as_deref(), Some("gpt-5.5"));
         assert_eq!(result[1].default_model, None);
+    }
+
+    #[test]
+    fn manages_key_pools_without_exposing_secret_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("providers.json");
+        write_providers(
+            &path,
+            &[LocalProvider {
+                name: "demo".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "first".into(),
+                api_keys: Vec::new(),
+                models: vec!["model".into()],
+                default_model: None,
+                wire_api: WireApi::OpenAiChat,
+            }],
+        )
+        .unwrap();
+        add_api_key_to(&path, "demo", "second").unwrap();
+        let provider = load_from(&path).unwrap().remove(0);
+        assert_eq!(provider.api_keys(), ["first", "second"]);
+        let summary = provider.summary();
+        assert_eq!(summary.key_count, 2);
+        assert!(!format!("{summary:?}").contains("first"));
+        assert!(!format!("{summary:?}").contains("second"));
+        remove_last_api_key_from(&path, "demo").unwrap();
+        assert_eq!(load_from(&path).unwrap()[0].api_keys(), ["first"]);
+        assert!(remove_last_api_key_from(&path, "demo").is_err());
     }
 
     #[tokio::test]

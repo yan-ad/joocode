@@ -20,6 +20,46 @@ async fn antigravity_bridge(
     antigravity::handle(&registry, method, uri, headers, body).await
 }
 
+fn dashboard_storage_snapshot() -> dashboard::DashboardStorageSnapshot {
+    let mut paths = vec![
+        ("providers.json", local_config::path().ok()),
+        ("settings.json", crate::target_config::path().ok()),
+        ("combos.json", crate::combo::path().ok()),
+        (
+            "integration journal",
+            crate::integration_journal::path().ok(),
+        ),
+    ];
+    if let Some(root) = dirs::data_local_dir().map(|path| path.join("joocode")) {
+        paths.push(("service stdout", Some(root.join("autostart.log"))));
+        paths.push(("service stderr", Some(root.join("autostart-error.log"))));
+    }
+    dashboard::DashboardStorageSnapshot {
+        entries: paths
+            .into_iter()
+            .filter_map(|(label, path)| {
+                path.map(|path| dashboard::DashboardStorageEntry {
+                    label: label.to_owned(),
+                    size_bytes: std::fs::metadata(&path).ok().map(|metadata| metadata.len()),
+                    path: path.display().to_string(),
+                })
+            })
+            .collect(),
+    }
+}
+
+struct RoutedResponse {
+    response: upstream::UpstreamResponse,
+    wire_api: crate::provider::WireApi,
+}
+
+impl RoutedResponse {
+    #[cfg(test)]
+    fn status(&self) -> StatusCode {
+        self.response.status()
+    }
+}
+
 async fn authenticated_request(limiter: RateLimiter, request: Request, next: Next) -> Response {
     if limiter.allow().await {
         next.run(request).await
@@ -454,9 +494,9 @@ async fn send_routed<F>(
     runtime: &upstream::Runtime,
     local_key: Option<HeaderValue>,
     make_body: F,
-) -> Result<upstream::UpstreamResponse, ApiError>
+) -> Result<RoutedResponse, ApiError>
 where
-    F: Fn(&str) -> Result<Value, ApiError>,
+    F: Fn(&str, crate::provider::WireApi) -> Result<Value, ApiError>,
 {
     let mut candidates = registry
         .resolve_candidates(requested_model)
@@ -468,8 +508,10 @@ where
     }
     let candidate_count = candidates.len();
     let mut last_error = None;
-    for (index, (provider_key, provider, upstream_model)) in candidates.into_iter().enumerate() {
-        let body = make_body(&upstream_model)?;
+    for (index, (provider_key, provider, upstream_model, wire_api)) in
+        candidates.into_iter().enumerate()
+    {
+        let body = make_body(&upstream_model, wire_api)?;
         let (base_url, mut headers) = match provider.request_parts(registry.client()).await {
             Ok(parts) => parts,
             Err(error) if index + 1 < candidate_count => {
@@ -486,7 +528,7 @@ where
         if let Some(value) = &local_key {
             headers.insert("x-joocode-api-key", value.clone());
         }
-        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        let url = format!("{}/{}", base_url.trim_end_matches('/'), wire_api.endpoint());
         let response = match upstream::send_json(
             registry.client(),
             &url,
@@ -511,7 +553,7 @@ where
             }
         };
         if response.status().is_success() {
-            return Ok(response);
+            return Ok(RoutedResponse { response, wire_api });
         }
         let status = response.status();
         let class = upstream::classify_status(status);
@@ -583,6 +625,8 @@ struct Metrics {
     tool_calls: Arc<AtomicU64>,
     browser_tool_calls: Arc<AtomicU64>,
     tool_call_breakdown: Arc<std::sync::Mutex<BTreeMap<String, u64>>>,
+    request_events:
+        Arc<std::sync::Mutex<std::collections::VecDeque<dashboard::DashboardRequestEvent>>>,
 }
 
 impl Default for Metrics {
@@ -596,6 +640,9 @@ impl Default for Metrics {
             tool_calls: Arc::new(AtomicU64::new(0)),
             browser_tool_calls: Arc::new(AtomicU64::new(0)),
             tool_call_breakdown: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            request_events: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::with_capacity(200),
+            )),
         }
     }
 }
@@ -651,17 +698,36 @@ impl Drop for ActiveRequest {
 }
 
 async fn record_request(State(metrics): State<Metrics>, request: Request, next: Next) -> Response {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_owned();
+    let started = std::time::Instant::now();
     metrics.requests.fetch_add(1, Ordering::Relaxed);
     metrics.active.fetch_add(1, Ordering::Relaxed);
     let _active = ActiveRequest {
         metrics: metrics.clone(),
     };
     let response = next.run(request).await;
+    let status = response.status();
     if response.status().is_success() {
         metrics.successes.fetch_add(1, Ordering::Relaxed);
     } else {
         metrics.failures.fetch_add(1, Ordering::Relaxed);
     }
+    let mut events = metrics
+        .request_events
+        .lock()
+        .expect("request event metrics lock poisoned");
+    if events.len() == 200 {
+        events.pop_front();
+    }
+    events.push_back(dashboard::DashboardRequestEvent {
+        method,
+        path,
+        status: status.as_u16(),
+        duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        provider: None,
+        model: None,
+    });
     response
 }
 
@@ -918,7 +984,19 @@ async fn anthropic_messages(
         &state.retry_policy,
         &state.upstream_runtime,
         None,
-        |upstream_model| protocol::anthropic_to_chat_request(&request, upstream_model),
+        |upstream_model, wire_api| match wire_api {
+            crate::provider::WireApi::AnthropicMessages => {
+                let mut body = request.clone();
+                body["model"] = Value::String(upstream_model.to_owned());
+                Ok(body)
+            }
+            crate::provider::WireApi::OpenAiChat => {
+                protocol::anthropic_to_chat_request(&request, upstream_model)
+            }
+            other => Err(ApiError::bad_request(format!(
+                "Anthropic Messages cannot be routed through {other:?}"
+            ))),
+        },
     )
     .await?;
     if request
@@ -926,8 +1004,29 @@ async fn anthropic_messages(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
+        if response.wire_api == crate::provider::WireApi::AnthropicMessages {
+            let status = response.response.status();
+            let content_type = response
+                .response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .cloned();
+            let stream = response
+                .response
+                .bytes_stream()
+                .map_err(std::io::Error::other);
+            let mut builder = Response::builder().status(status);
+            if let Some(content_type) = content_type {
+                builder = builder.header(header::CONTENT_TYPE, content_type);
+            }
+            return Ok(ResponseBody::Stream(
+                builder
+                    .body(Body::from_stream(stream))
+                    .expect("valid native Anthropic stream"),
+            ));
+        }
         Ok(ResponseBody::Stream(anthropic_stream_response(
-            response.bytes_stream(),
+            response.response.bytes_stream(),
             requested_model.to_owned(),
             declared_tools,
             state.stream_idle_timeout,
@@ -935,13 +1034,18 @@ async fn anthropic_messages(
             state.max_tool_argument_bytes,
         )))
     } else {
-        let chat = response
+        let wire_api = response.wire_api;
+        let body = response
+            .response
             .json::<Value>()
             .await
             .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
-        Ok(ResponseBody::Json(Json(
-            protocol::chat_to_anthropic_response(chat, requested_model, &declared_tools)?,
-        )))
+        let body = if wire_api == crate::provider::WireApi::AnthropicMessages {
+            body
+        } else {
+            protocol::chat_to_anthropic_response(body, requested_model, &declared_tools)?
+        };
+        Ok(ResponseBody::Json(Json(body)))
     }
 }
 
@@ -1176,16 +1280,28 @@ async fn chat_completions(
         &state.retry_policy,
         &state.upstream_runtime,
         local_key,
-        |upstream_model| {
+        |upstream_model, wire_api| {
+            if wire_api != crate::provider::WireApi::OpenAiChat {
+                return Err(ApiError::bad_request(format!(
+                    "Chat Completions cannot be routed through {wire_api:?}"
+                )));
+            }
             let mut request = request.clone();
             request["model"] = Value::String(upstream_model.to_owned());
             Ok(request)
         },
     )
     .await?;
-    let status = response.status();
-    let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
-    let stream = response.bytes_stream().map_err(std::io::Error::other);
+    let status = response.response.status();
+    let content_type = response
+        .response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .cloned();
+    let stream = response
+        .response
+        .bytes_stream()
+        .map_err(std::io::Error::other);
     let mut builder = Response::builder().status(status);
     if let Some(content_type) = content_type {
         builder = builder.header(header::CONTENT_TYPE, content_type);
@@ -1251,6 +1367,8 @@ pub async fn serve(
         app,
         address,
         port_warning,
+        metrics: _,
+        upstream_runtime: _,
     } = prepare_server(
         host,
         port,
@@ -1289,6 +1407,8 @@ pub async fn serve_dashboard(
         app,
         address,
         port_warning,
+        metrics,
+        upstream_runtime,
     } = prepare_server(
         host,
         port,
@@ -1303,7 +1423,9 @@ pub async fn serve_dashboard(
         return Ok(());
     };
     let base_url = base_url.unwrap_or_else(|| desktop_base_url(address));
-    let dashboard_data = DashboardData::new(&registry, &targets, &selection, address, port_warning);
+    let mut dashboard_data =
+        DashboardData::new(&registry, &targets, &selection, address, port_warning);
+    dashboard_data.storage = dashboard_storage_snapshot();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let mut server = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -1342,6 +1464,53 @@ pub async fn serve_dashboard(
             let _ = update_event_tx.send(dashboard::DashboardEvent::UpdateAvailable(tag));
         }
     });
+    let observability_event_tx = event_tx.clone();
+    let observability_registry = registry_store.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let provider_statuses = upstream_runtime
+                .provider_statuses(&observability_registry.snapshot().provider_keys())
+                .await;
+            let runtime = dashboard::DashboardRuntimeSnapshot {
+                uptime_secs: metrics.started.elapsed().as_secs(),
+                requests: metrics.requests.load(Ordering::Relaxed),
+                active: metrics.active.load(Ordering::Relaxed),
+                successes: metrics.successes.load(Ordering::Relaxed),
+                failures: metrics.failures.load(Ordering::Relaxed),
+                tool_calls: metrics.tool_calls.load(Ordering::Relaxed),
+                browser_tool_calls: metrics.browser_tool_calls.load(Ordering::Relaxed),
+                providers: provider_statuses
+                    .into_iter()
+                    .map(|status| dashboard::DashboardProviderRuntimeSnapshot {
+                        provider: status.provider,
+                        state: status.state.to_owned(),
+                        active_requests: status.active_requests,
+                        concurrency_limit: status.concurrency_limit,
+                        cooldown_ms: status.cooldown_ms,
+                        latency_ms: status.latency_ms,
+                        consecutive_failures: status.consecutive_failures,
+                    })
+                    .collect(),
+            };
+            let request_events = metrics
+                .request_events
+                .lock()
+                .map(|events| events.iter().cloned().collect())
+                .unwrap_or_default();
+            if observability_event_tx
+                .send(dashboard::DashboardEvent::ObservabilityUpdated {
+                    runtime,
+                    storage: dashboard_storage_snapshot(),
+                    request_events,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
     let reload_store = registry_store;
     let reload_targets = targets.clone();
     let reload_base_url = base_url.clone();
@@ -1377,6 +1546,40 @@ pub async fn serve_dashboard(
                             model_count: registry.models().len(),
                             provider_count: registry.provider_count(),
                             providers: local_config::summaries().unwrap_or_default(),
+                        },
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::AddProviderKey { provider, api_key } => {
+                    let result = async {
+                        local_config::add_api_key(&provider, &api_key)?;
+                        let registry = Registry::discover(&active_selection).await?;
+                        reload_store.replace(registry);
+                        local_config::summaries()
+                    }
+                    .await;
+                    let event = match result {
+                        Ok(providers) => dashboard::DashboardEvent::ProviderDefaultUpdated {
+                            provider,
+                            providers,
+                        },
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::RemoveProviderKey { provider } => {
+                    let result = async {
+                        local_config::remove_last_api_key(&provider)?;
+                        let registry = Registry::discover(&active_selection).await?;
+                        reload_store.replace(registry);
+                        local_config::summaries()
+                    }
+                    .await;
+                    let event = match result {
+                        Ok(providers) => dashboard::DashboardEvent::ProviderDefaultUpdated {
+                            provider,
+                            providers,
                         },
                         Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
                     };
@@ -1510,6 +1713,148 @@ pub async fn serve_dashboard(
                     };
                     let _ = event_tx.send(event);
                 }
+                dashboard::DashboardCommand::ToggleModel { model } => {
+                    let result = async {
+                        let mut preferences = TargetPreferences::load()?;
+                        if !preferences.disabled_models.remove(&model) {
+                            preferences.disabled_models.insert(model);
+                        }
+                        let preferences =
+                            TargetPreferences::set_disabled_models(preferences.disabled_models)?;
+                        let registry = Registry::discover(&active_selection).await?;
+                        reload_store.replace(registry.clone());
+                        Ok::<_, anyhow::Error>((registry, preferences))
+                    }
+                    .await;
+                    let event = match result {
+                        Ok((registry, preferences)) => dashboard::DashboardEvent::CatalogUpdated {
+                            models: registry.models().to_vec(),
+                            model_count: registry.models().len(),
+                            provider_count: registry.provider_count(),
+                            config_sources: dashboard::config_sources(&registry),
+                            disabled_models: preferences.disabled_models,
+                            subagent_catalog: preferences.subagent_catalog,
+                        },
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::ToggleSubagentFeatured { model } => {
+                    let result = (|| {
+                        let mut preferences = TargetPreferences::load()?;
+                        if preferences
+                            .subagent_catalog
+                            .featured_models
+                            .contains(&model)
+                        {
+                            preferences
+                                .subagent_catalog
+                                .featured_models
+                                .retain(|id| id != &model);
+                        } else {
+                            preferences.subagent_catalog.featured_models.push(model);
+                        }
+                        TargetPreferences::set_subagent_catalog(preferences.subagent_catalog)
+                    })();
+                    let registry = reload_store.snapshot();
+                    let event = match result {
+                        Ok(preferences) => dashboard::DashboardEvent::CatalogUpdated {
+                            models: registry.models().to_vec(),
+                            model_count: registry.models().len(),
+                            provider_count: registry.provider_count(),
+                            config_sources: dashboard::config_sources(&registry),
+                            disabled_models: preferences.disabled_models,
+                            subagent_catalog: preferences.subagent_catalog,
+                        },
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::ToggleSubagentFallback { model } => {
+                    let result = (|| {
+                        let mut preferences = TargetPreferences::load()?;
+                        if preferences
+                            .subagent_catalog
+                            .fallback_models
+                            .contains(&model)
+                        {
+                            preferences
+                                .subagent_catalog
+                                .fallback_models
+                                .retain(|id| id != &model);
+                        } else {
+                            preferences.subagent_catalog.fallback_models.push(model);
+                        }
+                        TargetPreferences::set_subagent_catalog(preferences.subagent_catalog)
+                    })();
+                    let registry = reload_store.snapshot();
+                    let event = match result {
+                        Ok(preferences) => dashboard::DashboardEvent::CatalogUpdated {
+                            models: registry.models().to_vec(),
+                            model_count: registry.models().len(),
+                            provider_count: registry.provider_count(),
+                            config_sources: dashboard::config_sources(&registry),
+                            disabled_models: preferences.disabled_models,
+                            subagent_catalog: preferences.subagent_catalog,
+                        },
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::AdjustSubagentMaxEntries { delta } => {
+                    let result = (|| {
+                        let mut preferences = TargetPreferences::load()?;
+                        preferences.subagent_catalog.max_entries = if delta.is_negative() {
+                            preferences
+                                .subagent_catalog
+                                .max_entries
+                                .saturating_sub(delta.unsigned_abs() as usize)
+                                .max(1)
+                        } else {
+                            preferences
+                                .subagent_catalog
+                                .max_entries
+                                .saturating_add(delta as usize)
+                        };
+                        TargetPreferences::set_subagent_catalog(preferences.subagent_catalog)
+                    })();
+                    let registry = reload_store.snapshot();
+                    let event = match result {
+                        Ok(preferences) => dashboard::DashboardEvent::CatalogUpdated {
+                            models: registry.models().to_vec(),
+                            model_count: registry.models().len(),
+                            provider_count: registry.provider_count(),
+                            config_sources: dashboard::config_sources(&registry),
+                            disabled_models: preferences.disabled_models,
+                            subagent_catalog: preferences.subagent_catalog,
+                        },
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::TestProvider { name } => {
+                    let client = reload_store.snapshot().client().clone();
+                    let result = async {
+                        let provider = local_config::load()?
+                            .into_iter()
+                            .find(|provider| provider.name == name)
+                            .ok_or_else(|| anyhow::anyhow!("selected provider was not found"))?;
+                        let api_key = provider.api_keys().into_iter().next().unwrap_or_default();
+                        let tested =
+                            local_config::probe(&client, &provider.base_url, &api_key).await?;
+                        Ok::<_, anyhow::Error>(tested.models.len())
+                    }
+                    .await;
+                    let event = match result {
+                        Ok(models) => dashboard::DashboardEvent::ProviderTested(format!(
+                            "Provider `{name}` catalog test succeeded: {models} models returned."
+                        )),
+                        Err(error) => dashboard::DashboardEvent::ProviderError(format!(
+                            "Provider `{name}` catalog test failed: {error:#}"
+                        )),
+                    };
+                    let _ = event_tx.send(event);
+                }
                 dashboard::DashboardCommand::InstallUpdate { tag } => {
                     let event = match upgrade::install_for_restart(&tag).await {
                         Ok(_) => dashboard::DashboardEvent::UpdateInstalled,
@@ -1574,7 +1919,8 @@ async fn prepare_server(
     reclaim_requested_port: bool,
 ) -> anyhow::Result<PreparedServer> {
     let policy = ServerPolicy::from_host(host)?;
-    let app = build_router_with_selection(registry, &policy, source_selection);
+    let (app, metrics) =
+        build_router_with_selection_and_metrics(registry, &policy, source_selection);
     match bind_available(host, port, reclaim_requested_port).await? {
         BindResult::Bound {
             listener,
@@ -1584,6 +1930,8 @@ async fn prepare_server(
             Ok(PreparedServer::Ready {
                 listener,
                 app,
+                metrics,
+                upstream_runtime: policy.upstream_runtime.clone(),
                 address,
                 port_warning,
             })
@@ -1594,14 +1942,14 @@ async fn prepare_server(
 
 #[cfg(test)]
 fn build_router(registry: RegistryStore, policy: &ServerPolicy) -> Router {
-    build_router_with_selection(registry, policy, None)
+    build_router_with_selection_and_metrics(registry, policy, None).0
 }
 
-fn build_router_with_selection(
+fn build_router_with_selection_and_metrics(
     registry: RegistryStore,
     policy: &ServerPolicy,
     source_selection: Option<SourceSelection>,
-) -> Router {
+) -> (Router, Metrics) {
     let metrics = Metrics::default();
     let state = AppState {
         registry,
@@ -1655,8 +2003,11 @@ fn build_router_with_selection(
     let protected = Router::new()
         .merge(management)
         .merge(data_plane)
-        .route_layer(middleware::from_fn_with_state(metrics, record_request));
-    Router::new()
+        .route_layer(middleware::from_fn_with_state(
+            metrics.clone(),
+            record_request,
+        ));
+    let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/hello", get(healthz))
         .route("/readyz", get(readyz))
@@ -1664,7 +2015,8 @@ fn build_router_with_selection(
         .with_state(state)
         .layer(DefaultBodyLimit::max(policy.max_request_bytes))
         .layer(policy.cors_layer())
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http());
+    (app, metrics)
 }
 
 enum PreparedServer {
@@ -1673,6 +2025,8 @@ enum PreparedServer {
         app: Router,
         address: SocketAddr,
         port_warning: Option<String>,
+        metrics: Metrics,
+        upstream_runtime: upstream::Runtime,
     },
     ExistingJoocode,
 }
@@ -1890,8 +2244,12 @@ async fn responses(
         .into_iter()
         .next()
         .ok_or_else(|| ApiError::not_found(format!("unknown model '{requested_model}'")))?;
-    let chat_request = protocol::to_chat_request(&request, &first_candidate.2)?;
-    let tool_namespaces = chat_request.tool_namespaces.clone();
+    let native_responses = first_candidate.3 == crate::provider::WireApi::OpenAiResponses;
+    let tool_namespaces = if native_responses {
+        protocol::ToolNamespaces::default()
+    } else {
+        protocol::to_chat_request(&request, &first_candidate.2)?.tool_namespaces
+    };
     let local_key = headers
         .get("x-joocode-api-key")
         .or_else(|| headers.get("x-joc-api-key"))
@@ -1903,8 +2261,18 @@ async fn responses(
         &state.retry_policy,
         &state.upstream_runtime,
         local_key,
-        |upstream_model| {
-            protocol::to_chat_request(&request, upstream_model).map(|request| request.body)
+        |upstream_model, wire_api| match wire_api {
+            crate::provider::WireApi::OpenAiResponses => {
+                let mut body = request.clone();
+                body["model"] = Value::String(upstream_model.to_owned());
+                Ok(body)
+            }
+            crate::provider::WireApi::OpenAiChat => {
+                protocol::to_chat_request(&request, upstream_model).map(|request| request.body)
+            }
+            other => Err(ApiError::bad_request(format!(
+                "Responses cannot be routed through {other:?}"
+            ))),
         },
     )
     .await?;
@@ -1913,8 +2281,29 @@ async fn responses(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
+        if response.wire_api == crate::provider::WireApi::OpenAiResponses {
+            let status = response.response.status();
+            let content_type = response
+                .response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .cloned();
+            let stream = response
+                .response
+                .bytes_stream()
+                .map_err(std::io::Error::other);
+            let mut builder = Response::builder().status(status);
+            if let Some(content_type) = content_type {
+                builder = builder.header(header::CONTENT_TYPE, content_type);
+            }
+            return Ok(ResponseBody::Stream(
+                builder
+                    .body(Body::from_stream(stream))
+                    .expect("valid native Responses stream"),
+            ));
+        }
         Ok(ResponseBody::Stream(stream_response(
-            response.bytes_stream(),
+            response.response.bytes_stream(),
             requested_model,
             tool_namespaces,
             state.stream_idle_timeout,
@@ -1923,16 +2312,22 @@ async fn responses(
             state.metrics,
         )))
     } else {
-        let chat: Value = response
+        let wire_api = response.wire_api;
+        let body: Value = response
+            .response
             .json()
             .await
             .map_err(|e| ApiError::upstream(StatusCode::BAD_GATEWAY, e.to_string()))?;
-        let response = protocol::from_chat_response(
-            chat,
-            &requested_model,
-            protocol::response_id(),
-            &tool_namespaces,
-        )?;
+        let response = if wire_api == crate::provider::WireApi::OpenAiResponses {
+            body
+        } else {
+            protocol::from_chat_response(
+                body,
+                &requested_model,
+                protocol::response_id(),
+                &tool_namespaces,
+            )?
+        };
         state.metrics.record_responses_tool_calls(&response);
         Ok(ResponseBody::Json(Json(response)))
     }
@@ -2053,11 +2448,13 @@ mod tests {
                 source: "fixture".into(),
                 detail: None,
                 providers: vec![DiscoveredProvider {
+                    wire_api: crate::provider::WireApi::OpenAiChat,
                     key: "fixture".into(),
                     provider: crate::provider::Provider {
                         base_url: "https://example.test/v1".into(),
                         credential: crate::provider::Credential::None,
                         headers: HeaderMap::new(),
+                        wire_api: crate::provider::WireApi::OpenAiChat,
                     },
                     models: vec![DiscoveredModel { info: model }],
                 }],
@@ -2584,11 +2981,13 @@ mod tests {
         let first = provider_server(StatusCode::SERVICE_UNAVAILABLE, first_attempts.clone()).await;
         let second = provider_server(StatusCode::OK, second_attempts.clone()).await;
         let make_provider = |key: &str, address: SocketAddr, model: &str| DiscoveredProvider {
+            wire_api: crate::provider::WireApi::OpenAiChat,
             key: key.into(),
             provider: Provider {
                 base_url: format!("http://{address}/v1"),
                 credential: Credential::None,
                 headers: HeaderMap::new(),
+                wire_api: crate::provider::WireApi::OpenAiChat,
             },
             models: vec![DiscoveredModel {
                 info: ModelInfo {
@@ -2630,14 +3029,17 @@ mod tests {
             },
             &upstream::Runtime::new(8, Duration::ZERO),
             None,
-            |model| Ok(json!({"model": model})),
+            |model, _| Ok(json!({"model": model})),
         )
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(first_attempts.load(Ordering::SeqCst), 1);
         assert_eq!(second_attempts.load(Ordering::SeqCst), 1);
-        assert_eq!(response.json::<Value>().await.unwrap()["model"], "model-b");
+        assert_eq!(
+            response.response.json::<Value>().await.unwrap()["model"],
+            "model-b"
+        );
     }
 
     #[test]

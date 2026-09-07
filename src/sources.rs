@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::{
     config::{self, AuthEntry, ConfigPaths, ModelConfig},
     local_config,
-    provider::{BearerPool, CopilotCredential, Credential, ModelInfo, Provider},
+    provider::{BearerPool, CopilotCredential, Credential, ModelInfo, Provider, WireApi},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, ValueEnum)]
@@ -32,6 +32,16 @@ pub enum SourceKind {
     Copilot,
     Antigravity,
     Joocode,
+}
+
+fn opencode_wire_api(configured: &config::ProviderConfig) -> WireApi {
+    configured
+        .wire_api
+        .unwrap_or(match configured.npm.as_deref() {
+            Some("@ai-sdk/anthropic") => WireApi::AnthropicMessages,
+            Some("@ai-sdk/google") | Some("@ai-sdk/google-vertex") => WireApi::Gemini,
+            _ => WireApi::OpenAiChat,
+        })
 }
 
 impl SourceKind {
@@ -177,10 +187,12 @@ async fn discover_antigravity(client: &Client) -> anyhow::Result<DiscoveredCatal
         source: "antigravity".into(),
         providers: vec![DiscoveredProvider {
             key: "antigravity:gemini".into(),
+            wire_api: WireApi::OpenAiChat,
             provider: Provider {
                 base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
                 credential: Credential::Bearer(api_key),
                 headers: HeaderMap::new(),
+                wire_api: WireApi::OpenAiChat,
             },
             models,
         }],
@@ -366,10 +378,12 @@ fn discover_opencodex_at(root: &Path) -> anyhow::Result<DiscoveredCatalog> {
             .collect();
         providers.push(DiscoveredProvider {
             key: format!("ocx:{provider_name}"),
+            wire_api: WireApi::OpenAiChat,
             provider: Provider {
                 base_url: proxy_base.clone(),
                 credential: Credential::None,
                 headers: HeaderMap::new(),
+                wire_api: WireApi::OpenAiChat,
             },
             models,
         });
@@ -563,6 +577,7 @@ pub struct DiscoveredModel {
 pub struct DiscoveredProvider {
     pub key: String,
     pub provider: Provider,
+    pub wire_api: WireApi,
     pub models: Vec<DiscoveredModel>,
 }
 
@@ -633,7 +648,9 @@ fn discover_joocode() -> anyhow::Result<DiscoveredCatalog> {
                         None => Credential::None,
                     },
                     headers: HeaderMap::new(),
+                    wire_api: configured.wire_api,
                 },
+                wire_api: configured.wire_api,
                 models,
             }
         })
@@ -770,6 +787,9 @@ pub(crate) fn load_opencode_catalog(
         }
         let compatible = configured.npm.as_deref() == Some("@ai-sdk/openai-compatible")
             || configured.npm.as_deref() == Some("@ai-sdk/openai")
+            || configured.npm.as_deref() == Some("@ai-sdk/anthropic")
+            || configured.npm.as_deref() == Some("@ai-sdk/google")
+            || configured.npm.as_deref() == Some("@ai-sdk/google-vertex")
             || configured.npm.is_none();
         if !compatible {
             continue;
@@ -803,7 +823,9 @@ pub(crate) fn load_opencode_catalog(
                 base_url,
                 credential,
                 headers,
+                wire_api: opencode_wire_api(&configured),
             },
+            wire_api: opencode_wire_api(&configured),
             models,
         });
     }
@@ -877,10 +899,12 @@ fn discover_hermes_at(home: &Path) -> anyhow::Result<DiscoveredCatalog> {
         let credential = resolve_hermes_credential(model, id, &env_file);
         providers.push(DiscoveredProvider {
             key: format!("hermes:{id}"),
+            wire_api: WireApi::OpenAiChat,
             provider: Provider {
                 base_url,
                 credential,
                 headers: hermes_headers(model, id, &env_file)?,
+                wire_api: WireApi::OpenAiChat,
             },
             models: vec![simple_model(
                 &format!("hermes/{id}"),
@@ -911,10 +935,14 @@ fn hermes_provider(
     };
     let transport =
         yaml_string(value, &["api_mode", "transport"]).unwrap_or_else(|| "chat_completions".into());
-    if !matches!(
-        transport.as_str(),
-        "chat_completions" | "openai_chat" | "completions"
-    ) {
+    let wire_api = match transport.as_str() {
+        "chat_completions" | "openai_chat" | "completions" => WireApi::OpenAiChat,
+        "responses" | "openai_responses" => WireApi::OpenAiResponses,
+        "messages" | "anthropic" | "anthropic_messages" => WireApi::AnthropicMessages,
+        "gemini" | "generate_content" => WireApi::Gemini,
+        _ => return Ok(None),
+    };
+    if wire_api == WireApi::Gemini {
         return Ok(None);
     }
     let mut model_ids = yaml_model_ids(value.get("models"));
@@ -936,10 +964,12 @@ fn hermes_provider(
         .collect();
     Ok(Some(DiscoveredProvider {
         key: format!("hermes:{id}"),
+        wire_api,
         provider: Provider {
             base_url,
             credential: resolve_hermes_credential(value, id, env_file),
             headers: hermes_headers(value, id, env_file)?,
+            wire_api,
         },
         models,
     }))
@@ -1021,10 +1051,12 @@ async fn discover_copilot(client: &Client) -> anyhow::Result<DiscoveredCatalog> 
         source: "copilot".into(),
         providers: vec![DiscoveredProvider {
             key: "copilot".into(),
+            wire_api: WireApi::OpenAiChat,
             provider: Provider {
                 base_url,
                 credential: Credential::Copilot(credential),
                 headers,
+                wire_api: WireApi::OpenAiChat,
             },
             models,
         }],
@@ -1359,6 +1391,29 @@ fn resolve_opencode_auth(override_path: Option<PathBuf>) -> anyhow::Result<PathB
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn determines_native_hermes_transport() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("config.yaml"),
+            r#"
+providers:
+  claude:
+    base_url: https://api.anthropic.com/v1
+    transport: anthropic_messages
+    api_key: secret
+    models: [claude-test]
+"#,
+        )
+        .unwrap();
+        let catalog = discover_hermes_at(dir.path()).unwrap();
+        assert_eq!(catalog.providers[0].wire_api, WireApi::AnthropicMessages);
+        assert_eq!(
+            catalog.providers[0].provider.wire_api,
+            WireApi::AnthropicMessages
+        );
+    }
 
     #[test]
     fn parses_hermes_provider_models_and_dotenv_secret() {

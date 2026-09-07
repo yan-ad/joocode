@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
 };
 
+use crate::provider::WireApi;
 use anyhow::{Context, bail};
 use serde::Deserialize;
 use serde_json::Value;
@@ -97,6 +98,8 @@ pub struct ProviderConfig {
     pub options: ProviderOptions,
     #[serde(default)]
     pub models: BTreeMap<String, ModelConfig>,
+    #[serde(default, alias = "wireApi")]
+    pub wire_api: Option<WireApi>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

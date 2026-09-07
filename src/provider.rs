@@ -5,7 +5,7 @@ use reqwest::{
     Client,
     header::{HeaderMap, HeaderValue},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
@@ -22,6 +22,32 @@ pub struct ModelInfo {
     pub reasoning: bool,
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u64>,
+}
+
+/// The upstream HTTP API spoken by a provider route.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireApi {
+    #[default]
+    #[serde(alias = "chat", alias = "chat_completions", alias = "openai-chat")]
+    OpenAiChat,
+    #[serde(alias = "responses", alias = "openai-responses")]
+    OpenAiResponses,
+    #[serde(alias = "anthropic", alias = "messages", alias = "anthropic-messages")]
+    AnthropicMessages,
+    #[serde(alias = "google", alias = "gemini-native")]
+    Gemini,
+}
+
+impl WireApi {
+    pub const fn endpoint(self) -> &'static str {
+        match self {
+            Self::OpenAiChat => "chat/completions",
+            Self::OpenAiResponses => "responses",
+            Self::AnthropicMessages => "messages",
+            Self::Gemini => "models",
+        }
+    }
 }
 
 struct ComboRoute {
@@ -200,6 +226,7 @@ pub struct Provider {
     pub base_url: String,
     pub credential: Credential,
     pub headers: HeaderMap,
+    pub wire_api: WireApi,
 }
 
 impl Provider {
@@ -218,6 +245,23 @@ impl Provider {
                 }
             }
         }
+        if self.wire_api == WireApi::AnthropicMessages {
+            if let Some(authorization) = headers.remove("authorization")
+                && !headers.contains_key("x-api-key")
+            {
+                let token = authorization
+                    .to_str()
+                    .ok()
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .unwrap_or_default();
+                if !token.is_empty() {
+                    headers.insert("x-api-key", HeaderValue::from_str(token)?);
+                }
+            }
+            if !headers.contains_key("anthropic-version") {
+                headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+            }
+        }
         Ok((base_url, headers))
     }
 }
@@ -233,6 +277,7 @@ fn insert_bearer(headers: &mut HeaderMap, token: &str) -> anyhow::Result<()> {
 struct Route {
     provider_key: String,
     upstream_id: String,
+    wire_api: WireApi,
 }
 
 #[derive(Clone, Debug)]
@@ -292,13 +337,6 @@ impl Registry {
         )
     }
 
-    fn from_catalogs(
-        client: Client,
-        catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
-    ) -> anyhow::Result<Self> {
-        Self::from_catalogs_with_disabled(client, catalogs, &std::collections::BTreeSet::new())
-    }
-
     fn from_catalogs_with_disabled(
         client: Client,
         catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
@@ -306,19 +344,6 @@ impl Registry {
     ) -> anyhow::Result<Self> {
         let combos = crate::combo::load();
         Self::from_catalogs_combos_and_disabled(client, catalogs, combos, disabled_models)
-    }
-
-    fn from_catalogs_and_combos(
-        client: Client,
-        catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
-        configured_combos: anyhow::Result<Vec<crate::combo::Combo>>,
-    ) -> anyhow::Result<Self> {
-        Self::from_catalogs_combos_and_disabled(
-            client,
-            catalogs,
-            configured_combos,
-            &std::collections::BTreeSet::new(),
-        )
     }
 
     fn from_catalogs_combos_and_disabled(
@@ -355,6 +380,7 @@ impl Registry {
                                 Route {
                                     provider_key: discovered.key.clone(),
                                     upstream_id: model.info.upstream_id.clone(),
+                                    wire_api: discovered.wire_api,
                                 },
                             );
                             models.push(model.info);
@@ -414,6 +440,20 @@ impl Registry {
                             providers: 0,
                             models: 0,
                             detail: Some("one or more combo models are unavailable".into()),
+                        });
+                        continue;
+                    }
+                    let transports = candidates
+                        .iter()
+                        .map(|route| route.wire_api)
+                        .collect::<std::collections::BTreeSet<_>>();
+                    if transports.len() > 1 {
+                        source_reports.push(SourceReport {
+                            source: format!("combo/{}", combo.name),
+                            status: "error",
+                            providers: 0,
+                            models: 0,
+                            detail: Some("combo mixes incompatible wire APIs; configure a common compatible transport explicitly".into()),
                         });
                         continue;
                     }
@@ -514,7 +554,12 @@ impl Registry {
         client: Client,
         catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
     ) -> anyhow::Result<Self> {
-        Self::from_catalogs_and_combos(client, catalogs, Ok(Vec::new()))
+        Self::from_catalogs_combos_and_disabled(
+            client,
+            catalogs,
+            Ok(Vec::new()),
+            &std::collections::BTreeSet::new(),
+        )
     }
 
     pub fn client(&self) -> &Client {
@@ -561,7 +606,7 @@ impl Registry {
     pub fn resolve_candidates(
         &self,
         model: &str,
-    ) -> anyhow::Result<Vec<(String, Provider, String)>> {
+    ) -> anyhow::Result<Vec<(String, Provider, String, WireApi)>> {
         if let Some(combo) = self.inner.combos.get(model) {
             let start = combo.start_index();
             return combo
@@ -580,6 +625,7 @@ impl Registry {
                         route.provider_key.clone(),
                         provider.clone(),
                         route.upstream_id.clone(),
+                        route.wire_api,
                     ))
                 })
                 .collect();
@@ -598,6 +644,7 @@ impl Registry {
             route.provider_key.clone(),
             provider.clone(),
             route.upstream_id.clone(),
+            route.wire_api,
         )])
     }
 }
@@ -631,16 +678,18 @@ mod tests {
             source: "hermes".into(),
             detail: None,
             providers: vec![DiscoveredProvider {
+                wire_api: WireApi::OpenAiChat,
                 key: "hermes:local".into(),
                 provider: Provider {
                     base_url: "https://example.test/v1".into(),
                     credential: Credential::None,
                     headers: HeaderMap::new(),
+                    wire_api: WireApi::OpenAiChat,
                 },
                 models: vec![DiscoveredModel { info: model }],
             }],
         };
-        let registry = Registry::from_catalogs(Client::new(), vec![Ok(catalog)]).unwrap();
+        let registry = Registry::from_catalogs_for_test(Client::new(), vec![Ok(catalog)]).unwrap();
         let (provider, upstream_id) = registry.resolve("hermes/local/model-a").unwrap();
         assert_eq!(provider.base_url, "https://example.test/v1");
         assert_eq!(upstream_id, "model-a");
@@ -651,11 +700,13 @@ mod tests {
         use crate::combo::{Combo, ComboModel, Strategy};
 
         let discovered = |key: &str, model: &str| DiscoveredProvider {
+            wire_api: crate::provider::WireApi::OpenAiChat,
             key: key.into(),
             provider: Provider {
                 base_url: format!("https://{key}.example/v1"),
                 credential: Credential::None,
                 headers: HeaderMap::new(),
+                wire_api: WireApi::OpenAiChat,
             },
             models: vec![DiscoveredModel {
                 info: ModelInfo {
@@ -711,6 +762,7 @@ mod tests {
                 BearerPool::new(vec!["a".into(), "b".into()]).unwrap(),
             )),
             headers: HeaderMap::new(),
+            wire_api: WireApi::OpenAiChat,
         };
         let mut values = Vec::new();
         for _ in 0..4 {
@@ -737,11 +789,13 @@ mod tests {
             source: "fixture".into(),
             detail: None,
             providers: vec![DiscoveredProvider {
+                wire_api: WireApi::OpenAiChat,
                 key: "fixture".into(),
                 provider: Provider {
                     base_url: "https://example.test/v1".into(),
                     credential: Credential::None,
                     headers: HeaderMap::new(),
+                    wire_api: WireApi::OpenAiChat,
                 },
                 models: vec![
                     discovered("provider/model"),
