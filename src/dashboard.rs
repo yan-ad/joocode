@@ -3570,6 +3570,28 @@ mod tests {
     }
 
     #[test]
+    fn space_toggles_selected_local_provider() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut data = empty_dashboard_data();
+        data.providers = vec![ProviderSummary {
+            name: "openai".into(),
+            label: "openai.com".into(),
+            model_count: 1,
+            models: vec!["gpt-5.5".into()],
+            default_model: None,
+            key_count: 1,
+        }];
+        let mut screen = Screen::Providers {
+            selected: SourceKind::DETECTED.len(),
+        };
+        handle_key_with_data(&mut screen, KeyCode::Char(' '), &tx, &data);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DashboardCommand::ToggleLocalProvider { provider }) if provider == "openai"
+        ));
+    }
+
+    #[test]
     fn header_shows_running_version_and_animated_rainbow_logo() {
         let backend = TestBackend::new(110, 7);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -4272,6 +4294,9 @@ mod tests {
         assert!(rendered.contains("Providers"));
         assert!(rendered.contains("gunamaya.id"));
         assert!(rendered.contains("openai.com"));
+        assert!(rendered.contains("DETECTED PROVIDERS"));
+        assert!(rendered.contains("CUSTOM PROVIDERS"));
+        assert!(rendered.contains("COMBOS"));
         assert!(!rendered.contains("secret"));
     }
 
