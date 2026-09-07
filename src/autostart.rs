@@ -13,6 +13,31 @@ pub enum Status {
     Off,
 }
 
+fn assert_or_adopt_managed_service(path: &std::path::Path) -> anyhow::Result<()> {
+    let managed = managed_file(path)?;
+    match integration_journal::assert_unchanged("autostart", path, &managed) {
+        Ok(()) => Ok(()),
+        Err(error) if is_semantically_managed_service(&managed) => {
+            // Joocode upgrades can legitimately move the executable from a
+            // versioned build/package path to a stable `jcx` path. Adopt only
+            // definitions that still describe our exact loopback service;
+            // arbitrary external edits remain protected by the journal.
+            integration_journal::record("autostart", path, &managed)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_semantically_managed_service(managed: &Value) -> bool {
+    let Some(content) = managed.as_str() else {
+        return false;
+    };
+    content.contains(LABEL)
+        && content.contains("serve")
+        && content.contains("127.0.0.1")
+        && content.contains("10100")
+}
+
 #[cfg(target_os = "macos")]
 fn launchctl_service_loaded(service: &str) -> anyhow::Result<bool> {
     let output = std::process::Command::new("/bin/launchctl")
@@ -226,7 +251,7 @@ fn service_contents() -> anyhow::Result<String> {
 fn ensure_runtime_service() -> anyhow::Result<()> {
     let path = runtime_entry_path()?;
     let content = service_contents()?;
-    integration_journal::assert_unchanged("autostart", &path, &managed_file(&path)?)?;
+    assert_or_adopt_managed_service(&path)?;
     fs::write(&path, &content).with_context(|| format!("failed to write {}", path.display()))?;
     integration_journal::record("autostart", &path, &Value::String(content))
 }
@@ -378,7 +403,7 @@ fn ensure_runtime_service() -> anyhow::Result<()> {
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let executable = systemd_escape(&executable()?.to_string_lossy());
     let content = systemd_service(&executable);
-    integration_journal::assert_unchanged("autostart", &path, &managed_file(&path)?)?;
+    assert_or_adopt_managed_service(&path)?;
     fs::write(&path, &content).with_context(|| format!("failed to write {}", path.display()))?;
     integration_journal::record("autostart", &path, &Value::String(content))?;
     run_systemctl(["daemon-reload"])
@@ -472,7 +497,7 @@ fn supervisor_script() -> anyhow::Result<String> {
 fn ensure_runtime_service() -> anyhow::Result<()> {
     let path = runtime_entry_path()?;
     let content = supervisor_script()?;
-    integration_journal::assert_unchanged("autostart", &path, &managed_file(&path)?)?;
+    assert_or_adopt_managed_service(&path)?;
     fs::write(&path, &content).with_context(|| format!("failed to write {}", path.display()))?;
     integration_journal::record("autostart", &path, &Value::String(content))
 }

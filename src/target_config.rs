@@ -80,6 +80,26 @@ pub struct SubagentCatalogPolicy {
     pub fallback_models: Vec<String>,
     #[serde(default = "default_subagent_max_entries")]
     pub max_entries: usize,
+    #[serde(default)]
+    pub reasoning_effort_cap: Option<ReasoningEffortCap>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffortCap {
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffortCap {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 const fn default_subagent_max_entries() -> usize {
@@ -92,11 +112,21 @@ impl Default for SubagentCatalogPolicy {
             featured_models: Vec::new(),
             fallback_models: Vec::new(),
             max_entries: default_subagent_max_entries(),
+            reasoning_effort_cap: None,
         }
     }
 }
 
 impl SubagentCatalogPolicy {
+    pub fn cycle_reasoning_effort_cap(&mut self) {
+        self.reasoning_effort_cap = match self.reasoning_effort_cap {
+            None => Some(ReasoningEffortCap::Low),
+            Some(ReasoningEffortCap::Low) => Some(ReasoningEffortCap::Medium),
+            Some(ReasoningEffortCap::Medium) => Some(ReasoningEffortCap::High),
+            Some(ReasoningEffortCap::High) => None,
+        };
+    }
+
     pub fn resolve(
         &self,
         models: &[crate::provider::ModelInfo],
@@ -259,6 +289,7 @@ mod tests {
             featured_models: vec!["demo/featured".into()],
             fallback_models: vec!["demo/fallback".into()],
             max_entries: 2,
+            reasoning_effort_cap: None,
         };
         save_to(&path, &preferences).unwrap();
 
@@ -315,6 +346,7 @@ mod tests {
             featured_models: vec!["b".into(), "missing".into(), "a".into()],
             fallback_models: vec!["a".into(), "c".into()],
             max_entries: 3,
+            reasoning_effort_cap: None,
         };
         let ids = policy
             .resolve(&[model("a"), model("b"), model("c")])

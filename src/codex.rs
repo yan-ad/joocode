@@ -39,6 +39,7 @@ use toml_edit::{DocumentMut, Item, Table, value};
 use crate::{
     integration_journal,
     provider::{ModelInfo, Registry},
+    target_config::{ReasoningEffortCap, TargetPreferences},
 };
 
 const PROVIDER_ID: &str = "joocode";
@@ -163,7 +164,16 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
         .map(read_catalog)
         .transpose()?
         .unwrap_or_else(|| json!({ "models": [] }));
-    let catalog = merged_catalog(&bundled_catalog, &existing_catalog, registry.models())?;
+    let effort_cap = TargetPreferences::load()
+        .unwrap_or_default()
+        .subagent_catalog
+        .reasoning_effort_cap;
+    let catalog = merged_catalog(
+        &bundled_catalog,
+        &existing_catalog,
+        registry.models(),
+        effort_cap,
+    )?;
     fs::write(&catalog_path, serde_json::to_vec_pretty(&catalog)?)
         .with_context(|| format!("failed to write {}", catalog_path.display()))?;
 
@@ -246,6 +256,7 @@ fn merged_catalog(
     bundled: &Value,
     existing: &Value,
     discovered_models: &[ModelInfo],
+    effort_cap: Option<ReasoningEffortCap>,
 ) -> anyhow::Result<Value> {
     let mut merged = Vec::new();
     let mut slugs = HashSet::new();
@@ -264,7 +275,7 @@ fn merged_catalog(
         }
     }
     for model in discovered_models {
-        let preset = model_preset(model, false);
+        let preset = model_preset(model, false, effort_cap);
         if slugs.insert(model.id.clone()) {
             merged.push(preset);
         }
@@ -280,8 +291,12 @@ fn codex_home() -> anyhow::Result<PathBuf> {
     Ok(home.join(".codex"))
 }
 
-fn model_preset(model: &ModelInfo, is_default: bool) -> Value {
-    let reasoning_efforts = if model.reasoning {
+fn model_preset(
+    model: &ModelInfo,
+    is_default: bool,
+    effort_cap: Option<ReasoningEffortCap>,
+) -> Value {
+    let mut reasoning_efforts = if model.reasoning {
         vec![
             json!({"effort": "low", "description": "Fast responses with light reasoning"}),
             json!({"effort": "medium", "description": "Balanced reasoning depth and latency"}),
@@ -290,6 +305,14 @@ fn model_preset(model: &ModelInfo, is_default: bool) -> Value {
     } else {
         Vec::new()
     };
+    if let Some(cap) = effort_cap {
+        let max = match cap {
+            ReasoningEffortCap::Low => 1,
+            ReasoningEffortCap::Medium => 2,
+            ReasoningEffortCap::High => 3,
+        };
+        reasoning_efforts.truncate(max);
+    }
 
     json!({
         "slug": model.id,
@@ -357,8 +380,13 @@ mod tests {
             context_window: Some(1000),
             max_output_tokens: Some(100),
         }];
-        let catalog =
-            merged_catalog(&json!({ "models": [] }), &json!({ "models": [] }), &models).unwrap();
+        let catalog = merged_catalog(
+            &json!({ "models": [] }),
+            &json!({ "models": [] }),
+            &models,
+            None,
+        )
+        .unwrap();
         let model = &catalog["models"][0];
         assert_eq!(model["slug"], "demo/model-a");
         assert_eq!(model["display_name"], "demo/model-a");
@@ -391,7 +419,7 @@ mod tests {
             context_window: None,
             max_output_tokens: None,
         }];
-        let merged = merged_catalog(&bundled, &existing, &models).unwrap();
+        let merged = merged_catalog(&bundled, &existing, &models, None).unwrap();
         let slugs = merged["models"]
             .as_array()
             .unwrap()

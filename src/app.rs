@@ -1155,7 +1155,7 @@ use tower_http::{
 use tracing::info;
 
 use crate::{
-    antigravity, autostart,
+    antigravity, autostart, codex,
     dashboard::{self, DashboardData},
     desktop::{self, DesktopTargets},
     error::ApiError,
@@ -2482,6 +2482,26 @@ pub async fn serve_dashboard(
                     };
                     let _ = event_tx.send(event);
                 }
+                dashboard::DashboardCommand::CycleReasoningEffortCap => {
+                    let result = (|| {
+                        let mut preferences = TargetPreferences::load()?;
+                        preferences.subagent_catalog.cycle_reasoning_effort_cap();
+                        TargetPreferences::set_subagent_catalog(preferences.subagent_catalog)
+                    })();
+                    let registry = reload_store.snapshot();
+                    let event = match result {
+                        Ok(preferences) => dashboard::DashboardEvent::CatalogUpdated {
+                            models: registry.models().to_vec(),
+                            model_count: registry.models().len(),
+                            provider_count: registry.provider_count(),
+                            config_sources: dashboard::config_sources(&registry),
+                            disabled_models: preferences.disabled_models,
+                            subagent_catalog: preferences.subagent_catalog,
+                        },
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
+                    };
+                    let _ = event_tx.send(event);
+                }
                 dashboard::DashboardCommand::TestProvider { name } => {
                     let client = reload_store.snapshot().client().clone();
                     let result = async {
@@ -2502,6 +2522,24 @@ pub async fn serve_dashboard(
                         Err(error) => dashboard::DashboardEvent::ProviderError(format!(
                             "Provider `{name}` catalog test failed: {error:#}"
                         )),
+                    };
+                    let _ = event_tx.send(event);
+                }
+                dashboard::DashboardCommand::SyncCodex => {
+                    let registry = reload_store.snapshot();
+                    let base_url = reload_base_url.clone();
+                    let result =
+                        tokio::task::spawn_blocking(move || codex::install(&registry, &base_url))
+                            .await;
+                    let event = match result {
+                        Ok(Ok(result)) => dashboard::DashboardEvent::ProviderTested(format!(
+                            "Codex synchronized: {} Joocode models, {} total catalog models.",
+                            result.added_model_count, result.total_model_count
+                        )),
+                        Ok(Err(error)) => {
+                            dashboard::DashboardEvent::ProviderError(error.to_string())
+                        }
+                        Err(error) => dashboard::DashboardEvent::ProviderError(error.to_string()),
                     };
                     let _ = event_tx.send(event);
                 }

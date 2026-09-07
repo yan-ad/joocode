@@ -17,6 +17,75 @@ pub struct DashboardProviderRuntimeSnapshot {
     pub consecutive_failures: u32,
 }
 
+fn draw_codex_set_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
+    let advertised = data.subagent_catalog.resolve(&data.models).len();
+    let enabled = data
+        .proxy_targets
+        .get(&ProxyTarget::Codex)
+        .copied()
+        .unwrap_or(false);
+    let lines = vec![
+        Line::from(Span::styled(
+            "INTEGRATION",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!(
+            "Reasoning effort cap     {}",
+            data.subagent_catalog
+                .reasoning_effort_cap
+                .map(|cap| cap.label())
+                .unwrap_or("no cap")
+        )),
+        Line::from(format!(
+            "Codex target             {}",
+            if enabled {
+                "● Enabled"
+            } else {
+                "○ Disabled"
+            }
+        )),
+        Line::from(format!("Gateway                  ● {}", data.listening)),
+        Line::from(format!(
+            "Keep running on exit     {}",
+            if data.run_in_background { "On" } else { "Off" }
+        )),
+        Line::from(format!(
+            "Auto-start after login   {}",
+            data.autostart.label()
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "CATALOG",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("Active Joocode models    {}", data.model_count)),
+        Line::from(format!(
+            "Subagent advertised      {advertised}/{}",
+            data.subagent_catalog.max_entries
+        )),
+        Line::from(format!(
+            "Featured / fallback      {} / {}",
+            data.subagent_catalog.featured_models.len(),
+            data.subagent_catalog.fallback_models.len()
+        )),
+        Line::from(""),
+        Line::from("s / Enter   Synchronize Codex models"),
+        Line::from("b           Toggle background handoff"),
+        Line::from("a           Edit subagent policy"),
+        Line::from("e           Cycle reasoning effort cap"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Launcher: jcx codex -- [codex arguments]",
+            Style::default().fg(Color::LightCyan),
+        )),
+    ];
+    draw_read_only_page(frame, area, "Codex Set", lines);
+}
+
 fn draw_usage_page(frame: &mut Frame<'_>, area: Rect, runtime: &DashboardRuntimeSnapshot) {
     let mut lines = vec![
         Line::from(format!("Uptime: {}", format_duration(runtime.uptime_secs))),
@@ -251,6 +320,7 @@ enum Page {
     Providers,
     Models,
     Subagents,
+    CodexSet,
     Logs,
     Usage,
     Storage,
@@ -258,11 +328,12 @@ enum Page {
 }
 
 impl Page {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Overview,
         Self::Providers,
         Self::Models,
         Self::Subagents,
+        Self::CodexSet,
         Self::Logs,
         Self::Usage,
         Self::Storage,
@@ -275,6 +346,7 @@ impl Page {
             Self::Providers => "Providers",
             Self::Models => "Models",
             Self::Subagents => "Subagents",
+            Self::CodexSet => "Codex Set",
             Self::Logs => "Logs",
             Self::Usage => "Usage",
             Self::Storage => "Storage",
@@ -1344,7 +1416,9 @@ pub enum DashboardCommand {
     ToggleSubagentFeatured { model: String },
     ToggleSubagentFallback { model: String },
     AdjustSubagentMaxEntries { delta: i8 },
+    CycleReasoningEffortCap,
     TestProvider { name: String },
+    SyncCodex,
     InstallUpdate { tag: String },
 }
 
@@ -1759,6 +1833,18 @@ fn handle_key_with_providers(
             KeyCode::Enter if *page == Page::Integrations => {
                 *screen = Screen::Config { selected: 0 };
             }
+            KeyCode::Enter | KeyCode::Char('s') if *page == Page::CodexSet => {
+                let _ = command_tx.send(DashboardCommand::SyncCodex);
+            }
+            KeyCode::Char('b') if *page == Page::CodexSet => {
+                let _ = command_tx.send(DashboardCommand::ToggleRunInBackground);
+            }
+            KeyCode::Char('a') if *page == Page::CodexSet => {
+                *screen = Screen::Subagents { selected: 0 };
+            }
+            KeyCode::Char('e') if *page == Page::CodexSet => {
+                let _ = command_tx.send(DashboardCommand::CycleReasoningEffortCap);
+            }
             KeyCode::Char('/') => *screen = Screen::Config { selected: 0 },
             _ => {}
         },
@@ -1802,7 +1888,7 @@ fn handle_key_with_providers(
         Screen::Subagents { selected } => match key {
             KeyCode::Up => *selected = selected.saturating_sub(1),
             KeyCode::Down => *selected = selected.saturating_add(1),
-            KeyCode::Tab => *screen = page_screen(Page::Logs),
+            KeyCode::Tab => *screen = page_screen(Page::CodexSet),
             KeyCode::BackTab => *screen = page_screen(Page::Models),
             KeyCode::Char(character) if Page::from_number(character).is_some() => {
                 *screen = page_screen(Page::from_number(character).unwrap_or(Page::Subagents));
@@ -2076,7 +2162,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             ),
             Span::styled("  Navigate    ", Style::default().fg(MUTED_TEXT)),
             Span::styled(
-                " 1-8 ",
+                " 1-9 ",
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)
@@ -2199,6 +2285,7 @@ fn draw_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, page: Page
         ),
         Page::Models => draw_models_page(frame, area, data, selected),
         Page::Subagents => draw_subagents_page(frame, area, data, selected),
+        Page::CodexSet => draw_codex_set_page(frame, area, data),
         Page::Logs => draw_logs_page(frame, area, &data.request_events),
         Page::Usage => draw_usage_page(frame, area, &data.runtime),
         Page::Storage => draw_storage_page(frame, area, &data.storage),
