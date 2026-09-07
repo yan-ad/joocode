@@ -604,6 +604,7 @@ original provider source. It does not expose provider credentials to the client.
 curl http://127.0.0.1:10100/healthz
 curl http://127.0.0.1:10100/readyz
 curl http://127.0.0.1:10100/api/status
+curl http://127.0.0.1:10100/api/providers
 curl http://127.0.0.1:10100/v1/models
 ```
 
@@ -613,6 +614,10 @@ registry can route requests and returns model/provider counts plus `ready`,
 uptime and request counters plus passive provider runtime state: active requests,
 concurrency capacity, and cooldown time. It never stores prompts, bodies, or
 response content.
+
+`/api/providers` exposes the non-secret logical provider/model catalog, source
+discovery reports, and passive runtime availability. Provider URLs, headers,
+and credentials are never included.
 
 ```bash
 jcx stats

@@ -82,6 +82,49 @@ async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
     }))
 }
 
+async fn api_providers(State(state): State<AppState>) -> impl IntoResponse {
+    let registry = state.registry.snapshot();
+    let mut grouped = std::collections::BTreeMap::<String, Vec<&crate::provider::ModelInfo>>::new();
+    for model in registry.models() {
+        grouped
+            .entry(model.provider.clone())
+            .or_default()
+            .push(model);
+    }
+    let providers = grouped
+        .into_iter()
+        .map(|(provider, models)| {
+            json!({
+                "provider": provider,
+                "model_count": models.len(),
+                "models": models,
+            })
+        })
+        .collect::<Vec<_>>();
+    let sources = registry
+        .source_reports()
+        .iter()
+        .map(|report| {
+            json!({
+                "source": report.source,
+                "status": report.status,
+                "providers": report.providers,
+                "models": report.models,
+                "detail": report.detail,
+            })
+        })
+        .collect::<Vec<_>>();
+    let runtime = state
+        .upstream_runtime
+        .provider_statuses(&registry.provider_keys())
+        .await;
+    Json(json!({
+        "providers": providers,
+        "sources": sources,
+        "runtime": runtime,
+    }))
+}
+
 pub async fn stats(url: &str, token: Option<&str>) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let mut request = client.get(url);
@@ -1285,6 +1328,7 @@ fn build_router_with_selection(
     };
     let protected = Router::new()
         .route("/api/status", get(api_status))
+        .route("/api/providers", get(api_providers))
         .route("/api/reload", post(api_reload))
         .route("/v1/models", get(models))
         .route("/v1/responses", post(responses))
@@ -1780,6 +1824,33 @@ mod tests {
         assert!(body["provider_statuses"].is_array());
         assert!(body.get("prompt").is_none());
         assert!(body.get("body").is_none());
+    }
+
+    #[tokio::test]
+    async fn providers_api_exposes_catalog_without_connection_secrets() {
+        let app = build_router(
+            RegistryStore::new(fixture_registry()),
+            &policy(false, None, &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let response = app
+            .oneshot(
+                HttpRequest::get("/api/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 16_384).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["providers"][0]["provider"], "fixture");
+        assert_eq!(body["providers"][0]["models"][0]["id"], "fixture/model-a");
+        assert_eq!(body["sources"][0]["source"], "fixture");
+        assert!(body["runtime"].is_array());
+        let rendered = serde_json::to_string(&body).unwrap();
+        for secret_field in ["api_key", "authorization", "base_url", "headers"] {
+            assert!(!rendered.contains(secret_field));
+        }
     }
 
     #[tokio::test]

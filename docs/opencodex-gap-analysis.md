@@ -310,8 +310,9 @@ Add bounded, privacy-safe statistics without storing prompt or response content.
 report uptime, provider/model counts, total and active requests, successes,
 failures, provider concurrency usage, and cooldown state. `jcx reload` and
 `POST /api/reload` atomically refresh enabled sources while retaining the old
-registry on failure. Token, latency, provider distribution, retry, and failover
-metrics remain pending.
+registry on failure. `GET /api/providers` exposes the non-secret logical
+catalog, source reports, and passive runtime availability. Token, latency,
+provider distribution, retry, and failover metrics remain pending.
 
 Suggested CLI:
 
@@ -339,8 +340,8 @@ GET  /api/metrics
 POST /api/reload
 ```
 
-`/api/status` and `/api/reload` are shipped. Dedicated provider and metrics
-endpoints remain pending.
+`/api/status`, `/api/providers`, and `/api/reload` are shipped. A dedicated
+metrics endpoint remains pending.
 
 ## P5 — Optional ecosystem work
 
