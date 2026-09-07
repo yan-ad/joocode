@@ -300,6 +300,7 @@ async fn anthropic_messages(
     let routable_model = requested_model
         .strip_prefix("claude-joocode/")
         .unwrap_or(requested_model);
+    let declared_tools = protocol::anthropic_declared_tools(&request);
     let response = send_routed(
         &registry,
         routable_model,
@@ -317,6 +318,7 @@ async fn anthropic_messages(
         Ok(ResponseBody::Stream(anthropic_stream_response(
             response.bytes_stream(),
             requested_model.to_owned(),
+            declared_tools,
             state.stream_idle_timeout,
         )))
     } else {
@@ -325,7 +327,7 @@ async fn anthropic_messages(
             .await
             .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
         Ok(ResponseBody::Json(Json(
-            protocol::chat_to_anthropic_response(chat, requested_model)?,
+            protocol::chat_to_anthropic_response(chat, requested_model, &declared_tools)?,
         )))
     }
 }
@@ -333,6 +335,7 @@ async fn anthropic_messages(
 fn anthropic_stream_response<S>(
     upstream: S,
     requested_model: String,
+    declared_tools: std::collections::BTreeSet<String>,
     idle_timeout: Duration,
 ) -> Response
 where
@@ -396,6 +399,12 @@ where
                 .flatten()
             {
                 let upstream_index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("tool");
+                if !declared_tools.contains(name) {
+                    stream_error = Some(format!("upstream model called undeclared tool '{name}'"));
+                    terminal = false;
+                    break;
+                }
                 let block_index = if let Some(block_index) = tools.get(&upstream_index) {
                     *block_index
                 } else {
@@ -437,6 +446,9 @@ where
                         })
                     )));
                 }
+            }
+            if stream_error.is_some() {
+                break;
             }
         }
         if !terminal {
@@ -1294,7 +1306,10 @@ where
             for frame in state.consume_chunk(&chunk) { yield Ok(Bytes::from(frame)); }
         }
         let final_events = if terminal {
-            state.completed_events()
+            match state.completed_events() {
+                Ok(events) => events,
+                Err(error) => state.incomplete_events(&error.message),
+            }
         } else {
             state.incomplete_events(
                 incomplete_reason.as_deref().unwrap_or("upstream stream ended before completion")
@@ -1574,12 +1589,39 @@ mod tests {
     #[tokio::test]
     async fn stalled_anthropic_stream_emits_an_error_event() {
         let upstream = futures_util::stream::pending::<Result<Bytes, reqwest::Error>>();
-        let response =
-            anthropic_stream_response(upstream, "fixture/model-a".into(), Duration::from_millis(1));
+        let response = anthropic_stream_response(
+            upstream,
+            "fixture/model-a".into(),
+            std::collections::BTreeSet::new(),
+            Duration::from_millis(1),
+        );
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("event: error"));
         assert!(body.contains("upstream stream was idle"));
+        assert!(!body.contains("event: message_stop"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_rejects_undeclared_tools() {
+        let chunk = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"delta":{"tool_calls":[{
+                "index":0,"id":"call_1","function":{"name":"unknown","arguments":"{}"}
+            }]}}]})
+        );
+        let upstream =
+            futures_util::stream::iter([Ok::<Bytes, reqwest::Error>(Bytes::from(chunk))]);
+        let response = anthropic_stream_response(
+            upstream,
+            "fixture/model-a".into(),
+            std::collections::BTreeSet::from(["read".into()]),
+            Duration::from_secs(1),
+        );
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("event: error"));
+        assert!(body.contains("undeclared tool"));
         assert!(!body.contains("event: message_stop"));
     }
 

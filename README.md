@@ -498,6 +498,10 @@ can reason over image inputs. Codex still owns tool execution, permissions,
 browser isolation, cursor movement, and user confirmations; Joocode only carries
 the model request and tool-call/result payloads.
 
+Upstream models may only call tools declared by the client request. Hallucinated
+tool names are rejected; streaming Responses become incomplete and Anthropic
+streams emit an error rather than forwarding an unauthorized tool execution.
+
 Manual provider configuration:
 
 ```toml

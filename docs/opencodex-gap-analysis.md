@@ -146,7 +146,9 @@ An upstream stream that ends before its terminal event must not be reported as s
 
 ### Tool-call authorization
 
-Only allow upstream models to call tools that appeared in the client request. Reject invented or undeclared tool names with an explicit protocol error.
+Status: **shipped**. Upstream models may only call tools that appeared in the
+client request. Invented or undeclared tool names produce an explicit protocol
+error; streaming responses never finish successfully with an undeclared call.
 
 ### Integration ownership journal
 

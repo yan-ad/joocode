@@ -9,6 +9,17 @@ pub fn response_id() -> String {
     format!("resp_{}", Uuid::new_v4().simple())
 }
 
+pub fn anthropic_declared_tools(request: &Value) -> std::collections::BTreeSet<String> {
+    request
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
 pub fn anthropic_to_chat_request(request: &Value, upstream_model: &str) -> Result<Value, ApiError> {
     let mut messages = Vec::new();
     if let Some(system) = request.get("system") {
@@ -107,7 +118,11 @@ pub fn anthropic_to_chat_request(request: &Value, upstream_model: &str) -> Resul
     Ok(output)
 }
 
-pub fn chat_to_anthropic_response(chat: Value, requested_model: &str) -> Result<Value, ApiError> {
+pub fn chat_to_anthropic_response(
+    chat: Value,
+    requested_model: &str,
+    declared_tools: &std::collections::BTreeSet<String>,
+) -> Result<Value, ApiError> {
     let message = chat.pointer("/choices/0/message").ok_or_else(|| {
         ApiError::upstream(
             http::StatusCode::BAD_GATEWAY,
@@ -128,6 +143,13 @@ pub fn chat_to_anthropic_response(chat: Value, requested_model: &str) -> Result<
         .into_iter()
         .flatten()
     {
+        let name = call
+            .pointer("/function/name")
+            .and_then(Value::as_str)
+            .unwrap_or("tool");
+        if !declared_tools.contains(name) {
+            return Err(undeclared_tool_error(name));
+        }
         let input = call
             .pointer("/function/arguments")
             .and_then(Value::as_str)
@@ -136,10 +158,11 @@ pub fn chat_to_anthropic_response(chat: Value, requested_model: &str) -> Result<
         content.push(json!({
             "type":"tool_use",
             "id":call.get("id").cloned().unwrap_or_else(|| Value::String(call_id())),
-            "name":call.pointer("/function/name").cloned().unwrap_or_else(|| Value::String("tool".into())),
+            "name":name,
             "input":input
         }));
     }
+
     let usage = chat.get("usage").cloned().unwrap_or_else(|| json!({}));
     Ok(json!({
         "id":format!("msg_{}", Uuid::new_v4().simple()),
@@ -165,6 +188,7 @@ pub fn call_id() -> String {
 #[derive(Clone, Debug, Default)]
 pub struct ToolNamespaces {
     tools: BTreeMap<String, NamespacedTool>,
+    declared: std::collections::BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -226,6 +250,13 @@ fn copy_field(source: &Value, target: &mut serde_json::Map<String, Value>, from:
     if let Some(value) = source.get(from) {
         target.insert(to.to_owned(), value.clone());
     }
+}
+
+fn undeclared_tool_error(name: &str) -> ApiError {
+    ApiError::upstream(
+        http::StatusCode::BAD_GATEWAY,
+        format!("upstream model called undeclared tool '{name}'"),
+    )
 }
 
 fn convert_input(
@@ -375,6 +406,7 @@ fn convert_tools(tools: Option<&Vec<Value>>) -> (Vec<Value>, ToolNamespaces) {
                     .and_then(Value::as_str)
                     && let Some(tool) = convert_function_tool(tool, name)
                 {
+                    namespaces.declared.insert(name.to_owned());
                     converted.push(tool);
                 }
             }
@@ -402,6 +434,7 @@ fn convert_tools(tools: Option<&Vec<Value>>) -> (Vec<Value>, ToolNamespaces) {
                             name: name.to_owned(),
                         },
                     );
+                    namespaces.declared.insert(flattened.clone());
                     if let Some(tool) = convert_function_tool(child, &flattened) {
                         converted.push(tool);
                     }
@@ -430,6 +463,14 @@ impl ToolNamespaces {
         self.tools
             .keys()
             .any(|candidate| candidate.starts_with(name) && candidate != name)
+    }
+
+    fn validate(&self, name: &str) -> Result<(), ApiError> {
+        if self.declared.contains(name) {
+            Ok(())
+        } else {
+            Err(undeclared_tool_error(name))
+        }
     }
 }
 
@@ -481,6 +522,7 @@ pub fn from_chat_response(
                 .pointer("/function/name")
                 .and_then(Value::as_str)
                 .unwrap_or("tool");
+            tool_namespaces.validate(flattened)?;
             let (namespace, name) = tool_namespaces.identity(flattened);
             let mut item = json!({
                 "id": format!("fc_{}", Uuid::new_v4().simple()), "type": "function_call", "status": "completed",
@@ -522,6 +564,7 @@ pub struct StreamState {
     pub calls: BTreeMap<usize, ToolCallState>,
     pub usage: Value,
     pub tool_namespaces: ToolNamespaces,
+    pub invalid_tool: Option<String>,
 }
 
 #[derive(Default)]
@@ -603,6 +646,13 @@ impl StreamState {
                 if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
                     state.name.push_str(name);
                 }
+                if !state.name.is_empty()
+                    && !self.tool_namespaces.may_be_partial(&state.name)
+                    && self.tool_namespaces.validate(&state.name).is_err()
+                {
+                    self.invalid_tool = Some(state.name.clone());
+                    continue;
+                }
                 if !state.announced
                     && !self.tool_namespaces.may_be_partial(&state.name)
                     && (!state.call_id.is_empty() || !state.name.is_empty())
@@ -666,7 +716,10 @@ impl StreamState {
         ]
     }
 
-    pub fn completed_events(&self) -> Vec<String> {
+    pub fn completed_events(&self) -> Result<Vec<String>, ApiError> {
+        if let Some(name) = &self.invalid_tool {
+            return Err(undeclared_tool_error(name));
+        }
         let mut events = vec![
             event(
                 "response.output_text.done",
@@ -711,7 +764,7 @@ impl StreamState {
             json!({ "response": self.response("completed", self.output()) }),
         ));
         events.push("data: [DONE]\n\n".into());
-        events
+        Ok(events)
     }
 
     fn output(&self) -> Vec<Value> {
@@ -897,6 +950,29 @@ mod tests {
     }
 
     #[test]
+    fn streaming_marks_undeclared_tools_invalid() {
+        let request = json!({
+            "model":"demo/code",
+            "input":"hello",
+            "tools":[{"type":"function","name":"read","parameters":{"type":"object"}}]
+        });
+        let chat = to_chat_request(&request, "code").unwrap();
+        let mut state =
+            StreamState::new("resp_test".into(), "demo/code".into(), chat.tool_namespaces);
+        let events = state.consume_chunk(&json!({"choices":[{"delta":{"tool_calls":[{
+            "index":0,"id":"call_1","function":{"name":"unknown","arguments":"{}"}
+        }]}}]}));
+        assert!(events.is_empty());
+        assert!(
+            state
+                .completed_events()
+                .unwrap_err()
+                .message
+                .contains("undeclared tool")
+        );
+    }
+
+    #[test]
     fn converts_anthropic_messages_and_response() {
         let request = json!({
             "model":"claude-joocode/demo/model-a",
@@ -912,9 +988,43 @@ mod tests {
         let response = chat_to_anthropic_response(
             json!({"choices":[{"message":{"content":"done"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}),
             "claude-joocode/demo/model-a",
+            &std::collections::BTreeSet::from(["read".into()]),
         )
         .unwrap();
         assert_eq!(response["content"][0]["text"], "done");
         assert_eq!(response["usage"]["input_tokens"], 2);
+    }
+
+    #[test]
+    fn rejects_undeclared_response_tools() {
+        let request = json!({
+            "model":"demo/code",
+            "input":"hello",
+            "tools":[{"type":"function","name":"read","parameters":{"type":"object"}}]
+        });
+        let chat = to_chat_request(&request, "code").unwrap();
+        let error = from_chat_response(
+            json!({"choices":[{"message":{"tool_calls":[{
+                "id":"call_1","type":"function","function":{"name":"delete_everything","arguments":"{}"}
+            }]}}]}),
+            "demo/code",
+            "resp_test".into(),
+            &chat.tool_namespaces,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("undeclared tool"));
+    }
+
+    #[test]
+    fn rejects_undeclared_anthropic_tools() {
+        let error = chat_to_anthropic_response(
+            json!({"choices":[{"message":{"tool_calls":[{
+                "id":"call_1","type":"function","function":{"name":"unknown","arguments":"{}"}
+            }]}}]}),
+            "claude-joocode/demo/model-a",
+            &std::collections::BTreeSet::from(["read".into()]),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("undeclared tool"));
     }
 }
