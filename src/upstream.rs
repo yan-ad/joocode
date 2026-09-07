@@ -4,6 +4,7 @@ use anyhow::Context;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Response, StatusCode, header::HeaderMap};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
@@ -150,6 +151,48 @@ impl Runtime {
             .await
             .insert(provider.to_owned(), Instant::now() + duration);
     }
+
+    pub async fn provider_statuses(&self, providers: &[String]) -> Vec<ProviderStatus> {
+        let now = Instant::now();
+        let semaphores = self.inner.semaphores.lock().await;
+        let cooldowns = self.inner.cooldowns.lock().await;
+        providers
+            .iter()
+            .map(|provider| {
+                let available = semaphores
+                    .get(provider)
+                    .map_or(self.inner.concurrency, |semaphore| {
+                        semaphore.available_permits()
+                    });
+                let cooldown_ms = cooldowns
+                    .get(provider)
+                    .and_then(|until| (*until > now).then(|| until.duration_since(now)))
+                    .map_or(0, |remaining| remaining.as_millis() as u64);
+                ProviderStatus {
+                    provider: provider.clone(),
+                    state: if cooldown_ms > 0 {
+                        "cooling_down"
+                    } else if available == 0 {
+                        "saturated"
+                    } else {
+                        "available"
+                    },
+                    active_requests: self.inner.concurrency.saturating_sub(available),
+                    concurrency_limit: self.inner.concurrency,
+                    cooldown_ms,
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderStatus {
+    pub provider: String,
+    pub state: &'static str,
+    pub active_requests: usize,
+    pub concurrency_limit: usize,
+    pub cooldown_ms: u64,
 }
 
 #[derive(Debug)]

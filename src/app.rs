@@ -20,8 +20,54 @@ async fn antigravity_bridge(
     antigravity::handle(&registry, method, uri, headers, body).await
 }
 
+pub async fn reload(url: &str, token: Option<&str>) -> anyhow::Result<()> {
+    let client = reqwest::Client::new();
+    let mut request = client.post(url);
+    if let Some(token) = token.filter(|token| !token.is_empty()) {
+        request = request.header("x-joocode-api-key", token);
+    }
+    let response = request.send().await?.error_for_status()?;
+    let result = response.json::<Value>().await?;
+    println!(
+        "Joocode reloaded: {} providers, {} models",
+        result["providers"], result["models"]
+    );
+    Ok(())
+}
+
+async fn api_reload(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+    let selection = state.source_selection.clone().ok_or_else(|| ApiError {
+        status: StatusCode::CONFLICT,
+        kind: "reload_unavailable",
+        message: "provider reload is unavailable for this server instance".into(),
+    })?;
+    let registry = Registry::discover(&selection)
+        .await
+        .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    if registry.models().is_empty() || registry.provider_count() == 0 {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            kind: "reload_failed",
+            message: "provider reload produced an empty registry; the existing registry was kept"
+                .into(),
+        });
+    }
+    let providers = registry.provider_count();
+    let models = registry.models().len();
+    state.registry.replace(registry);
+    Ok(Json(json!({
+        "status": "reloaded",
+        "providers": providers,
+        "models": models,
+    })))
+}
+
 async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
     let registry = state.registry.snapshot();
+    let provider_statuses = state
+        .upstream_runtime
+        .provider_statuses(&registry.provider_keys())
+        .await;
     Json(json!({
         "service": "joocode",
         "version": env!("CARGO_PKG_VERSION"),
@@ -32,6 +78,7 @@ async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
         "active_requests": state.metrics.active.load(Ordering::Relaxed),
         "successful_responses": state.metrics.successes.load(Ordering::Relaxed),
         "failed_responses": state.metrics.failures.load(Ordering::Relaxed),
+        "provider_statuses": provider_statuses,
     }))
 }
 
@@ -54,6 +101,21 @@ pub async fn stats(url: &str, token: Option<&str>) -> anyhow::Result<()> {
     println!("active:    {}", status["active_requests"]);
     println!("successes: {}", status["successful_responses"]);
     println!("failures:  {}", status["failed_responses"]);
+    if let Some(providers) = status["provider_statuses"].as_array()
+        && !providers.is_empty()
+    {
+        println!("\nprovider runtime:");
+        for provider in providers {
+            println!(
+                "  {:<24} {:<12} active={}/{} cooldown={}ms",
+                provider["provider"].as_str().unwrap_or("unknown"),
+                provider["state"].as_str().unwrap_or("unknown"),
+                provider["active_requests"],
+                provider["concurrency_limit"],
+                provider["cooldown_ms"],
+            );
+        }
+    }
     Ok(())
 }
 
@@ -287,6 +349,7 @@ use crate::{
 #[derive(Clone)]
 struct AppState {
     registry: RegistryStore,
+    source_selection: Option<SourceSelection>,
     stream_idle_timeout: Duration,
     max_sse_event_bytes: usize,
     max_tool_argument_bytes: usize,
@@ -847,13 +910,25 @@ async fn proxy_openai(
     ))
 }
 
-pub async fn serve(host: IpAddr, port: u16, registry: Registry) -> anyhow::Result<()> {
+pub async fn serve(
+    host: IpAddr,
+    port: u16,
+    registry: Registry,
+    selection: SourceSelection,
+) -> anyhow::Result<()> {
     let PreparedServer::Ready {
         listener,
         app,
         address,
         port_warning,
-    } = prepare_server(host, port, RegistryStore::new(registry), false).await?
+    } = prepare_server(
+        host,
+        port,
+        RegistryStore::new(registry),
+        Some(selection),
+        false,
+    )
+    .await?
     else {
         tracing::info!(port, "Joocode is already running in the background");
         return Ok(());
@@ -884,7 +959,14 @@ pub async fn serve_dashboard(
         app,
         address,
         port_warning,
-    } = prepare_server(host, port, registry_store.clone(), interactive).await?
+    } = prepare_server(
+        host,
+        port,
+        registry_store.clone(),
+        Some(selection.clone()),
+        interactive,
+    )
+    .await?
     else {
         persistent_proxy.disarm();
         println!("Joocode is already running in the background at http://{host}:{port}.");
@@ -1158,10 +1240,11 @@ async fn prepare_server(
     host: IpAddr,
     port: u16,
     registry: RegistryStore,
+    source_selection: Option<SourceSelection>,
     reclaim_requested_port: bool,
 ) -> anyhow::Result<PreparedServer> {
     let policy = ServerPolicy::from_host(host)?;
-    let app = build_router(registry, &policy);
+    let app = build_router_with_selection(registry, &policy, source_selection);
     match bind_available(host, port, reclaim_requested_port).await? {
         BindResult::Bound {
             listener,
@@ -1180,9 +1263,18 @@ async fn prepare_server(
 }
 
 fn build_router(registry: RegistryStore, policy: &ServerPolicy) -> Router {
+    build_router_with_selection(registry, policy, None)
+}
+
+fn build_router_with_selection(
+    registry: RegistryStore,
+    policy: &ServerPolicy,
+    source_selection: Option<SourceSelection>,
+) -> Router {
     let metrics = Metrics::default();
     let state = AppState {
         registry,
+        source_selection,
         stream_idle_timeout: policy.stream_idle_timeout,
         max_sse_event_bytes: policy.max_sse_event_bytes,
         max_tool_argument_bytes: policy.max_tool_argument_bytes,
@@ -1192,6 +1284,7 @@ fn build_router(registry: RegistryStore, policy: &ServerPolicy) -> Router {
     };
     let protected = Router::new()
         .route("/api/status", get(api_status))
+        .route("/api/reload", post(api_reload))
         .route("/v1/models", get(models))
         .route("/v1/responses", post(responses))
         .route("/v1/responses/compact", post(compact_responses))

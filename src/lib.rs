@@ -54,6 +54,9 @@ pub async fn run() -> anyhow::Result<()> {
     if let Some(Command::Stats { url, token }) = &cli.command {
         return app::stats(url, token.as_deref()).await;
     }
+    if let Some(Command::Reload { url, token }) = &cli.command {
+        return app::reload(url, token.as_deref()).await;
+    }
     if let Some(Command::Antigravity { command }) = &cli.command {
         match command {
             AntigravityCommand::Patch { base_url } => {
@@ -114,7 +117,7 @@ pub async fn run() -> anyhow::Result<()> {
     };
 
     match command {
-        Command::Serve { host, port } => app::serve(host, port, registry).await,
+        Command::Serve { host, port } => app::serve(host, port, registry, selection).await,
         Command::Models => {
             for model in registry.models() {
                 println!("{}\t{}", model.id, model.name);
@@ -122,6 +125,7 @@ pub async fn run() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Stats { .. } => unreachable!("stats is handled before config discovery"),
+        Command::Reload { .. } => unreachable!("reload is handled before config discovery"),
         Command::Doctor => {
             for report in registry.source_reports() {
                 println!(

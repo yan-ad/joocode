@@ -471,6 +471,10 @@ impl Registry {
         self.inner.providers.len()
     }
 
+    pub fn provider_keys(&self) -> Vec<String> {
+        self.inner.providers.keys().cloned().collect()
+    }
+
     pub fn resolve(&self, model: &str) -> anyhow::Result<(&Provider, String)> {
         let route = self
             .inner

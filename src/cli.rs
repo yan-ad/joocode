@@ -121,6 +121,14 @@ mod tests {
     }
 
     #[test]
+    fn accepts_reload_command() {
+        assert!(matches!(
+            Cli::try_parse_from(["jcx", "reload"]).unwrap().command,
+            Some(Command::Reload { .. })
+        ));
+    }
+
+    #[test]
     fn accepts_stats_command() {
         let cli =
             Cli::try_parse_from(["jcx", "stats", "--url", "http://127.0.0.1:10101/api/status"])
@@ -174,6 +182,15 @@ pub enum Command {
     Stats {
         /// Joocode status endpoint to query.
         #[arg(long, default_value = "http://127.0.0.1:10100/api/status")]
+        url: String,
+        /// Authentication token required by a remotely bound Joocode proxy.
+        #[arg(long, env = "JOOCODE_API_AUTH_TOKEN")]
+        token: Option<String>,
+    },
+    /// Reload provider sources in a running Joocode proxy.
+    Reload {
+        /// Joocode reload endpoint to call.
+        #[arg(long, default_value = "http://127.0.0.1:10100/api/reload")]
         url: String,
         /// Authentication token required by a remotely bound Joocode proxy.
         #[arg(long, env = "JOOCODE_API_AUTH_TOKEN")]
