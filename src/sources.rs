@@ -797,17 +797,27 @@ pub(crate) fn load_opencode_catalog(
         let Some(base_url) = configured.options.base_url.clone() else {
             continue;
         };
-        let credential = configured
-            .options
-            .api_key
-            .clone()
-            .or_else(|| match auth.get(&id) {
-                Some(AuthEntry::Api { key }) => Some(key.clone()),
-                Some(AuthEntry::Oauth { access, .. }) => Some(access.clone()),
-                _ => None,
-            })
-            .map(Credential::Bearer)
-            .unwrap_or(Credential::None);
+        let wire_api = opencode_wire_api(&configured);
+        let credential = if let Some(key) = configured.options.api_key.clone() {
+            if wire_api == WireApi::Gemini && base_url.contains("generativelanguage.googleapis.com")
+            {
+                Credential::GoogleApiKey(key)
+            } else {
+                Credential::Bearer(key)
+            }
+        } else {
+            match auth.get(&id) {
+                Some(AuthEntry::Api { key })
+                    if wire_api == WireApi::Gemini
+                        && base_url.contains("generativelanguage.googleapis.com") =>
+                {
+                    Credential::GoogleApiKey(key.clone())
+                }
+                Some(AuthEntry::Api { key }) => Credential::Bearer(key.clone()),
+                Some(AuthEntry::Oauth { access, .. }) => Credential::Bearer(access.clone()),
+                _ => Credential::None,
+            }
+        };
         let headers = header_map(&configured.options.headers, &id)?;
         let public_provider = namespace
             .map(|prefix| format!("{prefix}/{id}"))
@@ -823,9 +833,9 @@ pub(crate) fn load_opencode_catalog(
                 base_url,
                 credential,
                 headers,
-                wire_api: opencode_wire_api(&configured),
+                wire_api,
             },
-            wire_api: opencode_wire_api(&configured),
+            wire_api,
             models,
         });
     }
@@ -942,9 +952,6 @@ fn hermes_provider(
         "gemini" | "generate_content" => WireApi::Gemini,
         _ => return Ok(None),
     };
-    if wire_api == WireApi::Gemini {
-        return Ok(None);
-    }
     let mut model_ids = yaml_model_ids(value.get("models"));
     if model_ids.is_empty()
         && let Some(model) = yaml_string(value, &["model", "default_model", "defaultModel"])
@@ -962,12 +969,19 @@ fn hermes_provider(
         .iter()
         .map(|model_id| simple_model(&public_provider, model_id, model_id, context, None))
         .collect();
+    let mut credential = resolve_hermes_credential(value, id, env_file);
+    if wire_api == WireApi::Gemini
+        && base_url.contains("generativelanguage.googleapis.com")
+        && let Credential::Bearer(key) = credential
+    {
+        credential = Credential::GoogleApiKey(key);
+    }
     Ok(Some(DiscoveredProvider {
         key: format!("hermes:{id}"),
         wire_api,
         provider: Provider {
             base_url,
-            credential: resolve_hermes_credential(value, id, env_file),
+            credential,
             headers: hermes_headers(value, id, env_file)?,
             wire_api,
         },

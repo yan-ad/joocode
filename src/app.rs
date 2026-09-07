@@ -9,6 +9,425 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn gemini_operation(uri: &axum::http::Uri) -> Option<(&str, bool)> {
+    let suffix = uri.path().split("/models/").nth(1)?;
+    let (model, operation) = suffix.rsplit_once(':')?;
+    if model.is_empty() {
+        return None;
+    }
+
+    match operation {
+        "generateContent" => Some((model, false)),
+        "streamGenerateContent" => Some((model, true)),
+        _ => None,
+    }
+}
+
+async fn gemini_models_bridge(
+    State(state): State<AppState>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    body: AxumBytes,
+) -> Result<Response, ApiError> {
+    let registry = state.registry.snapshot();
+    let Some((requested_model, stream)) = gemini_operation(&uri) else {
+        return antigravity::handle(&registry, method, uri, headers, body).await;
+    };
+    // Only intercept Joocode's qualified catalog IDs. Native Google model names
+    // continue through the Antigravity transparent Google proxy.
+    if !requested_model.contains('/') || registry.resolve_candidates(requested_model).is_err() {
+        return antigravity::handle(&registry, method, uri, headers, body).await;
+    }
+    if method != Method::POST {
+        return Err(ApiError::bad_request("Gemini generation requires POST"));
+    }
+    let request: Value = serde_json::from_slice(&body)
+        .map_err(|error| ApiError::bad_request(format!("invalid Gemini request: {error}")))?;
+    let query = uri
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    let response = send_routed_with_url(
+        &registry,
+        requested_model,
+        &state.retry_policy,
+        &state.upstream_runtime,
+        &state.metrics,
+        None,
+        |base_url, upstream_model, wire_api| match wire_api {
+            crate::provider::WireApi::Gemini => Ok((
+                format!(
+                    "{}/models/{}:{}{}",
+                    base_url.trim_end_matches('/'),
+                    upstream_model,
+                    if stream {
+                        "streamGenerateContent"
+                    } else {
+                        "generateContent"
+                    },
+                    query
+                ),
+                request.clone(),
+            )),
+            crate::provider::WireApi::OpenAiChat => Ok((
+                format!("{}/chat/completions", base_url.trim_end_matches('/')),
+                antigravity::gemini_to_chat(&request, upstream_model, stream),
+            )),
+            other => Err(ApiError::bad_request(format!(
+                "Gemini generateContent cannot be routed through {other:?}"
+            ))),
+        },
+    )
+    .await?;
+    if response.wire_api == crate::provider::WireApi::Gemini {
+        return Ok(proxy_upstream_response(response.response));
+    }
+    if stream {
+        return Ok(gemini_stream_from_chat(response.response));
+    }
+    let chat = response
+        .response
+        .json::<Value>()
+        .await
+        .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    Ok((Json(antigravity::chat_to_gemini(&chat))).into_response())
+}
+
+fn proxy_upstream_response(response: upstream::UpstreamResponse) -> Response {
+    let status = response.status();
+    let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+    let stream = response.bytes_stream().map_err(std::io::Error::other);
+    let mut builder = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, content_type);
+    }
+    builder
+        .body(Body::from_stream(stream))
+        .expect("valid upstream response")
+}
+
+fn gemini_stream_from_chat(response: upstream::UpstreamResponse) -> Response {
+    let events = stream! {
+        let mut upstream = response.bytes_stream();
+        let mut buffer = Vec::new();
+        while let Ok(Some(line)) = next_bounded_sse_line(&mut upstream, &mut buffer, DEFAULT_MAX_SSE_EVENT_BYTES).await {
+            let Some(data) = line.strip_prefix("data:") else { continue; };
+            let data = data.trim();
+            if data == "[DONE]" { break; }
+            let Ok(chunk) = serde_json::from_str::<Value>(data) else { continue; };
+            let mut parts = Vec::new();
+            if let Some(text) = chunk.pointer("/choices/0/delta/content").and_then(Value::as_str) {
+                parts.push(json!({"text": text}));
+            }
+            for call in chunk.pointer("/choices/0/delta/tool_calls").and_then(Value::as_array).into_iter().flatten() {
+                let args = call.pointer("/function/arguments").and_then(Value::as_str)
+                    .and_then(|value| serde_json::from_str::<Value>(value).ok()).unwrap_or_else(|| json!({}));
+                parts.push(json!({"functionCall": {
+                    "id": call.get("id"), "name": call.pointer("/function/name"), "args": args
+                }}));
+            }
+            if !parts.is_empty() {
+                let finish = chunk.pointer("/choices/0/finish_reason").and_then(Value::as_str);
+                let event = json!({"candidates":[{"content":{"role":"model","parts":parts},"finishReason":finish.map(|reason| if reason == "tool_calls" {"TOOL_CALL"} else {"STOP"}),"index":0}]});
+                yield Ok::<Bytes, Infallible>(Bytes::from(format!("data: {event}\n\n")));
+            }
+        }
+    };
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(events))
+        .expect("valid Gemini stream")
+}
+
+fn parse_token_usage(value: &Value) -> Option<TokenUsage> {
+    let usage = value.get("usage").or_else(|| value.get("usageMetadata"))?;
+    let number = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|name| usage.get(*name).and_then(Value::as_u64))
+    };
+    let input = number(&["input_tokens", "prompt_tokens", "promptTokenCount"])?;
+    let output = number(&["output_tokens", "completion_tokens", "candidatesTokenCount"])?;
+    Some(TokenUsage { input, output })
+}
+
+fn observe_usage_value(metrics: &Metrics, value: &Value) {
+    if let Some(usage) = parse_token_usage(value)
+        .or_else(|| value.get("response").and_then(parse_token_usage))
+        .or_else(|| value.get("message").and_then(parse_token_usage))
+    {
+        metrics.record_usage(usage);
+    }
+}
+
+fn usage_observing_stream<S>(
+    upstream: S,
+    metrics: Metrics,
+) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
+{
+    stream! {
+        let mut upstream = upstream;
+        let mut buffer = Vec::<u8>::new();
+        while let Some(item) = upstream.next().await {
+            if let Ok(chunk) = &item {
+                buffer.extend_from_slice(chunk);
+                while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+                    let line = buffer.drain(..=newline).collect::<Vec<_>>();
+                    if let Ok(line) = std::str::from_utf8(&line) {
+                        let data = line.trim().strip_prefix("data:").map(str::trim).unwrap_or(line.trim());
+                        if let Ok(value) = serde_json::from_str::<Value>(data) {
+                            observe_usage_value(&metrics, &value);
+                        }
+                    }
+                }
+            }
+            yield item;
+        }
+        if let Ok(line) = std::str::from_utf8(&buffer)
+            && let Ok(value) = serde_json::from_str::<Value>(line.trim().strip_prefix("data:").map(str::trim).unwrap_or(line.trim()))
+        {
+            observe_usage_value(&metrics, &value);
+        }
+    }
+}
+
+fn image_wire_api(wire_api: crate::provider::WireApi) -> Result<(), ApiError> {
+    match wire_api {
+        crate::provider::WireApi::OpenAiChat | crate::provider::WireApi::OpenAiResponses => Ok(()),
+        crate::provider::WireApi::AnthropicMessages => Err(ApiError::bad_request(
+            "Images cannot be routed through an Anthropic provider",
+        )),
+        crate::provider::WireApi::Gemini => Err(ApiError::bad_request(
+            "Images cannot be routed through a Gemini provider",
+        )),
+    }
+}
+
+fn upstream_passthrough(response: upstream::UpstreamResponse) -> Response {
+    let status = response.status();
+    let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+    let stream = response.bytes_stream().map_err(std::io::Error::other);
+    let mut builder = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, content_type);
+    }
+    builder
+        .body(Body::from_stream(stream))
+        .expect("valid upstream passthrough response")
+}
+
+async fn send_image_routed<F>(
+    registry: &Registry,
+    requested_model: &str,
+    endpoint: &str,
+    retry_policy: &upstream::RetryPolicy,
+    runtime: &upstream::Runtime,
+    make_request: F,
+) -> Result<upstream::UpstreamResponse, ApiError>
+where
+    F: Fn(&str) -> Result<(Bytes, Option<HeaderValue>), ApiError>,
+{
+    let mut candidates = registry
+        .resolve_candidates(requested_model)
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    if registry.combo_strategy(requested_model) == Some(crate::combo::Strategy::LowestLatency) {
+        runtime
+            .order_by_health(&mut candidates, |candidate| candidate.0.as_str())
+            .await;
+    }
+    let candidate_count = candidates.len();
+    let mut last_error = None;
+    for (index, (provider_key, provider, upstream_model, wire_api)) in
+        candidates.into_iter().enumerate()
+    {
+        image_wire_api(wire_api)?;
+        let (body, content_type) = make_request(&upstream_model)?;
+        let (base_url, mut headers) = match provider.request_parts(registry.client()).await {
+            Ok(parts) => parts,
+            Err(error) if index + 1 < candidate_count => {
+                last_error = Some(error.to_string());
+                continue;
+            }
+            Err(error) => {
+                return Err(ApiError::upstream(
+                    StatusCode::BAD_GATEWAY,
+                    error.to_string(),
+                ));
+            }
+        };
+        headers.remove(header::CONTENT_LENGTH);
+        if let Some(content_type) = content_type {
+            headers.insert(header::CONTENT_TYPE, content_type);
+        }
+        let url = format!("{}/images/{endpoint}", base_url.trim_end_matches('/'));
+        let response = match upstream::send_bytes(
+            registry.client(),
+            &url,
+            &headers,
+            &body,
+            retry_policy,
+            upstream::RouteBudget {
+                runtime,
+                provider: &provider_key,
+                wait_for_cooldown: candidate_count == 1,
+            },
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(failure) => {
+                if index + 1 < candidate_count && upstream::failover_eligible(failure.class) {
+                    last_error = Some(failure.message);
+                    continue;
+                }
+                return Err(ApiError::upstream(StatusCode::BAD_GATEWAY, failure.message));
+            }
+        };
+        if response.status().is_success()
+            || index + 1 == candidate_count
+            || !upstream::failover_eligible(upstream::classify_status(response.status()))
+        {
+            return Ok(response);
+        }
+        last_error = Some(format!("upstream returned {}", response.status()));
+    }
+    Err(ApiError::upstream(
+        StatusCode::BAD_GATEWAY,
+        last_error.unwrap_or_else(|| "all combo candidates failed".into()),
+    ))
+}
+
+async fn image_generations(
+    State(state): State<AppState>,
+    Json(request): Json<Value>,
+) -> Result<Response, ApiError> {
+    let requested_model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing 'model'"))?
+        .to_owned();
+    let registry = state.registry.snapshot();
+    let response = send_image_routed(
+        &registry,
+        &requested_model,
+        "generations",
+        &state.retry_policy,
+        &state.upstream_runtime,
+        |upstream_model| {
+            let mut body = request.clone();
+            body["model"] = Value::String(upstream_model.to_owned());
+            serde_json::to_vec(&body)
+                .map(Bytes::from)
+                .map(|body| (body, Some(HeaderValue::from_static("application/json"))))
+                .map_err(|error| ApiError::bad_request(error.to_string()))
+        },
+    )
+    .await?;
+    Ok(upstream_passthrough(response))
+}
+
+fn multipart_boundary(content_type: &str) -> Option<&str> {
+    content_type.split(';').skip(1).find_map(|parameter| {
+        let (name, value) = parameter.trim().split_once('=')?;
+        name.eq_ignore_ascii_case("boundary")
+            .then(|| value.trim().trim_matches('"'))
+    })
+}
+
+fn multipart_model_range(body: &[u8], boundary: &str) -> Option<(std::ops::Range<usize>, String)> {
+    let delimiter = format!("--{boundary}").into_bytes();
+    let mut cursor = 0;
+    while let Some(relative) = body[cursor..]
+        .windows(delimiter.len())
+        .position(|window| window == delimiter)
+    {
+        let part = cursor + relative + delimiter.len();
+        if body.get(part..part + 2) == Some(b"--") {
+            break;
+        }
+        let headers_start = if body.get(part..part + 2) == Some(b"\r\n") {
+            part + 2
+        } else {
+            part
+        };
+        let headers_end = body[headers_start..]
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")?
+            + headers_start;
+        let headers = String::from_utf8_lossy(&body[headers_start..headers_end]);
+        let is_model = headers.lines().any(|line| {
+            line.to_ascii_lowercase()
+                .starts_with("content-disposition:")
+                && line.split(';').any(|parameter| {
+                    parameter
+                        .trim()
+                        .strip_prefix("name=")
+                        .is_some_and(|value| value.trim_matches('"') == "model")
+                })
+        });
+        let value_start = headers_end + 4;
+        let marker = format!("\r\n--{boundary}").into_bytes();
+        let value_end = body[value_start..]
+            .windows(marker.len())
+            .position(|window| window == marker)?
+            + value_start;
+        if is_model {
+            let model = std::str::from_utf8(&body[value_start..value_end])
+                .ok()?
+                .to_owned();
+            return Some((value_start..value_end, model));
+        }
+        cursor = value_end + 2;
+    }
+    None
+}
+
+fn rewrite_multipart_model(body: &[u8], range: &std::ops::Range<usize>, model: &str) -> Bytes {
+    let mut rewritten = Vec::with_capacity(body.len() - range.len() + model.len());
+    rewritten.extend_from_slice(&body[..range.start]);
+    rewritten.extend_from_slice(model.as_bytes());
+    rewritten.extend_from_slice(&body[range.end..]);
+    Bytes::from(rewritten)
+}
+
+async fn image_edits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: AxumBytes,
+) -> Result<Response, ApiError> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::bad_request("images/edits requires multipart/form-data"))?;
+    let boundary = multipart_boundary(content_type)
+        .filter(|boundary| !boundary.is_empty())
+        .ok_or_else(|| ApiError::bad_request("missing multipart boundary"))?;
+    let (model_range, requested_model) = multipart_model_range(&body, boundary)
+        .ok_or_else(|| ApiError::bad_request("missing multipart 'model' field"))?;
+    let content_type = HeaderValue::from_str(content_type)
+        .map_err(|_| ApiError::bad_request("invalid multipart content-type"))?;
+    let registry = state.registry.snapshot();
+    let response = send_image_routed(
+        &registry,
+        &requested_model,
+        "edits",
+        &state.retry_policy,
+        &state.upstream_runtime,
+        |upstream_model| {
+            Ok((
+                rewrite_multipart_model(&body, &model_range, upstream_model),
+                Some(content_type.clone()),
+            ))
+        },
+    )
+    .await?;
+    Ok(upstream_passthrough(response))
+}
+
 async fn antigravity_bridge(
     State(state): State<AppState>,
     method: Method,
@@ -51,6 +470,33 @@ fn dashboard_storage_snapshot() -> dashboard::DashboardStorageSnapshot {
 struct RoutedResponse {
     response: upstream::UpstreamResponse,
     wire_api: crate::provider::WireApi,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+struct TokenUsage {
+    input: u64,
+    output: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RequestEconomics {
+    provider: Option<String>,
+    model: Option<String>,
+    retries: u64,
+    failovers: u64,
+    usage: Option<TokenUsage>,
+}
+
+tokio::task_local! {
+    static REQUEST_ECONOMICS: Arc<std::sync::Mutex<RequestEconomics>>;
+}
+
+fn observe_request(update: impl FnOnce(&mut RequestEconomics)) {
+    let _ = REQUEST_ECONOMICS.try_with(|observation| {
+        if let Ok(mut observation) = observation.lock() {
+            update(&mut observation);
+        }
+    });
 }
 
 impl RoutedResponse {
@@ -153,6 +599,59 @@ async fn api_metrics(State(state): State<AppState>) -> impl IntoResponse {
         "counter",
         state.metrics.browser_tool_calls.load(Ordering::Relaxed)
     );
+    metric!(
+        "joocode_input_tokens_total",
+        "Upstream-reported input tokens.",
+        "counter",
+        state.metrics.input_tokens.load(Ordering::Relaxed)
+    );
+    metric!(
+        "joocode_output_tokens_total",
+        "Upstream-reported output tokens.",
+        "counter",
+        state.metrics.output_tokens.load(Ordering::Relaxed)
+    );
+    metric!(
+        "joocode_upstream_retries_total",
+        "Additional attempts against the same provider.",
+        "counter",
+        state.metrics.retries.load(Ordering::Relaxed)
+    );
+    metric!(
+        "joocode_upstream_failovers_total",
+        "Moves to another route candidate.",
+        "counter",
+        state.metrics.failovers.load(Ordering::Relaxed)
+    );
+    output.push_str("# HELP joocode_selected_route_total Requests grouped by bounded selected provider and model.\n# TYPE joocode_selected_route_total counter\n");
+    for ((provider, model), count) in state
+        .metrics
+        .route_breakdown
+        .lock()
+        .expect("route metrics lock poisoned")
+        .iter()
+    {
+        output.push_str(&format!(
+            "joocode_selected_route_total{{provider=\"{}\",model=\"{}\"}} {count}\n",
+            prometheus_label(provider),
+            prometheus_label(model)
+        ));
+    }
+    output.push_str("# HELP joocode_request_duration_seconds End-to-end request duration.\n# TYPE joocode_request_duration_seconds histogram\n");
+    let bounds = [
+        "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "5", "30", "+Inf",
+    ];
+    let mut cumulative = 0_u64;
+    for (index, bound) in bounds.iter().enumerate() {
+        cumulative = cumulative
+            .saturating_add(state.metrics.duration_buckets[index].load(Ordering::Relaxed));
+        output.push_str(&format!(
+            "joocode_request_duration_seconds_bucket{{le=\"{bound}\"}} {cumulative}\n"
+        ));
+    }
+    output.push_str(&format!(
+        "joocode_request_duration_seconds_count {cumulative}\n"
+    ));
     output.push_str(
         "# HELP joocode_tool_call_total Tool calls grouped by namespace and tool name.\n\
 # TYPE joocode_tool_call_total counter\n",
@@ -282,6 +781,11 @@ async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
         "failed_responses": state.metrics.failures.load(Ordering::Relaxed),
         "tool_calls": state.metrics.tool_calls.load(Ordering::Relaxed),
         "codex_browser_tool_calls": state.metrics.browser_tool_calls.load(Ordering::Relaxed),
+        "input_tokens": state.metrics.input_tokens.load(Ordering::Relaxed),
+        "output_tokens": state.metrics.output_tokens.load(Ordering::Relaxed),
+        "upstream_retries": state.metrics.retries.load(Ordering::Relaxed),
+        "upstream_failovers": state.metrics.failovers.load(Ordering::Relaxed),
+        "selected_routes": state.metrics.route_breakdown.lock().expect("route metrics lock poisoned").iter().map(|((provider, model), requests)| json!({"provider":provider,"model":model,"requests":requests})).collect::<Vec<_>>(),
         "provider_statuses": provider_statuses,
     }))
 }
@@ -492,11 +996,41 @@ async fn send_routed<F>(
     requested_model: &str,
     retry_policy: &upstream::RetryPolicy,
     runtime: &upstream::Runtime,
+    metrics: &Metrics,
     local_key: Option<HeaderValue>,
     make_body: F,
 ) -> Result<RoutedResponse, ApiError>
 where
     F: Fn(&str, crate::provider::WireApi) -> Result<Value, ApiError>,
+{
+    send_routed_with_url(
+        registry,
+        requested_model,
+        retry_policy,
+        runtime,
+        metrics,
+        local_key,
+        |base_url, upstream_model, wire_api| {
+            Ok((
+                format!("{}/{}", base_url.trim_end_matches('/'), wire_api.endpoint()),
+                make_body(upstream_model, wire_api)?,
+            ))
+        },
+    )
+    .await
+}
+
+async fn send_routed_with_url<F>(
+    registry: &Registry,
+    requested_model: &str,
+    retry_policy: &upstream::RetryPolicy,
+    runtime: &upstream::Runtime,
+    metrics: &Metrics,
+    local_key: Option<HeaderValue>,
+    make_request: F,
+) -> Result<RoutedResponse, ApiError>
+where
+    F: Fn(&str, &str, crate::provider::WireApi) -> Result<(String, Value), ApiError>,
 {
     let mut candidates = registry
         .resolve_candidates(requested_model)
@@ -511,10 +1045,10 @@ where
     for (index, (provider_key, provider, upstream_model, wire_api)) in
         candidates.into_iter().enumerate()
     {
-        let body = make_body(&upstream_model, wire_api)?;
         let (base_url, mut headers) = match provider.request_parts(registry.client()).await {
             Ok(parts) => parts,
             Err(error) if index + 1 < candidate_count => {
+                metrics.record_failover();
                 last_error = Some(error.to_string());
                 continue;
             }
@@ -528,7 +1062,7 @@ where
         if let Some(value) = &local_key {
             headers.insert("x-joocode-api-key", value.clone());
         }
-        let url = format!("{}/{}", base_url.trim_end_matches('/'), wire_api.endpoint());
+        let (url, body) = make_request(&base_url, &upstream_model, wire_api)?;
         let response = match upstream::send_json(
             registry.client(),
             &url,
@@ -545,14 +1079,18 @@ where
         {
             Ok(response) => response,
             Err(failure) => {
+                metrics.record_retries(failure.attempts.saturating_sub(1) as u64);
                 if index + 1 < candidate_count && upstream::failover_eligible(failure.class) {
+                    metrics.record_failover();
                     last_error = Some(failure.message);
                     continue;
                 }
                 return Err(ApiError::upstream(StatusCode::BAD_GATEWAY, failure.message));
             }
         };
+        metrics.record_retries(response.attempts().saturating_sub(1) as u64);
         if response.status().is_success() {
+            metrics.record_route(&provider_key, &upstream_model);
             return Ok(RoutedResponse { response, wire_api });
         }
         let status = response.status();
@@ -560,6 +1098,7 @@ where
         let body = response.text().await.unwrap_or_default();
         let message = format!("upstream returned {status}: {body}");
         if index + 1 < candidate_count && upstream::failover_eligible(class) {
+            metrics.record_failover();
             last_error = Some(message);
             continue;
         }
@@ -624,6 +1163,12 @@ struct Metrics {
     failures: Arc<AtomicU64>,
     tool_calls: Arc<AtomicU64>,
     browser_tool_calls: Arc<AtomicU64>,
+    input_tokens: Arc<AtomicU64>,
+    output_tokens: Arc<AtomicU64>,
+    retries: Arc<AtomicU64>,
+    failovers: Arc<AtomicU64>,
+    duration_buckets: Arc<[AtomicU64; 10]>,
+    route_breakdown: Arc<std::sync::Mutex<BTreeMap<(String, String), u64>>>,
     tool_call_breakdown: Arc<std::sync::Mutex<BTreeMap<String, u64>>>,
     request_events:
         Arc<std::sync::Mutex<std::collections::VecDeque<dashboard::DashboardRequestEvent>>>,
@@ -639,6 +1184,12 @@ impl Default for Metrics {
             failures: Arc::new(AtomicU64::new(0)),
             tool_calls: Arc::new(AtomicU64::new(0)),
             browser_tool_calls: Arc::new(AtomicU64::new(0)),
+            input_tokens: Arc::new(AtomicU64::new(0)),
+            output_tokens: Arc::new(AtomicU64::new(0)),
+            retries: Arc::new(AtomicU64::new(0)),
+            failovers: Arc::new(AtomicU64::new(0)),
+            duration_buckets: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
+            route_breakdown: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             tool_call_breakdown: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             request_events: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::with_capacity(200),
@@ -648,6 +1199,52 @@ impl Default for Metrics {
 }
 
 impl Metrics {
+    fn record_retries(&self, count: u64) {
+        if count > 0 {
+            self.retries.fetch_add(count, Ordering::Relaxed);
+            observe_request(|request| request.retries = request.retries.saturating_add(count));
+        }
+    }
+
+    fn record_failover(&self) {
+        self.failovers.fetch_add(1, Ordering::Relaxed);
+        observe_request(|request| request.failovers = request.failovers.saturating_add(1));
+    }
+
+    fn record_route(&self, provider: &str, model: &str) {
+        observe_request(|request| {
+            request.provider = Some(provider.to_owned());
+            request.model = Some(model.to_owned());
+        });
+        let mut routes = self
+            .route_breakdown
+            .lock()
+            .expect("route metrics lock poisoned");
+        if let Some(count) = routes.get_mut(&(provider.to_owned(), model.to_owned())) {
+            *count = count.saturating_add(1);
+        } else if routes.len() < 256 {
+            routes.insert((provider.to_owned(), model.to_owned()), 1);
+        } else {
+            *routes.entry(("other".into(), "other".into())).or_default() += 1;
+        }
+    }
+
+    fn record_usage(&self, usage: TokenUsage) {
+        self.input_tokens.fetch_add(usage.input, Ordering::Relaxed);
+        self.output_tokens
+            .fetch_add(usage.output, Ordering::Relaxed);
+        observe_request(|request| request.usage = Some(usage));
+    }
+
+    fn record_duration(&self, duration: Duration) {
+        const BOUNDS_MS: [u64; 9] = [10, 25, 50, 100, 250, 500, 1_000, 5_000, 30_000];
+        let millis = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+        let index = BOUNDS_MS
+            .iter()
+            .position(|bound| millis <= *bound)
+            .unwrap_or(9);
+        self.duration_buckets[index].fetch_add(1, Ordering::Relaxed);
+    }
     fn record_tool_call(&self, namespace: Option<&str>, name: &str) {
         self.tool_calls.fetch_add(1, Ordering::Relaxed);
         let normalized_namespace = namespace.unwrap_or("function");
@@ -706,13 +1303,22 @@ async fn record_request(State(metrics): State<Metrics>, request: Request, next: 
     let _active = ActiveRequest {
         metrics: metrics.clone(),
     };
-    let response = next.run(request).await;
+    let observation = Arc::new(std::sync::Mutex::new(RequestEconomics::default()));
+    let response = REQUEST_ECONOMICS
+        .scope(observation.clone(), next.run(request))
+        .await;
     let status = response.status();
     if response.status().is_success() {
         metrics.successes.fetch_add(1, Ordering::Relaxed);
     } else {
         metrics.failures.fetch_add(1, Ordering::Relaxed);
     }
+    let duration = started.elapsed();
+    metrics.record_duration(duration);
+    let observation = observation
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_default();
     let mut events = metrics
         .request_events
         .lock()
@@ -724,9 +1330,13 @@ async fn record_request(State(metrics): State<Metrics>, request: Request, next: 
         method,
         path,
         status: status.as_u16(),
-        duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-        provider: None,
-        model: None,
+        duration_ms: duration.as_millis().min(u128::from(u64::MAX)) as u64,
+        provider: observation.provider,
+        model: observation.model,
+        retries: observation.retries,
+        failovers: observation.failovers,
+        input_tokens: observation.usage.map(|usage| usage.input),
+        output_tokens: observation.usage.map(|usage| usage.output),
     });
     response
 }
@@ -983,6 +1593,7 @@ async fn anthropic_messages(
         routable_model,
         &state.retry_policy,
         &state.upstream_runtime,
+        &state.metrics,
         None,
         |upstream_model, wire_api| match wire_api {
             crate::provider::WireApi::AnthropicMessages => {
@@ -1005,15 +1616,25 @@ async fn anthropic_messages(
         .unwrap_or(false)
     {
         if response.wire_api == crate::provider::WireApi::AnthropicMessages {
+            if !request
+                .get("stream")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                let body = response.response.json::<Value>().await.map_err(|error| {
+                    ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string())
+                })?;
+                observe_usage_value(&state.metrics, &body);
+                return Ok(ResponseBody::Json(Json(body)));
+            }
             let status = response.response.status();
             let content_type = response
                 .response
                 .headers()
                 .get(header::CONTENT_TYPE)
                 .cloned();
-            let stream = response
-                .response
-                .bytes_stream()
+            let stream = response.response.bytes_stream();
+            let stream = usage_observing_stream(stream, state.metrics.clone())
                 .map_err(std::io::Error::other);
             let mut builder = Response::builder().status(status);
             if let Some(content_type) = content_type {
@@ -1045,6 +1666,7 @@ async fn anthropic_messages(
         } else {
             protocol::chat_to_anthropic_response(body, requested_model, &declared_tools)?
         };
+        observe_usage_value(&state.metrics, &body);
         Ok(ResponseBody::Json(Json(body)))
     }
 }
@@ -1279,6 +1901,7 @@ async fn chat_completions(
         &requested_model,
         &state.retry_policy,
         &state.upstream_runtime,
+        &state.metrics,
         local_key,
         |upstream_model, wire_api| {
             if wire_api != crate::provider::WireApi::OpenAiChat {
@@ -1298,10 +1921,9 @@ async fn chat_completions(
         .headers()
         .get(header::CONTENT_TYPE)
         .cloned();
-    let stream = response
-        .response
-        .bytes_stream()
-        .map_err(std::io::Error::other);
+    let stream = response.response.bytes_stream();
+    let stream =
+        usage_observing_stream(stream, state.metrics.clone()).map_err(std::io::Error::other);
     let mut builder = Response::builder().status(status);
     if let Some(content_type) = content_type {
         builder = builder.header(header::CONTENT_TYPE, content_type);
@@ -1481,6 +2103,10 @@ pub async fn serve_dashboard(
                 failures: metrics.failures.load(Ordering::Relaxed),
                 tool_calls: metrics.tool_calls.load(Ordering::Relaxed),
                 browser_tool_calls: metrics.browser_tool_calls.load(Ordering::Relaxed),
+                input_tokens: metrics.input_tokens.load(Ordering::Relaxed),
+                output_tokens: metrics.output_tokens.load(Ordering::Relaxed),
+                retries: metrics.retries.load(Ordering::Relaxed),
+                failovers: metrics.failovers.load(Ordering::Relaxed),
                 providers: provider_statuses
                     .into_iter()
                     .map(|status| dashboard::DashboardProviderRuntimeSnapshot {
@@ -1980,6 +2606,8 @@ fn build_router_with_selection_and_metrics(
         .route("/v1/responses", post(responses))
         .route("/v1/responses/compact", post(compact_responses))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/images/generations", post(image_generations))
+        .route("/v1/images/edits", post(image_edits))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/messages/count_tokens", post(anthropic_count_tokens))
         .route("/v1internal:fetchAvailableModels", post(antigravity_bridge))
@@ -1990,6 +2618,7 @@ fn build_router_with_selection_and_metrics(
         )
         .route("/v1internal:{*path}", any(antigravity_bridge))
         .route("/v1beta/models", get(antigravity_bridge))
+        .route("/v1beta/models/{*path}", any(gemini_models_bridge))
         .route("/v1beta/{*path}", any(antigravity_bridge))
         .route_layer(middleware::from_fn_with_state(
             AuthPolicy {
@@ -2260,6 +2889,7 @@ async fn responses(
         &requested_model,
         &state.retry_policy,
         &state.upstream_runtime,
+        &state.metrics,
         local_key,
         |upstream_model, wire_api| match wire_api {
             crate::provider::WireApi::OpenAiResponses => {
@@ -2288,9 +2918,8 @@ async fn responses(
                 .headers()
                 .get(header::CONTENT_TYPE)
                 .cloned();
-            let stream = response
-                .response
-                .bytes_stream()
+            let stream = response.response.bytes_stream();
+            let stream = usage_observing_stream(stream, state.metrics.clone())
                 .map_err(std::io::Error::other);
             let mut builder = Response::builder().status(status);
             if let Some(content_type) = content_type {
@@ -2329,6 +2958,7 @@ async fn responses(
             )?
         };
         state.metrics.record_responses_tool_calls(&response);
+        observe_usage_value(&state.metrics, &response);
         Ok(ResponseBody::Json(Json(response)))
     }
 }
@@ -2393,6 +3023,7 @@ where
                 break;
             }
             let Ok(chunk) = serde_json::from_str::<Value>(data) else { continue; };
+            observe_usage_value(&metrics, &chunk);
             terminal |= chunk
                 .pointer("/choices/0/finish_reason")
                 .is_some_and(|reason| !reason.is_null());
@@ -2428,6 +3059,47 @@ mod tests {
     use axum::body::to_bytes;
     use http::Request as HttpRequest;
     use tower::ServiceExt;
+
+    #[test]
+    fn parses_supported_usage_shapes_without_payload_data() {
+        assert_eq!(
+            parse_token_usage(&json!({"usage":{"input_tokens":12,"output_tokens":3}}))
+                .unwrap()
+                .input,
+            12
+        );
+        assert_eq!(
+            parse_token_usage(&json!({"usage":{"prompt_tokens":7,"completion_tokens":5}}))
+                .unwrap()
+                .output,
+            5
+        );
+        assert_eq!(
+            parse_token_usage(
+                &json!({"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":4}})
+            )
+            .unwrap(),
+            TokenUsage {
+                input: 9,
+                output: 4,
+            }
+        );
+        assert!(
+            parse_token_usage(&json!({"prompt":"private", "tool":{"arguments":"private"}}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn route_distribution_is_cardinality_bounded() {
+        let metrics = Metrics::default();
+        for index in 0..300 {
+            metrics.record_route(&format!("provider-{index}"), &format!("model-{index}"));
+        }
+        let routes = metrics.route_breakdown.lock().unwrap();
+        assert!(routes.len() <= 257);
+        assert_eq!(routes.get(&("other".into(), "other".into())), Some(&44));
+    }
 
     fn fixture_registry() -> Registry {
         use crate::sources::{DiscoveredCatalog, DiscoveredModel, DiscoveredProvider};
@@ -3028,6 +3700,7 @@ mod tests {
                 max_delay: Duration::ZERO,
             },
             &upstream::Runtime::new(8, Duration::ZERO),
+            &Metrics::default(),
             None,
             |model, _| Ok(json!({"model": model})),
         )

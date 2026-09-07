@@ -106,6 +106,9 @@ impl ComboRoute {
 pub enum Credential {
     None,
     Bearer(String),
+    /// An API key for Google's public Gemini API. Unlike OAuth credentials,
+    /// this is sent in `x-goog-api-key`, not as a bearer token.
+    GoogleApiKey(String),
     BearerPool(Arc<BearerPool>),
     Copilot(CopilotCredential),
 }
@@ -236,6 +239,9 @@ impl Provider {
         match &self.credential {
             Credential::None => {}
             Credential::Bearer(token) => insert_bearer(&mut headers, token)?,
+            Credential::GoogleApiKey(token) => {
+                headers.insert("x-goog-api-key", HeaderValue::from_str(token)?);
+            }
             Credential::BearerPool(pool) => insert_bearer(&mut headers, pool.next())?,
             Credential::Copilot(credential) => {
                 let (token, discovered_base_url) = credential.exchange(client).await?;

@@ -673,7 +673,7 @@ async fn generate(
     }
 }
 
-fn gemini_to_chat(request: &Value, upstream_model: &str, stream: bool) -> Value {
+pub(crate) fn gemini_to_chat(request: &Value, upstream_model: &str, stream: bool) -> Value {
     let mut messages = Vec::new();
     if let Some(parts) = request
         .pointer("/systemInstruction/parts")
@@ -780,7 +780,7 @@ fn gemini_to_chat(request: &Value, upstream_model: &str, stream: bool) -> Value 
     output
 }
 
-fn chat_to_gemini(chat: &Value) -> Value {
+pub(crate) fn chat_to_gemini(chat: &Value) -> Value {
     let message = chat.pointer("/choices/0/message").unwrap_or(&Value::Null);
     let mut parts = Vec::new();
     if let Some(reasoning) = message

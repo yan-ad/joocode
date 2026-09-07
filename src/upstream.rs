@@ -21,6 +21,89 @@ pub enum FailureClass {
     Provider,
 }
 
+/// Send an already encoded request body while retaining the same provider
+/// concurrency, retry, cooldown, and health accounting used by JSON routes.
+/// Bytes are cheaply cloneable, which also makes retrying multipart requests
+/// safe without buffering them a second time.
+pub async fn send_bytes(
+    client: &Client,
+    url: &str,
+    headers: &HeaderMap,
+    body: &Bytes,
+    policy: &RetryPolicy,
+    budget: RouteBudget<'_>,
+) -> Result<UpstreamResponse, SendFailure> {
+    let attempts = policy.max_attempts.max(1);
+    let mut delay = policy.initial_delay;
+    let permit = budget
+        .runtime
+        .acquire(budget.provider, budget.wait_for_cooldown)
+        .await?;
+    for attempt in 1..=attempts {
+        let started = Instant::now();
+        match client
+            .post(url)
+            .headers(headers.clone())
+            .body(body.clone())
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let class = classify_status(response.status());
+                let success = response.status().is_success();
+                if success || class != FailureClass::InvalidRequest {
+                    budget
+                        .runtime
+                        .record_result(budget.provider, started.elapsed(), success)
+                        .await;
+                }
+                if attempt < attempts && retry_same_provider(class) {
+                    let wait = retry_after(&response)
+                        .unwrap_or(delay)
+                        .min(policy.max_delay);
+                    tokio::time::sleep(wait).await;
+                    delay = delay.saturating_mul(2).min(policy.max_delay);
+                    continue;
+                }
+                if failover_eligible(class) {
+                    budget
+                        .runtime
+                        .mark_cooldown(budget.provider, retry_after(&response))
+                        .await;
+                }
+                return Ok(UpstreamResponse {
+                    response,
+                    _permit: permit,
+                    attempts: attempt,
+                });
+            }
+            Err(error) => {
+                let class = if error.is_timeout() {
+                    FailureClass::Timeout
+                } else {
+                    FailureClass::Transport
+                };
+                budget
+                    .runtime
+                    .record_result(budget.provider, started.elapsed(), false)
+                    .await;
+                if attempt < attempts {
+                    tokio::time::sleep(delay.min(policy.max_delay)).await;
+                    delay = delay.saturating_mul(2).min(policy.max_delay);
+                    continue;
+                }
+                budget.runtime.mark_cooldown(budget.provider, None).await;
+                return Err(SendFailure {
+                    class,
+                    message: error.to_string(),
+                    attempts: attempt,
+                });
+            }
+        }
+    }
+    unreachable!("at least one upstream attempt is always made")
+}
+
 #[derive(Clone, Debug)]
 pub struct RetryPolicy {
     pub max_attempts: usize,
@@ -151,6 +234,7 @@ impl Runtime {
                 return Err(SendFailure {
                     class: FailureClass::Cooldown,
                     message: format!("provider '{provider}' is cooling down"),
+                    attempts: 0,
                 });
             }
         }
@@ -167,6 +251,7 @@ impl Runtime {
             .map_err(|error| SendFailure {
                 class: FailureClass::Transport,
                 message: format!("provider concurrency gate closed: {error}"),
+                attempts: 0,
             })?;
         if !self.inner.min_interval.is_zero() {
             let wait = {
@@ -338,6 +423,7 @@ pub struct ProviderStatus {
 pub struct SendFailure {
     pub class: FailureClass,
     pub message: String,
+    pub attempts: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -350,9 +436,13 @@ pub struct RouteBudget<'a> {
 pub struct UpstreamResponse {
     response: Response,
     _permit: OwnedSemaphorePermit,
+    attempts: usize,
 }
 
 impl UpstreamResponse {
+    pub fn attempts(&self) -> usize {
+        self.attempts
+    }
     pub fn status(&self) -> StatusCode {
         self.response.status()
     }
@@ -373,6 +463,7 @@ impl UpstreamResponse {
         let UpstreamResponse {
             response,
             _permit: permit,
+            attempts: _,
         } = self;
         let stream = async_stream::stream! {
             let _permit = permit;
@@ -434,6 +525,7 @@ pub async fn send_json(
                 return Ok(UpstreamResponse {
                     response,
                     _permit: permit,
+                    attempts: attempt,
                 });
             }
             Err(error) => {
@@ -455,6 +547,7 @@ pub async fn send_json(
                 return Err(SendFailure {
                     class,
                     message: error.to_string(),
+                    attempts: attempt,
                 });
             }
         }

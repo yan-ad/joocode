@@ -32,6 +32,10 @@ fn draw_usage_page(frame: &mut Frame<'_>, area: Rect, runtime: &DashboardRuntime
             "Tool calls: {}   Browser/computer: {}",
             runtime.tool_calls, runtime.browser_tool_calls
         )),
+        Line::from(format!(
+            "Tokens: {} in / {} out   Retries: {}   Failovers: {}",
+            runtime.input_tokens, runtime.output_tokens, runtime.retries, runtime.failovers
+        )),
         Line::from(""),
         Line::from("Provider                  State          Latency   Cooldown"),
     ];
@@ -96,8 +100,22 @@ fn draw_logs_page(frame: &mut Frame<'_>, area: Rect, events: &[DashboardRequestE
                     _ => String::new(),
                 };
                 Line::from(format!(
-                    "{:<6} {:<30} {:>3} {:>6}ms{}",
-                    event.method, event.path, event.status, event.duration_ms, route
+                    "{:<6} {:<25} {:>3} {:>6}ms r{} f{} {}→{}{}",
+                    event.method,
+                    event.path,
+                    event.status,
+                    event.duration_ms,
+                    event.retries,
+                    event.failovers,
+                    event
+                        .input_tokens
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "?".into()),
+                    event
+                        .output_tokens
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "?".into()),
+                    route
                 ))
             })
             .collect()
@@ -134,6 +152,10 @@ pub struct DashboardRuntimeSnapshot {
     pub failures: u64,
     pub tool_calls: u64,
     pub browser_tool_calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub retries: u64,
+    pub failovers: u64,
     pub providers: Vec<DashboardProviderRuntimeSnapshot>,
 }
 
@@ -157,6 +179,10 @@ pub struct DashboardRequestEvent {
     pub duration_ms: u64,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub retries: u64,
+    pub failovers: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
 }
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -2588,6 +2614,10 @@ mod tests {
                 duration_ms: 12,
                 provider: None,
                 model: None,
+                retries: 0,
+                failovers: 0,
+                input_tokens: None,
+                output_tokens: None,
             }],
         })
         .unwrap();
