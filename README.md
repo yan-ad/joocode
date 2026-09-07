@@ -610,11 +610,18 @@ curl http://127.0.0.1:10100/v1/models
 `/healthz` reports process liveness. `/readyz` reports whether the provider
 registry can route requests and returns model/provider counts plus `ready`,
 `degraded`, or `failed` status. `/api/status` exposes privacy-safe in-memory
-uptime and request counters without storing prompts, bodies, or response content.
+uptime and request counters plus passive provider runtime state: active requests,
+concurrency capacity, and cooldown time. It never stores prompts, bodies, or
+response content.
 
 ```bash
 jcx stats
+jcx reload
 ```
+
+`jcx reload` atomically re-discovers enabled provider sources in the running
+proxy. If discovery fails or produces an empty registry, the existing registry
+remains active. Remote management calls use the same `JOOCODE_API_AUTH_TOKEN`.
 
 Create a response:
 

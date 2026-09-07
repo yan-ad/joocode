@@ -1262,6 +1262,7 @@ async fn prepare_server(
     }
 }
 
+#[cfg(test)]
 fn build_router(registry: RegistryStore, policy: &ServerPolicy) -> Router {
     build_router_with_selection(registry, policy, None)
 }
@@ -1776,8 +1777,26 @@ mod tests {
         assert_eq!(body["active_requests"], 1);
         assert_eq!(body["successful_responses"], 1);
         assert_eq!(body["failed_responses"], 0);
+        assert!(body["provider_statuses"].is_array());
         assert!(body.get("prompt").is_none());
         assert!(body.get("body").is_none());
+    }
+
+    #[tokio::test]
+    async fn reload_is_unavailable_without_source_selection() {
+        let app = build_router(
+            RegistryStore::new(fixture_registry()),
+            &policy(false, None, &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let response = app
+            .oneshot(
+                HttpRequest::post("/api/reload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]

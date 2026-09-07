@@ -449,6 +449,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_status_reports_cooldown_and_capacity() {
+        let runtime = Runtime::new(2, Duration::from_secs(1));
+        runtime.mark_cooldown("busy", None).await;
+        let statuses = runtime
+            .provider_statuses(&["busy".into(), "idle".into()])
+            .await;
+        assert_eq!(statuses[0].state, "cooling_down");
+        assert!(statuses[0].cooldown_ms > 0);
+        assert_eq!(statuses[1].state, "available");
+        assert_eq!(statuses[1].active_requests, 0);
+        assert_eq!(statuses[1].concurrency_limit, 2);
+    }
+
+    #[tokio::test]
     async fn concurrency_permit_is_held_until_the_body_finishes() {
         let app = Router::new().route(
             "/v1/chat/completions",

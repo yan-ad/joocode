@@ -306,9 +306,12 @@ Native adapters should preserve:
 
 Add bounded, privacy-safe statistics without storing prompt or response content.
 
-**Status: foundation shipped.** `jcx stats` and `GET /api/status` report uptime,
-provider/model counts, total and active requests, successes, and failures.
-Token, latency, provider distribution, retry, and cooldown metrics remain pending.
+**Status: management foundation shipped.** `jcx stats` and `GET /api/status`
+report uptime, provider/model counts, total and active requests, successes,
+failures, provider concurrency usage, and cooldown state. `jcx reload` and
+`POST /api/reload` atomically refresh enabled sources while retaining the old
+registry on failure. Token, latency, provider distribution, retry, and failover
+metrics remain pending.
 
 Suggested CLI:
 
@@ -335,6 +338,9 @@ GET  /api/providers
 GET  /api/metrics
 POST /api/reload
 ```
+
+`/api/status` and `/api/reload` are shipped. Dedicated provider and metrics
+endpoints remain pending.
 
 ## P5 — Optional ecosystem work
 
