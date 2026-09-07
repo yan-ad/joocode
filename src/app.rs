@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 async fn antigravity_bridge(
@@ -18,6 +18,28 @@ async fn antigravity_bridge(
 ) -> Result<Response, ApiError> {
     let registry = state.registry.snapshot();
     antigravity::handle(&registry, method, uri, headers, body).await
+}
+
+async fn remote_rate_limit(
+    State(limiter): State<RateLimiter>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if limiter.allow().await {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "1")],
+            Json(json!({
+                "error": {
+                    "type": "rate_limit_error",
+                    "message": "Joocode remote request rate limit exceeded"
+                }
+            })),
+        )
+            .into_response()
+    }
 }
 
 fn prometheus_label(value: &str) -> String {
@@ -83,6 +105,36 @@ async fn api_metrics(State(state): State<AppState>) -> impl IntoResponse {
         "counter",
         state.metrics.failures.load(Ordering::Relaxed)
     );
+    metric!(
+        "joocode_tool_calls_total",
+        "Tool calls returned to downstream clients.",
+        "counter",
+        state.metrics.tool_calls.load(Ordering::Relaxed)
+    );
+    metric!(
+        "joocode_codex_browser_tool_calls_total",
+        "Codex browser or computer-control tool calls returned to clients.",
+        "counter",
+        state.metrics.browser_tool_calls.load(Ordering::Relaxed)
+    );
+    output.push_str(
+        "# HELP joocode_tool_call_total Tool calls grouped by namespace and tool name.\n\
+# TYPE joocode_tool_call_total counter\n",
+    );
+    for (tool, count) in state
+        .metrics
+        .tool_call_breakdown
+        .lock()
+        .expect("tool-call metrics lock poisoned")
+        .iter()
+    {
+        let (namespace, name) = tool.split_once('/').unwrap_or(("function", tool));
+        output.push_str(&format!(
+            "joocode_tool_call_total{{namespace=\"{}\",tool=\"{}\"}} {count}\n",
+            prometheus_label(namespace),
+            prometheus_label(name)
+        ));
+    }
     output.push_str(
         "# HELP joocode_provider_active_requests Active requests for a provider route.\n\
 # TYPE joocode_provider_active_requests gauge\n\
@@ -179,6 +231,8 @@ async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
         "active_requests": state.metrics.active.load(Ordering::Relaxed),
         "successful_responses": state.metrics.successes.load(Ordering::Relaxed),
         "failed_responses": state.metrics.failures.load(Ordering::Relaxed),
+        "tool_calls": state.metrics.tool_calls.load(Ordering::Relaxed),
+        "codex_browser_tool_calls": state.metrics.browser_tool_calls.load(Ordering::Relaxed),
         "provider_statuses": provider_statuses,
     }))
 }
@@ -245,6 +299,8 @@ pub async fn stats(url: &str, token: Option<&str>) -> anyhow::Result<()> {
     println!("active:    {}", status["active_requests"]);
     println!("successes: {}", status["successful_responses"]);
     println!("failures:  {}", status["failed_responses"]);
+    println!("tool calls: {}", status["tool_calls"]);
+    println!("browser:    {}", status["codex_browser_tool_calls"]);
     if let Some(providers) = status["provider_statuses"].as_array()
         && !providers.is_empty()
     {
@@ -498,9 +554,9 @@ struct AppState {
     stream_idle_timeout: Duration,
     max_sse_event_bytes: usize,
     max_tool_argument_bytes: usize,
+    metrics: Metrics,
     retry_policy: upstream::RetryPolicy,
     upstream_runtime: upstream::Runtime,
-    metrics: Metrics,
 }
 
 #[derive(Clone, Debug)]
@@ -599,6 +655,7 @@ const DEFAULT_MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Debug)]
 struct ServerPolicy {
     auth_token: Option<String>,
+    management_token: Option<String>,
     allowed_origins: Vec<HeaderValue>,
     max_request_bytes: usize,
     stream_idle_timeout: Duration,
@@ -607,6 +664,58 @@ struct ServerPolicy {
     retry_policy: upstream::RetryPolicy,
     upstream_runtime: upstream::Runtime,
     remote: bool,
+    rate_limiter: RateLimiter,
+}
+
+#[derive(Clone, Debug)]
+struct AuthPolicy {
+    remote: bool,
+    token: Option<String>,
+    label: &'static str,
+}
+
+#[derive(Clone, Debug)]
+struct RateLimiter {
+    inner: Arc<tokio::sync::Mutex<RateLimitState>>,
+    rate_per_second: f64,
+    burst: f64,
+    enabled: bool,
+}
+
+#[derive(Debug)]
+struct RateLimitState {
+    tokens: f64,
+    updated: Instant,
+}
+
+impl RateLimiter {
+    fn new(enabled: bool, rate_per_second: usize, burst: usize) -> Self {
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(RateLimitState {
+                tokens: burst as f64,
+                updated: Instant::now(),
+            })),
+            rate_per_second: rate_per_second as f64,
+            burst: burst as f64,
+            enabled,
+        }
+    }
+
+    async fn allow(&self) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        let mut state = self.inner.lock().await;
+        let now = Instant::now();
+        let elapsed = now.duration_since(state.updated).as_secs_f64();
+        state.tokens = (state.tokens + elapsed * self.rate_per_second).min(self.burst);
+        state.updated = now;
+        if state.tokens < 1.0 {
+            return false;
+        }
+        state.tokens -= 1.0;
+        true
+    }
 }
 
 impl ServerPolicy {
@@ -617,6 +726,19 @@ impl ServerPolicy {
             .filter(|value| !value.trim().is_empty());
         if remote && auth_token.is_none() {
             anyhow::bail!("binding to non-loopback address {host} requires JOOCODE_API_AUTH_TOKEN");
+        }
+        let management_token = std::env::var("JOOCODE_MANAGEMENT_AUTH_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        if remote && management_token.is_none() {
+            anyhow::bail!(
+                "binding to non-loopback address {host} requires JOOCODE_MANAGEMENT_AUTH_TOKEN"
+            );
+        }
+        if remote && management_token == auth_token {
+            anyhow::bail!(
+                "JOOCODE_MANAGEMENT_AUTH_TOKEN must differ from JOOCODE_API_AUTH_TOKEN"
+            );
         }
         let allowed_origins = std::env::var("JOOCODE_ALLOWED_ORIGINS")
             .ok()
@@ -669,8 +791,11 @@ impl ServerPolicy {
         )?;
         let retry_policy = upstream::RetryPolicy::from_env()?;
         let upstream_runtime = upstream::Runtime::from_env()?;
+        let rate_per_second = positive_usize_env("JOOCODE_REMOTE_REQUESTS_PER_SECOND", 20)?;
+        let rate_burst = positive_usize_env("JOOCODE_REMOTE_REQUEST_BURST", 40)?;
         Ok(Self {
             auth_token,
+            management_token,
             allowed_origins,
             max_request_bytes,
             stream_idle_timeout,
@@ -679,6 +804,7 @@ impl ServerPolicy {
             retry_policy,
             upstream_runtime,
             remote,
+            rate_limiter: RateLimiter::new(remote, rate_per_second, rate_burst),
         })
     }
 
@@ -704,15 +830,15 @@ impl ServerPolicy {
     }
 }
 
-async fn require_remote_auth(
-    State(policy): State<ServerPolicy>,
+async fn require_auth(
+    State(policy): State<AuthPolicy>,
     mut request: Request,
     next: Next,
 ) -> Response {
     if !policy.remote {
         return next.run(request).await;
     }
-    let expected = policy.auth_token.as_deref().unwrap_or_default();
+    let expected = policy.token.as_deref().unwrap_or_default();
     let authorization = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -733,7 +859,7 @@ async fn require_remote_auth(
     ApiError {
         status: StatusCode::UNAUTHORIZED,
         kind: "authentication_error",
-        message: "missing or invalid Joocode API token".into(),
+        message: format!("missing or invalid Joocode {} token", policy.label),
     }
     .into_response()
 }
@@ -1470,11 +1596,20 @@ fn build_router_with_selection(
         upstream_runtime: policy.upstream_runtime.clone(),
         metrics: metrics.clone(),
     };
-    let protected = Router::new()
+    let management = Router::new()
         .route("/api/status", get(api_status))
         .route("/api/providers", get(api_providers))
         .route("/api/metrics", get(api_metrics))
         .route("/api/reload", post(api_reload))
+        .route_layer(middleware::from_fn_with_state(
+            AuthPolicy {
+                remote: policy.remote,
+                token: policy.management_token.clone(),
+                label: "management",
+            },
+            require_auth,
+        ));
+    let data_plane = Router::new()
         .route("/v1/models", get(models))
         .route("/v1/responses", post(responses))
         .route("/v1/responses/compact", post(compact_responses))
@@ -1491,8 +1626,19 @@ fn build_router_with_selection(
         .route("/v1beta/models", get(antigravity_bridge))
         .route("/v1beta/{*path}", any(antigravity_bridge))
         .route_layer(middleware::from_fn_with_state(
-            policy.clone(),
-            require_remote_auth,
+            AuthPolicy {
+                remote: policy.remote,
+                token: policy.auth_token.clone(),
+                label: "API",
+            },
+            require_auth,
+        ));
+    let protected = Router::new()
+        .merge(management)
+        .merge(data_plane)
+        .route_layer(middleware::from_fn_with_state(
+            policy.rate_limiter.clone(),
+            remote_rate_limit,
         ))
         .route_layer(middleware::from_fn_with_state(metrics, record_request));
     Router::new()
@@ -1759,18 +1905,21 @@ async fn responses(
             state.stream_idle_timeout,
             state.max_sse_event_bytes,
             state.max_tool_argument_bytes,
+            state.metrics,
         )))
     } else {
         let chat: Value = response
             .json()
             .await
             .map_err(|e| ApiError::upstream(StatusCode::BAD_GATEWAY, e.to_string()))?;
-        Ok(ResponseBody::Json(Json(protocol::from_chat_response(
+        let response = protocol::from_chat_response(
             chat,
             &requested_model,
             protocol::response_id(),
             &tool_namespaces,
-        )?)))
+        )?;
+        state.metrics.record_responses_tool_calls(&response);
+        Ok(ResponseBody::Json(Json(response)))
     }
 }
 
@@ -1795,6 +1944,7 @@ fn stream_response<S>(
     idle_timeout: Duration,
     max_sse_event_bytes: usize,
     max_tool_argument_bytes: usize,
+    metrics: Metrics,
 ) -> Response
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
@@ -1840,7 +1990,12 @@ where
         }
         let final_events = if terminal {
             match state.completed_events() {
-                Ok(events) => events,
+                Ok(events) => {
+                    for (namespace, name) in state.completed_tool_calls() {
+                        metrics.record_tool_call(namespace.as_deref(), &name);
+                    }
+                    events
+                },
                 Err(error) => state.incomplete_events(&error.message),
             }
         } else {
@@ -1899,6 +2054,7 @@ mod tests {
     fn policy(remote: bool, token: Option<&str>, origins: &[&str], limit: usize) -> ServerPolicy {
         ServerPolicy {
             auth_token: token.map(str::to_owned),
+            management_token: token.map(|token| format!("management-{token}")),
             allowed_origins: origins
                 .iter()
                 .map(|origin| HeaderValue::from_str(origin).unwrap())
@@ -1910,6 +2066,7 @@ mod tests {
             retry_policy: upstream::RetryPolicy::default(),
             upstream_runtime: upstream::Runtime::new(8, Duration::ZERO),
             remote,
+            rate_limiter: RateLimiter::new(remote, 100, 100),
         }
     }
 
@@ -2082,12 +2239,16 @@ mod tests {
                 "joocode_key": headers.contains_key("x-joocode-api-key")
             }))
         }
-        let remote = policy(true, Some("secret"), &[], DEFAULT_MAX_REQUEST_BYTES);
+        let remote = AuthPolicy {
+            remote: true,
+            token: Some("secret".into()),
+            label: "API",
+        };
         let app = Router::new()
             .route("/protected", get(echo_headers))
             .route_layer(middleware::from_fn_with_state(
                 remote.clone(),
-                require_remote_auth,
+                require_auth,
             ));
 
         for (name, value) in [
@@ -2259,6 +2420,7 @@ mod tests {
             Duration::from_millis(1),
             DEFAULT_MAX_SSE_EVENT_BYTES,
             DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
+            Metrics::default(),
         );
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
@@ -2279,6 +2441,7 @@ mod tests {
             Duration::from_secs(1),
             8,
             DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
+            Metrics::default(),
         );
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
@@ -2312,6 +2475,7 @@ mod tests {
             Duration::from_secs(60),
             DEFAULT_MAX_SSE_EVENT_BYTES,
             DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
+            Metrics::default(),
         );
         let mut body = response.into_body().into_data_stream();
         let poll = tokio::time::timeout(Duration::from_millis(10), body.next()).await;
