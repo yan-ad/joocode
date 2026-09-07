@@ -2490,6 +2490,11 @@ pub async fn serve_dashboard(
                             TargetPreferences::set_local_provider(&provider, enabled)?;
                         let registry = Registry::discover(&active_selection).await?;
                         reload_store.replace(registry.clone());
+                        sync_desktop_targets(
+                            registry.clone(),
+                            active_targets.clone(),
+                            reload_base_url.clone(),
+                        );
                         Ok::<_, anyhow::Error>((preferences, registry))
                     }
                     .await;
@@ -2505,6 +2510,11 @@ pub async fn serve_dashboard(
                         let preferences = TargetPreferences::load()?;
                         let registry = Registry::discover(&active_selection).await?;
                         reload_store.replace(registry.clone());
+                        sync_desktop_targets(
+                            registry.clone(),
+                            active_targets.clone(),
+                            reload_base_url.clone(),
+                        );
                         Ok::<_, anyhow::Error>((preferences, registry))
                     }
                     .await;
@@ -2520,6 +2530,11 @@ pub async fn serve_dashboard(
                             TargetPreferences::set_disabled_models(preferences.disabled_models)?;
                         let registry = Registry::discover(&active_selection).await?;
                         reload_store.replace(registry.clone());
+                        sync_desktop_targets(
+                            registry.clone(),
+                            active_targets.clone(),
+                            reload_base_url.clone(),
+                        );
                         Ok::<_, anyhow::Error>((preferences, registry))
                     }
                     .await;
