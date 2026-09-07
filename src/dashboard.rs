@@ -2936,8 +2936,13 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
+        let logs_index = Page::ALL
+            .iter()
+            .position(|page| *page == Page::Logs)
+            .expect("Logs page should be present")
+            + 1;
         assert!(rendered.contains("1 Overview"));
-        assert!(rendered.contains("5 Logs"));
+        assert!(rendered.contains(&format!("{logs_index} Logs")));
         assert!(rendered.contains("No requests have been recorded yet"));
     }
 
