@@ -9,35 +9,35 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub async fn wait_until_ready(base_url: &str, timeout: Duration) -> anyhow::Result<()> {
+    let root = base_url
+        .trim_end_matches('/')
+        .strip_suffix("/v1")
+        .unwrap_or_else(|| base_url.trim_end_matches('/'));
+    let url = format!("{root}/readyz");
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_millis(500))
+        .build()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(response) = client.get(&url).send().await
+            && response.status().is_success()
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("Joocode did not become ready at {url} within {timeout:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn gemini_operation(uri: &axum::http::Uri) -> Option<(&str, bool)> {
     let suffix = uri.path().split("/models/").nth(1)?;
     let (model, operation) = suffix.rsplit_once(':')?;
     if model.is_empty() {
         return None;
-    }
-
-    pub async fn wait_until_ready(base_url: &str, timeout: Duration) -> anyhow::Result<()> {
-        let root = base_url
-            .trim_end_matches('/')
-            .strip_suffix("/v1")
-            .unwrap_or_else(|| base_url.trim_end_matches('/'));
-        let url = format!("{root}/readyz");
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_millis(500))
-            .build()?;
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Ok(response) = client.get(&url).send().await
-                && response.status().is_success()
-            {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                anyhow::bail!("Joocode did not become ready at {url} within {timeout:?}");
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
     }
 
     match operation {

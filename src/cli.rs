@@ -217,7 +217,7 @@ pub enum Command {
         #[arg(long, default_value = "http://127.0.0.1:10100/v1")]
         base_url: String,
         /// Arguments passed directly to Codex.
-        #[arg(last = true, trailing_var_arg = true)]
+        #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
     /// Upgrade Joocode from a checksummed GitHub release.
