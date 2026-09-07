@@ -21,8 +21,9 @@ use async_stream::stream;
 use axum::{
     Json, Router,
     body::{Body, Bytes as AxumBytes},
-    extract::{OriginalUri, State},
-    http::{HeaderMap, Method, StatusCode, header},
+    extract::{DefaultBodyLimit, OriginalUri, Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
@@ -31,7 +32,10 @@ use futures_util::{Stream, TryStreamExt};
 use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt;
 use tokio_util::io::StreamReader;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    trace::TraceLayer,
+};
 use tracing::info;
 
 use crate::{
@@ -49,6 +53,149 @@ use crate::{
 #[derive(Clone)]
 struct AppState {
     registry: RegistryStore,
+    stream_idle_timeout: Duration,
+}
+
+const DEFAULT_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+#[derive(Clone, Debug)]
+struct ServerPolicy {
+    auth_token: Option<String>,
+    allowed_origins: Vec<HeaderValue>,
+    max_request_bytes: usize,
+    stream_idle_timeout: Duration,
+    remote: bool,
+}
+
+impl ServerPolicy {
+    fn from_host(host: IpAddr) -> anyhow::Result<Self> {
+        let remote = !host.is_loopback();
+        let auth_token = std::env::var("JOOCODE_API_AUTH_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        if remote && auth_token.is_none() {
+            anyhow::bail!("binding to non-loopback address {host} requires JOOCODE_API_AUTH_TOKEN");
+        }
+        let allowed_origins = std::env::var("JOOCODE_ALLOWED_ORIGINS")
+            .ok()
+            .into_iter()
+            .flat_map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .map(|origin| {
+                HeaderValue::from_str(&origin)
+                    .with_context(|| format!("invalid JOOCODE_ALLOWED_ORIGINS entry '{origin}'"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let max_request_bytes = std::env::var("JOOCODE_MAX_REQUEST_BYTES")
+            .ok()
+            .map(|value| {
+                value.parse::<usize>().with_context(|| {
+                    format!("JOOCODE_MAX_REQUEST_BYTES must be a positive integer, got '{value}'")
+                })
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_MAX_REQUEST_BYTES);
+        if max_request_bytes == 0 {
+            anyhow::bail!("JOOCODE_MAX_REQUEST_BYTES must be greater than zero");
+        }
+        let stream_idle_timeout = std::env::var("JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS")
+            .ok()
+            .map(|value| {
+                value.parse::<u64>().with_context(|| {
+                    format!(
+                        "JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS must be a positive integer, got '{value}'"
+                    )
+                })
+            })
+            .transpose()?
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_STREAM_IDLE_TIMEOUT);
+        if stream_idle_timeout.is_zero() {
+            anyhow::bail!("JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS must be greater than zero");
+        }
+        Ok(Self {
+            auth_token,
+            allowed_origins,
+            max_request_bytes,
+            stream_idle_timeout,
+            remote,
+        })
+    }
+
+    fn cors_layer(&self) -> CorsLayer {
+        let layer = CorsLayer::new()
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::HeaderName::from_static("x-joocode-api-key"),
+                header::HeaderName::from_static("x-api-key"),
+                header::HeaderName::from_static("anthropic-version"),
+            ]);
+        if self.remote {
+            if self.allowed_origins.is_empty() {
+                layer
+            } else {
+                layer.allow_origin(AllowOrigin::list(self.allowed_origins.clone()))
+            }
+        } else {
+            layer.allow_origin(AllowOrigin::mirror_request())
+        }
+    }
+}
+
+async fn require_remote_auth(
+    State(policy): State<ServerPolicy>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    if !policy.remote {
+        return next.run(request).await;
+    }
+    let expected = policy.auth_token.as_deref().unwrap_or_default();
+    let authorization = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let api_key = request
+        .headers()
+        .get("x-joocode-api-key")
+        .and_then(|value| value.to_str().ok());
+    if api_key.is_some_and(|value| secure_eq(value, expected)) {
+        request.headers_mut().remove("x-joocode-api-key");
+        return next.run(request).await;
+    }
+    if authorization.is_some_and(|value| secure_eq(value, expected)) {
+        request.headers_mut().remove(header::AUTHORIZATION);
+        return next.run(request).await;
+    }
+    ApiError {
+        status: StatusCode::UNAUTHORIZED,
+        kind: "authentication_error",
+        message: "missing or invalid Joocode API token".into(),
+    }
+    .into_response()
+}
+
+fn secure_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut difference = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        difference |= usize::from(
+            left.get(index).copied().unwrap_or_default()
+                ^ right.get(index).copied().unwrap_or_default(),
+        );
+    }
+    difference == 0
 }
 
 async fn anthropic_count_tokens(Json(request): Json<Value>) -> impl IntoResponse {
@@ -103,6 +250,7 @@ async fn anthropic_messages(
         Ok(ResponseBody::Stream(anthropic_stream_response(
             response.bytes_stream(),
             requested_model.to_owned(),
+            state.stream_idle_timeout,
         )))
     } else {
         let chat = response
@@ -115,7 +263,11 @@ async fn anthropic_messages(
     }
 }
 
-fn anthropic_stream_response<S>(upstream: S, requested_model: String) -> Response
+fn anthropic_stream_response<S>(
+    upstream: S,
+    requested_model: String,
+    idle_timeout: Duration,
+) -> Response
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
 {
@@ -135,11 +287,34 @@ where
         let mut text_open = true;
         let mut tools = BTreeMap::<usize, usize>::new();
         let mut next_block = 1_usize;
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut terminal = false;
+        let mut stream_error = None::<String>;
+        loop {
+            let line = match tokio::time::timeout(idle_timeout, lines.next_line()).await {
+                Ok(Ok(Some(line))) => line,
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => {
+                    stream_error = Some(format!("upstream stream failed: {error}"));
+                    break;
+                }
+                Err(_) => {
+                    stream_error = Some(format!(
+                        "upstream stream was idle for {} seconds",
+                        idle_timeout.as_secs()
+                    ));
+                    break;
+                }
+            };
             let Some(data) = line.strip_prefix("data:") else { continue; };
             let data = data.trim();
-            if data == "[DONE]" { break; }
+            if data == "[DONE]" {
+                terminal = true;
+                break;
+            }
             let Ok(chunk) = serde_json::from_str::<Value>(data) else { continue; };
+            terminal |= chunk
+                .pointer("/choices/0/finish_reason")
+                .is_some_and(|reason| !reason.is_null());
             if let Some(text) = chunk.pointer("/choices/0/delta/content").and_then(Value::as_str) {
                 output_tokens = output_tokens.saturating_add((text.len().div_ceil(4)) as u64);
                 yield Ok(Bytes::from(format!(
@@ -196,6 +371,14 @@ where
                     )));
                 }
             }
+        }
+        if !terminal {
+            let message = stream_error.unwrap_or_else(|| "upstream stream ended before completion".into());
+            yield Ok(Bytes::from(format!(
+                "event: error\ndata: {}\n\n",
+                json!({"type":"error","error":{"type":"api_error","message":message}})
+            )));
+            return;
         }
         if text_open {
             yield Ok(Bytes::from(format!(
@@ -665,26 +848,8 @@ async fn prepare_server(
     registry: RegistryStore,
     reclaim_requested_port: bool,
 ) -> anyhow::Result<PreparedServer> {
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/api/hello", get(healthz))
-        .route("/v1/models", get(models))
-        .route("/v1/responses", post(responses))
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/messages", post(anthropic_messages))
-        .route("/v1/messages/count_tokens", post(anthropic_count_tokens))
-        .route("/v1internal:fetchAvailableModels", post(antigravity_bridge))
-        .route("/v1internal:generateContent", post(antigravity_bridge))
-        .route(
-            "/v1internal:streamGenerateContent",
-            post(antigravity_bridge),
-        )
-        .route("/v1internal:{*path}", any(antigravity_bridge))
-        .route("/v1beta/models", get(antigravity_bridge))
-        .route("/v1beta/{*path}", any(antigravity_bridge))
-        .with_state(AppState { registry })
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http());
+    let policy = ServerPolicy::from_host(host)?;
+    let app = build_router(registry, &policy);
     match bind_available(host, port, reclaim_requested_port).await? {
         BindResult::Bound {
             listener,
@@ -700,6 +865,41 @@ async fn prepare_server(
         }
         BindResult::ExistingJoocode => Ok(PreparedServer::ExistingJoocode),
     }
+}
+
+fn build_router(registry: RegistryStore, policy: &ServerPolicy) -> Router {
+    let state = AppState {
+        registry,
+        stream_idle_timeout: policy.stream_idle_timeout,
+    };
+    let protected = Router::new()
+        .route("/v1/models", get(models))
+        .route("/v1/responses", post(responses))
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/messages", post(anthropic_messages))
+        .route("/v1/messages/count_tokens", post(anthropic_count_tokens))
+        .route("/v1internal:fetchAvailableModels", post(antigravity_bridge))
+        .route("/v1internal:generateContent", post(antigravity_bridge))
+        .route(
+            "/v1internal:streamGenerateContent",
+            post(antigravity_bridge),
+        )
+        .route("/v1internal:{*path}", any(antigravity_bridge))
+        .route("/v1beta/models", get(antigravity_bridge))
+        .route("/v1beta/{*path}", any(antigravity_bridge))
+        .route_layer(middleware::from_fn_with_state(
+            policy.clone(),
+            require_remote_auth,
+        ));
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/api/hello", get(healthz))
+        .route("/readyz", get(readyz))
+        .merge(protected)
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(policy.max_request_bytes))
+        .layer(policy.cors_layer())
+        .layer(TraceLayer::new_for_http())
 }
 
 enum PreparedServer {
@@ -839,6 +1039,40 @@ async fn healthz() -> impl IntoResponse {
     )
 }
 
+async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    let registry = state.registry.snapshot();
+    let models = registry.models().len();
+    let providers = registry.provider_count();
+    let source_errors = registry
+        .source_reports()
+        .iter()
+        .filter(|report| report.status == "error")
+        .count();
+    let (status, readiness) = if models == 0 || providers == 0 {
+        (StatusCode::SERVICE_UNAVAILABLE, "failed")
+    } else if source_errors > 0 {
+        (StatusCode::OK, "degraded")
+    } else {
+        (StatusCode::OK, "ready")
+    };
+    (
+        status,
+        [
+            ("x-joocode-service", "joocode"),
+            ("x-joocode-readiness", readiness),
+        ],
+        Json(json!({
+            "ready": status.is_success(),
+            "status": readiness,
+            "service": "joocode",
+            "version": env!("CARGO_PKG_VERSION"),
+            "providers": providers,
+            "models": models,
+            "source_errors": source_errors
+        })),
+    )
+}
+
 async fn models(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let registry = state.registry.snapshot();
     let local_credential = |name: header::HeaderName| {
@@ -932,6 +1166,7 @@ async fn responses(
             response.bytes_stream(),
             requested_model,
             tool_namespaces,
+            state.stream_idle_timeout,
         )))
     } else {
         let chat: Value = response
@@ -965,6 +1200,7 @@ fn stream_response<S>(
     upstream: S,
     requested_model: String,
     tool_namespaces: protocol::ToolNamespaces,
+    idle_timeout: Duration,
 ) -> Response
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
@@ -974,14 +1210,44 @@ where
         for frame in state.created_events() { yield Ok::<Bytes, Infallible>(Bytes::from(frame)); }
         let reader = StreamReader::new(upstream.map_err(std::io::Error::other));
         let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut terminal = false;
+        let mut incomplete_reason = None::<String>;
+        loop {
+            let line = match tokio::time::timeout(idle_timeout, lines.next_line()).await {
+                Ok(Ok(Some(line))) => line,
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => {
+                    incomplete_reason = Some(format!("upstream stream failed: {error}"));
+                    break;
+                }
+                Err(_) => {
+                    incomplete_reason = Some(format!(
+                        "upstream stream was idle for {} seconds",
+                        idle_timeout.as_secs()
+                    ));
+                    break;
+                }
+            };
             let Some(data) = line.strip_prefix("data:") else { continue; };
             let data = data.trim();
-            if data == "[DONE]" { break; }
+            if data == "[DONE]" {
+                terminal = true;
+                break;
+            }
             let Ok(chunk) = serde_json::from_str::<Value>(data) else { continue; };
+            terminal |= chunk
+                .pointer("/choices/0/finish_reason")
+                .is_some_and(|reason| !reason.is_null());
             for frame in state.consume_chunk(&chunk) { yield Ok(Bytes::from(frame)); }
         }
-        for frame in state.completed_events() { yield Ok(Bytes::from(frame)); }
+        let final_events = if terminal {
+            state.completed_events()
+        } else {
+            state.incomplete_events(
+                incomplete_reason.as_deref().unwrap_or("upstream stream ended before completion")
+            )
+        };
+        for frame in final_events { yield Ok(Bytes::from(frame)); }
     };
     Response::builder()
         .header(header::CONTENT_TYPE, "text/event-stream")
@@ -993,9 +1259,273 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+    use http::Request as HttpRequest;
+    use tower::ServiceExt;
+
+    fn fixture_registry() -> Registry {
+        use crate::sources::{DiscoveredCatalog, DiscoveredModel, DiscoveredProvider};
+        use reqwest::{Client, header::HeaderMap};
+
+        let model = ModelInfo {
+            id: "fixture/model-a".into(),
+            provider: "fixture".into(),
+            upstream_id: "model-a".into(),
+            name: "Model A".into(),
+            reasoning: false,
+            context_window: Some(128_000),
+            max_output_tokens: Some(8_192),
+        };
+        Registry::from_catalogs_for_test(
+            Client::new(),
+            vec![Ok(DiscoveredCatalog {
+                source: "fixture".into(),
+                detail: None,
+                providers: vec![DiscoveredProvider {
+                    key: "fixture".into(),
+                    provider: crate::provider::Provider {
+                        base_url: "https://example.test/v1".into(),
+                        credential: crate::provider::Credential::None,
+                        headers: HeaderMap::new(),
+                    },
+                    models: vec![DiscoveredModel { info: model }],
+                }],
+            })],
+        )
+        .unwrap()
+    }
+
+    fn policy(remote: bool, token: Option<&str>, origins: &[&str], limit: usize) -> ServerPolicy {
+        ServerPolicy {
+            auth_token: token.map(str::to_owned),
+            allowed_origins: origins
+                .iter()
+                .map(|origin| HeaderValue::from_str(origin).unwrap())
+                .collect(),
+            max_request_bytes: limit,
+            stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+            remote,
+        }
+    }
+
     #[tokio::test]
     async fn health_route_is_available() {
         assert_eq!(healthz().await.into_response().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_loaded_registry() {
+        let app = build_router(
+            RegistryStore::new(fixture_registry()),
+            &policy(false, None, &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let response = app
+            .oneshot(HttpRequest::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("x-joocode-readiness").unwrap(),
+            "ready"
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["models"], 1);
+        assert_eq!(body["providers"], 1);
+    }
+
+    #[tokio::test]
+    async fn remote_data_plane_requires_the_configured_token() {
+        let app = build_router(
+            RegistryStore::new(fixture_registry()),
+            &policy(true, Some("secret"), &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let unauthorized = app
+            .clone()
+            .oneshot(HttpRequest::get("/v1/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app
+            .oneshot(
+                HttpRequest::get("/v1/models")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn remote_admission_token_is_removed_before_the_handler() {
+        async fn echo_headers(headers: HeaderMap) -> Json<Value> {
+            Json(json!({
+                "authorization": headers.contains_key(header::AUTHORIZATION),
+                "joocode_key": headers.contains_key("x-joocode-api-key")
+            }))
+        }
+        let remote = policy(true, Some("secret"), &[], DEFAULT_MAX_REQUEST_BYTES);
+        let app = Router::new()
+            .route("/protected", get(echo_headers))
+            .route_layer(middleware::from_fn_with_state(
+                remote.clone(),
+                require_remote_auth,
+            ));
+
+        for (name, value) in [
+            (header::AUTHORIZATION, "Bearer secret"),
+            (
+                header::HeaderName::from_static("x-joocode-api-key"),
+                "secret",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    HttpRequest::get("/protected")
+                        .header(name, value)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body, json!({"authorization":false,"joocode_key":false}));
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_fails_when_the_registry_has_no_routes() {
+        use reqwest::Client;
+
+        let registry = Registry::from_catalogs_for_test(Client::new(), vec![]).unwrap();
+        let app = build_router(
+            RegistryStore::new(registry),
+            &policy(false, None, &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let response = app
+            .oneshot(HttpRequest::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get("x-joocode-readiness").unwrap(),
+            "failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_data_plane_remains_zero_configuration() {
+        let app = build_router(
+            RegistryStore::new(fixture_registry()),
+            &policy(false, None, &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let response = app
+            .oneshot(HttpRequest::get("/v1/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn remote_cors_only_allows_configured_origins() {
+        let app = build_router(
+            RegistryStore::new(fixture_registry()),
+            &policy(
+                true,
+                Some("secret"),
+                &["https://allowed.example"],
+                DEFAULT_MAX_REQUEST_BYTES,
+            ),
+        );
+        let allowed = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/v1/models")
+                    .header(header::ORIGIN, "https://allowed.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            allowed
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "https://allowed.example"
+        );
+        let denied = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/v1/models")
+                    .header(header::ORIGIN, "https://denied.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            denied
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn request_bodies_are_bounded() {
+        let app = build_router(
+            RegistryStore::new(fixture_registry()),
+            &policy(false, None, &[], 32),
+        );
+        let response = app
+            .oneshot(
+                HttpRequest::post("/v1/responses")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(vec![b'x'; 64]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn stalled_responses_stream_is_reported_as_incomplete() {
+        let upstream = futures_util::stream::pending::<Result<Bytes, reqwest::Error>>();
+        let response = stream_response(
+            upstream,
+            "fixture/model-a".into(),
+            protocol::ToolNamespaces::default(),
+            Duration::from_millis(1),
+        );
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("event: response.incomplete"));
+        assert!(body.contains("upstream_stream_interrupted"));
+        assert!(!body.contains("event: response.completed"));
+    }
+
+    #[tokio::test]
+    async fn stalled_anthropic_stream_emits_an_error_event() {
+        let upstream = futures_util::stream::pending::<Result<Bytes, reqwest::Error>>();
+        let response =
+            anthropic_stream_response(upstream, "fixture/model-a".into(), Duration::from_millis(1));
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("event: error"));
+        assert!(body.contains("upstream stream was idle"));
+        assert!(!body.contains("event: message_stop"));
     }
 
     #[test]

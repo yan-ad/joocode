@@ -542,8 +542,13 @@ original provider source. It does not expose provider credentials to the client.
 
 ```bash
 curl http://127.0.0.1:10100/healthz
+curl http://127.0.0.1:10100/readyz
 curl http://127.0.0.1:10100/v1/models
 ```
+
+`/healthz` reports process liveness. `/readyz` reports whether the provider
+registry can route requests and returns model/provider counts plus `ready`,
+`degraded`, or `failed` status.
 
 Create a response:
 
@@ -559,6 +564,47 @@ curl http://127.0.0.1:10100/v1/responses \
 
 Use `POST /v1/chat/completions` for OpenAI-compatible clients. Both endpoints
 support SSE streaming and tool calls.
+
+### LAN or remote binding
+
+Loopback keeps the zero-configuration placeholder-key behavior. Binding to a
+LAN/non-loopback interface requires a real Joocode admission token:
+
+```bash
+export JOOCODE_API_AUTH_TOKEN='replace-with-a-long-random-token'
+export JOOCODE_ALLOWED_ORIGINS='https://app.example.com,https://admin.example.com'
+jcx serve --host 0.0.0.0 --port 10100
+```
+
+Remote clients must send either:
+
+```text
+Authorization: Bearer <JOOCODE_API_AUTH_TOKEN>
+```
+
+or:
+
+```text
+x-joocode-api-key: <JOOCODE_API_AUTH_TOKEN>
+```
+
+Joocode rejects non-loopback startup without `JOOCODE_API_AUTH_TOKEN`. Remote
+CORS is disabled unless origins are listed in `JOOCODE_ALLOWED_ORIGINS`.
+Admission credentials are removed before forwarding requests upstream.
+
+Request bodies are limited to 16 MiB by default. Override the limit in bytes:
+
+```bash
+export JOOCODE_MAX_REQUEST_BYTES=33554432
+```
+
+Streaming upstreams have a 90-second idle timeout. A stalled Responses stream is
+reported as `response.incomplete`; an Anthropic Messages stream receives an
+explicit error event instead of a false successful completion. Override it with:
+
+```bash
+export JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS=120
+```
 
 ## CLI
 
@@ -610,6 +656,12 @@ Codex/Zed settings by default.
 
 This separation keeps the proxy core small while allowing additional config
 sources and desktop targets to be added independently.
+
+## Roadmap
+
+See [OpenCodex gap analysis](docs/opencodex-gap-analysis.md) for the maintained
+capability comparison, security priorities, routing roadmap, and features that
+Joocode intentionally does not copy.
 
 ## Releasing
 

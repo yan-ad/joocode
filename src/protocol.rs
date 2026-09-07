@@ -639,6 +639,33 @@ impl StreamState {
         events
     }
 
+    pub fn incomplete_events(&self, reason: &str) -> Vec<String> {
+        vec![
+            event(
+                "response.incomplete",
+                json!({
+                    "response": {
+                        "id": self.response_id,
+                        "object": "response",
+                        "created_at": now(),
+                        "status": "incomplete",
+                        "error": null,
+                        "incomplete_details": { "reason": "upstream_stream_interrupted" },
+                        "model": self.requested_model,
+                        "output": self.output(),
+                        "usage": {
+                            "input_tokens": self.usage.get("prompt_tokens").cloned().unwrap_or_else(|| json!(0)),
+                            "output_tokens": self.usage.get("completion_tokens").cloned().unwrap_or_else(|| json!(0)),
+                            "total_tokens": self.usage.get("total_tokens").cloned().unwrap_or_else(|| json!(0))
+                        },
+                        "metadata": { "joocode_error": reason }
+                    }
+                }),
+            ),
+            "data: [DONE]\n\n".into(),
+        ]
+    }
+
     pub fn completed_events(&self) -> Vec<String> {
         let mut events = vec![
             event(

@@ -303,6 +303,14 @@ impl Registry {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_catalogs_for_test(
+        client: Client,
+        catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
+    ) -> anyhow::Result<Self> {
+        Self::from_catalogs(client, catalogs)
+    }
+
     pub fn client(&self) -> &Client {
         &self.inner.client
     }
