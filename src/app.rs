@@ -2,6 +2,10 @@ use std::{
     collections::BTreeMap,
     convert::Infallible,
     net::{IpAddr, SocketAddr},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -14,6 +18,104 @@ async fn antigravity_bridge(
 ) -> Result<Response, ApiError> {
     let registry = state.registry.snapshot();
     antigravity::handle(&registry, method, uri, headers, body).await
+}
+
+async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
+    let registry = state.registry.snapshot();
+    Json(json!({
+        "service": "joocode",
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_seconds": state.metrics.started.elapsed().as_secs(),
+        "providers": registry.provider_count(),
+        "models": registry.models().len(),
+        "requests": state.metrics.requests.load(Ordering::Relaxed),
+        "active_requests": state.metrics.active.load(Ordering::Relaxed),
+        "successful_responses": state.metrics.successes.load(Ordering::Relaxed),
+        "failed_responses": state.metrics.failures.load(Ordering::Relaxed),
+    }))
+}
+
+pub async fn stats(url: &str, token: Option<&str>) -> anyhow::Result<()> {
+    let client = reqwest::Client::new();
+    let mut request = client.get(url);
+    if let Some(token) = token.filter(|token| !token.is_empty()) {
+        request = request.header("x-joocode-api-key", token);
+    }
+    let response = request.send().await?.error_for_status()?;
+    let status = response.json::<Value>().await?;
+    println!(
+        "Joocode {}",
+        status["version"].as_str().unwrap_or("unknown")
+    );
+    println!("uptime:    {}s", status["uptime_seconds"]);
+    println!("providers: {}", status["providers"]);
+    println!("models:    {}", status["models"]);
+    println!("requests:  {}", status["requests"]);
+    println!("active:    {}", status["active_requests"]);
+    println!("successes: {}", status["successful_responses"]);
+    println!("failures:  {}", status["failed_responses"]);
+    Ok(())
+}
+
+async fn next_bounded_sse_line<S>(
+    upstream: &mut S,
+    buffer: &mut Vec<u8>,
+    max_bytes: usize,
+) -> Result<Option<String>, String>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+{
+    loop {
+        if let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+            let mut line = buffer.drain(..=newline).collect::<Vec<_>>();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return String::from_utf8(line)
+                .map(Some)
+                .map_err(|error| format!("upstream SSE contained invalid UTF-8: {error}"));
+        }
+        if buffer.len() > max_bytes {
+            return Err(format!(
+                "upstream SSE event exceeded the {max_bytes} byte limit"
+            ));
+        }
+        match upstream.next().await {
+            Some(Ok(chunk)) => {
+                if buffer.len().saturating_add(chunk.len()) > max_bytes {
+                    return Err(format!(
+                        "upstream SSE event exceeded the {max_bytes} byte limit"
+                    ));
+                }
+                buffer.extend_from_slice(&chunk);
+            }
+            Some(Err(error)) => return Err(format!("upstream stream failed: {error}")),
+            None if buffer.is_empty() => return Ok(None),
+            None => {
+                let line = std::mem::take(buffer);
+                return String::from_utf8(line)
+                    .map(Some)
+                    .map_err(|error| format!("upstream SSE contained invalid UTF-8: {error}"));
+            }
+        }
+    }
+}
+
+fn positive_usize_env(name: &str, default: usize) -> anyhow::Result<usize> {
+    let value = std::env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .with_context(|| format!("{name} must be a positive integer, got '{value}'"))
+        })
+        .transpose()?
+        .unwrap_or(default);
+    if value == 0 {
+        anyhow::bail!("{name} must be greater than zero");
+    }
+    Ok(value)
 }
 
 fn compact_upstream_url(chatgpt_session: bool) -> &'static str {
@@ -162,10 +264,8 @@ use axum::{
     routing::{any, get, post},
 };
 use bytes::Bytes;
-use futures_util::{Stream, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde_json::{Value, json};
-use tokio::io::AsyncBufReadExt;
-use tokio_util::io::StreamReader;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
@@ -188,12 +288,63 @@ use crate::{
 struct AppState {
     registry: RegistryStore,
     stream_idle_timeout: Duration,
+    max_sse_event_bytes: usize,
+    max_tool_argument_bytes: usize,
     retry_policy: upstream::RetryPolicy,
     upstream_runtime: upstream::Runtime,
+    metrics: Metrics,
+}
+
+#[derive(Clone, Debug)]
+struct Metrics {
+    started: std::time::Instant,
+    requests: Arc<AtomicU64>,
+    active: Arc<AtomicU64>,
+    successes: Arc<AtomicU64>,
+    failures: Arc<AtomicU64>,
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            requests: Arc::new(AtomicU64::new(0)),
+            active: Arc::new(AtomicU64::new(0)),
+            successes: Arc::new(AtomicU64::new(0)),
+            failures: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+struct ActiveRequest {
+    metrics: Metrics,
+}
+
+impl Drop for ActiveRequest {
+    fn drop(&mut self) {
+        self.metrics.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+async fn record_request(State(metrics): State<Metrics>, request: Request, next: Next) -> Response {
+    metrics.requests.fetch_add(1, Ordering::Relaxed);
+    metrics.active.fetch_add(1, Ordering::Relaxed);
+    let _active = ActiveRequest {
+        metrics: metrics.clone(),
+    };
+    let response = next.run(request).await;
+    if response.status().is_success() {
+        metrics.successes.fetch_add(1, Ordering::Relaxed);
+    } else {
+        metrics.failures.fetch_add(1, Ordering::Relaxed);
+    }
+    response
 }
 
 const DEFAULT_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const DEFAULT_MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
+const DEFAULT_MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 struct ServerPolicy {
@@ -201,6 +352,8 @@ struct ServerPolicy {
     allowed_origins: Vec<HeaderValue>,
     max_request_bytes: usize,
     stream_idle_timeout: Duration,
+    max_sse_event_bytes: usize,
+    max_tool_argument_bytes: usize,
     retry_policy: upstream::RetryPolicy,
     upstream_runtime: upstream::Runtime,
     remote: bool,
@@ -258,6 +411,12 @@ impl ServerPolicy {
         if stream_idle_timeout.is_zero() {
             anyhow::bail!("JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS must be greater than zero");
         }
+        let max_sse_event_bytes =
+            positive_usize_env("JOOCODE_MAX_SSE_EVENT_BYTES", DEFAULT_MAX_SSE_EVENT_BYTES)?;
+        let max_tool_argument_bytes = positive_usize_env(
+            "JOOCODE_MAX_TOOL_ARGUMENT_BYTES",
+            DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
+        )?;
         let retry_policy = upstream::RetryPolicy::from_env()?;
         let upstream_runtime = upstream::Runtime::from_env()?;
         Ok(Self {
@@ -265,6 +424,8 @@ impl ServerPolicy {
             allowed_origins,
             max_request_bytes,
             stream_idle_timeout,
+            max_sse_event_bytes,
+            max_tool_argument_bytes,
             retry_policy,
             upstream_runtime,
             remote,
@@ -377,6 +538,8 @@ async fn anthropic_messages(
             requested_model.to_owned(),
             declared_tools,
             state.stream_idle_timeout,
+            state.max_sse_event_bytes,
+            state.max_tool_argument_bytes,
         )))
     } else {
         let chat = response
@@ -394,6 +557,8 @@ fn anthropic_stream_response<S>(
     requested_model: String,
     declared_tools: std::collections::BTreeSet<String>,
     idle_timeout: Duration,
+    max_sse_event_bytes: usize,
+    max_tool_argument_bytes: usize,
 ) -> Response
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
@@ -408,20 +573,24 @@ where
             "event: content_block_start\ndata: {}\n\n",
             json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})
         )));
-        let reader = StreamReader::new(upstream.map_err(std::io::Error::other));
-        let mut lines = reader.lines();
+        let mut upstream = upstream;
+        let mut buffer = Vec::new();
         let mut output_tokens = 0_u64;
         let mut text_open = true;
         let mut tools = BTreeMap::<usize, usize>::new();
+        let mut tool_argument_bytes = BTreeMap::<usize, usize>::new();
         let mut next_block = 1_usize;
         let mut terminal = false;
         let mut stream_error = None::<String>;
         loop {
-            let line = match tokio::time::timeout(idle_timeout, lines.next_line()).await {
+            let line = match tokio::time::timeout(
+                idle_timeout,
+                next_bounded_sse_line(&mut upstream, &mut buffer, max_sse_event_bytes),
+            ).await {
                 Ok(Ok(Some(line))) => line,
                 Ok(Ok(None)) => break,
                 Ok(Err(error)) => {
-                    stream_error = Some(format!("upstream stream failed: {error}"));
+                    stream_error = Some(error);
                     break;
                 }
                 Err(_) => {
@@ -493,6 +662,15 @@ where
                 if let Some(arguments) = call.pointer("/function/arguments").and_then(Value::as_str)
                     && !arguments.is_empty()
                 {
+                    let accumulated = tool_argument_bytes.entry(upstream_index).or_default();
+                    if accumulated.saturating_add(arguments.len()) > max_tool_argument_bytes {
+                        stream_error = Some(format!(
+                            "tool arguments exceeded the {max_tool_argument_bytes} byte limit"
+                        ));
+                        terminal = false;
+                        break;
+                    }
+                    *accumulated = accumulated.saturating_add(arguments.len());
                     output_tokens = output_tokens.saturating_add((arguments.len().div_ceil(4)) as u64);
                     yield Ok(Bytes::from(format!(
                         "event: content_block_delta\ndata: {}\n\n",
@@ -1002,13 +1180,18 @@ async fn prepare_server(
 }
 
 fn build_router(registry: RegistryStore, policy: &ServerPolicy) -> Router {
+    let metrics = Metrics::default();
     let state = AppState {
         registry,
         stream_idle_timeout: policy.stream_idle_timeout,
+        max_sse_event_bytes: policy.max_sse_event_bytes,
+        max_tool_argument_bytes: policy.max_tool_argument_bytes,
         retry_policy: policy.retry_policy.clone(),
         upstream_runtime: policy.upstream_runtime.clone(),
+        metrics: metrics.clone(),
     };
     let protected = Router::new()
+        .route("/api/status", get(api_status))
         .route("/v1/models", get(models))
         .route("/v1/responses", post(responses))
         .route("/v1/responses/compact", post(compact_responses))
@@ -1027,7 +1210,8 @@ fn build_router(registry: RegistryStore, policy: &ServerPolicy) -> Router {
         .route_layer(middleware::from_fn_with_state(
             policy.clone(),
             require_remote_auth,
-        ));
+        ))
+        .route_layer(middleware::from_fn_with_state(metrics, record_request));
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/hello", get(healthz))
@@ -1290,6 +1474,8 @@ async fn responses(
             requested_model,
             tool_namespaces,
             state.stream_idle_timeout,
+            state.max_sse_event_bytes,
+            state.max_tool_argument_bytes,
         )))
     } else {
         let chat: Value = response
@@ -1324,23 +1510,29 @@ fn stream_response<S>(
     requested_model: String,
     tool_namespaces: protocol::ToolNamespaces,
     idle_timeout: Duration,
+    max_sse_event_bytes: usize,
+    max_tool_argument_bytes: usize,
 ) -> Response
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + Unpin + 'static,
 {
     let events = stream! {
-        let mut state = protocol::StreamState::new(protocol::response_id(), requested_model, tool_namespaces);
+        let mut state = protocol::StreamState::new(protocol::response_id(), requested_model, tool_namespaces)
+            .with_max_tool_argument_bytes(max_tool_argument_bytes);
         for frame in state.created_events() { yield Ok::<Bytes, Infallible>(Bytes::from(frame)); }
-        let reader = StreamReader::new(upstream.map_err(std::io::Error::other));
-        let mut lines = reader.lines();
+        let mut upstream = upstream;
+        let mut buffer = Vec::new();
         let mut terminal = false;
         let mut incomplete_reason = None::<String>;
         loop {
-            let line = match tokio::time::timeout(idle_timeout, lines.next_line()).await {
+            let line = match tokio::time::timeout(
+                idle_timeout,
+                next_bounded_sse_line(&mut upstream, &mut buffer, max_sse_event_bytes),
+            ).await {
                 Ok(Ok(Some(line))) => line,
                 Ok(Ok(None)) => break,
                 Ok(Err(error)) => {
-                    incomplete_reason = Some(format!("upstream stream failed: {error}"));
+                    incomplete_reason = Some(error);
                     break;
                 }
                 Err(_) => {
@@ -1430,6 +1622,8 @@ mod tests {
                 .collect(),
             max_request_bytes: limit,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+            max_sse_event_bytes: DEFAULT_MAX_SSE_EVENT_BYTES,
+            max_tool_argument_bytes: DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
             retry_policy: upstream::RetryPolicy::default(),
             upstream_runtime: upstream::Runtime::new(8, Duration::ZERO),
             remote,
@@ -1460,6 +1654,37 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["models"], 1);
         assert_eq!(body["providers"], 1);
+    }
+
+    #[tokio::test]
+    async fn status_reports_privacy_safe_request_counters() {
+        let app = build_router(
+            RegistryStore::new(fixture_registry()),
+            &policy(false, None, &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let response = app
+            .clone()
+            .oneshot(HttpRequest::get("/v1/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(HttpRequest::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["service"], "joocode");
+        assert_eq!(body["providers"], 1);
+        assert_eq!(body["models"], 1);
+        assert_eq!(body["requests"], 2);
+        assert_eq!(body["active_requests"], 1);
+        assert_eq!(body["successful_responses"], 1);
+        assert_eq!(body["failed_responses"], 0);
+        assert!(body.get("prompt").is_none());
+        assert!(body.get("body").is_none());
     }
 
     #[tokio::test]
@@ -1670,12 +1895,68 @@ mod tests {
             "fixture/model-a".into(),
             protocol::ToolNamespaces::default(),
             Duration::from_millis(1),
+            DEFAULT_MAX_SSE_EVENT_BYTES,
+            DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
         );
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("event: response.incomplete"));
         assert!(body.contains("upstream_stream_interrupted"));
         assert!(!body.contains("event: response.completed"));
+    }
+
+    #[tokio::test]
+    async fn oversized_sse_event_is_reported_as_incomplete() {
+        let upstream = futures_util::stream::iter([Ok::<Bytes, reqwest::Error>(Bytes::from(
+            "data: this-event-is-too-large",
+        ))]);
+        let response = stream_response(
+            upstream,
+            "fixture/model-a".into(),
+            protocol::ToolNamespaces::default(),
+            Duration::from_secs(1),
+            8,
+            DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
+        );
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("event: response.incomplete"));
+        assert!(body.contains("SSE event exceeded the 8 byte limit"));
+        assert!(!body.contains("event: response.completed"));
+    }
+
+    #[tokio::test]
+    async fn dropping_client_body_cancels_upstream_stream() {
+        struct DropSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = DropSignal(dropped.clone());
+        let upstream = async_stream::stream! {
+            let _signal = signal;
+            futures_util::future::pending::<()>().await;
+            #[allow(unreachable_code)]
+            yield Ok::<Bytes, reqwest::Error>(Bytes::new());
+        };
+        let response = stream_response(
+            Box::pin(upstream),
+            "fixture/model-a".into(),
+            protocol::ToolNamespaces::default(),
+            Duration::from_secs(60),
+            DEFAULT_MAX_SSE_EVENT_BYTES,
+            DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
+        );
+        let mut body = response.into_body().into_data_stream();
+        let poll = tokio::time::timeout(Duration::from_millis(10), body.next()).await;
+        assert!(poll.is_ok());
+        drop(body);
+        tokio::task::yield_now().await;
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -1686,6 +1967,8 @@ mod tests {
             "fixture/model-a".into(),
             std::collections::BTreeSet::new(),
             Duration::from_millis(1),
+            DEFAULT_MAX_SSE_EVENT_BYTES,
+            DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
         );
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
@@ -1709,6 +1992,8 @@ mod tests {
             "fixture/model-a".into(),
             std::collections::BTreeSet::from(["read".into()]),
             Duration::from_secs(1),
+            DEFAULT_MAX_SSE_EVENT_BYTES,
+            DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
         );
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();

@@ -115,6 +115,7 @@ pub fn anthropic_to_chat_request(request: &Value, upstream_model: &str) -> Resul
             ),
         );
     }
+
     Ok(output)
 }
 
@@ -565,6 +566,8 @@ pub struct StreamState {
     pub usage: Value,
     pub tool_namespaces: ToolNamespaces,
     pub invalid_tool: Option<String>,
+    pub stream_violation: Option<String>,
+    max_tool_argument_bytes: usize,
 }
 
 #[derive(Default)]
@@ -587,8 +590,14 @@ impl StreamState {
             requested_model,
             message_id: message_id(),
             tool_namespaces,
+            max_tool_argument_bytes: usize::MAX,
             ..Default::default()
         }
+    }
+
+    pub fn with_max_tool_argument_bytes(mut self, limit: usize) -> Self {
+        self.max_tool_argument_bytes = limit;
+        self
     }
 
     pub fn created_events(&self) -> Vec<String> {
@@ -676,6 +685,15 @@ impl StreamState {
                 }
                 if let Some(arguments) = call.pointer("/function/arguments").and_then(Value::as_str)
                 {
+                    if state.arguments.len().saturating_add(arguments.len())
+                        > self.max_tool_argument_bytes
+                    {
+                        self.stream_violation = Some(format!(
+                            "tool arguments exceeded the {} byte limit",
+                            self.max_tool_argument_bytes
+                        ));
+                        continue;
+                    }
                     state.arguments.push_str(arguments);
                     events.push(event(
                         "response.function_call_arguments.delta",
@@ -717,6 +735,9 @@ impl StreamState {
     }
 
     pub fn completed_events(&self) -> Result<Vec<String>, ApiError> {
+        if let Some(message) = &self.stream_violation {
+            return Err(ApiError::bad_request(message.clone()));
+        }
         if let Some(name) = &self.invalid_tool {
             return Err(undeclared_tool_error(name));
         }
@@ -969,6 +990,29 @@ mod tests {
                 .unwrap_err()
                 .message
                 .contains("undeclared tool")
+        );
+    }
+
+    #[test]
+    fn streaming_rejects_oversized_tool_arguments() {
+        let request = json!({
+            "model":"demo/code",
+            "input":"hello",
+            "tools":[{"type":"function","name":"read","parameters":{"type":"object"}}]
+        });
+        let chat = to_chat_request(&request, "code").unwrap();
+        let mut state =
+            StreamState::new("resp_test".into(), "demo/code".into(), chat.tool_namespaces)
+                .with_max_tool_argument_bytes(4);
+        state.consume_chunk(&json!({"choices":[{"delta":{"tool_calls":[{
+            "index":0,"id":"call_1","function":{"name":"read","arguments":"12345"}
+        }]}}]}));
+        assert!(
+            state
+                .completed_events()
+                .unwrap_err()
+                .message
+                .contains("tool arguments exceeded the 4 byte limit")
         );
     }
 

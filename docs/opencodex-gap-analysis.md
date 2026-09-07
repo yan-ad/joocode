@@ -55,7 +55,7 @@ Joocode should not become:
 | Image generation/edit endpoints | Yes | No | P3 |
 | Realtime/Live API | Yes | No | P5 |
 | Browser management dashboard | Yes | TUI only | Intentionally different |
-| Usage and latency analytics | Yes | Minimal status only | P4 |
+| Usage and latency analytics | Yes | Privacy-safe uptime/request counters shipped; token/latency breakdown pending | P4 |
 | Remote authenticated hub | Yes | No | P5 |
 | Web-search/vision sidecars | Yes | No | P5 |
 | Subagent catalog controls | Yes | Basic catalog metadata | P2 |
@@ -128,19 +128,21 @@ by default. `JOOCODE_MAX_REQUEST_BYTES` can set a different positive byte limit.
 
 ### Bounded streaming
 
-**Status: idle timeout implemented.** Upstream streams default to a 90-second
-idle timeout configurable through `JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS`.
-Responses clients receive `response.incomplete`; Anthropic clients receive an
-explicit error event. Remaining hardening work includes event-size and
-accumulated tool-argument limits.
+**Status: implemented.** Upstream streams default to a 90-second idle timeout,
+1 MiB maximum SSE event size, and 1 MiB accumulated argument limit per tool
+call. The limits are configurable through
+`JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS`, `JOOCODE_MAX_SSE_EVENT_BYTES`, and
+`JOOCODE_MAX_TOOL_ARGUMENT_BYTES`. Responses clients receive
+`response.incomplete`; Anthropic clients receive an explicit error event.
+Dropping a downstream response body drops and cancels the upstream stream.
 
 Add:
 
-- stream idle timeout;
-- maximum SSE event size;
-- maximum accumulated tool-call arguments;
-- cancellation propagation;
-- explicit incomplete-response events.
+- [x] stream idle timeout;
+- [x] maximum SSE event size;
+- [x] maximum accumulated tool-call arguments;
+- [x] cancellation propagation through stream drop;
+- [x] explicit incomplete-response events.
 
 An upstream stream that ends before its terminal event must not be reported as successfully completed.
 
@@ -303,6 +305,10 @@ Native adapters should preserve:
 ## P4 — Local observability
 
 Add bounded, privacy-safe statistics without storing prompt or response content.
+
+**Status: foundation shipped.** `jcx stats` and `GET /api/status` report uptime,
+provider/model counts, total and active requests, successes, and failures.
+Token, latency, provider distribution, retry, and cooldown metrics remain pending.
 
 Suggested CLI:
 

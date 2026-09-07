@@ -603,12 +603,18 @@ original provider source. It does not expose provider credentials to the client.
 ```bash
 curl http://127.0.0.1:10100/healthz
 curl http://127.0.0.1:10100/readyz
+curl http://127.0.0.1:10100/api/status
 curl http://127.0.0.1:10100/v1/models
 ```
 
 `/healthz` reports process liveness. `/readyz` reports whether the provider
 registry can route requests and returns model/provider counts plus `ready`,
-`degraded`, or `failed` status.
+`degraded`, or `failed` status. `/api/status` exposes privacy-safe in-memory
+uptime and request counters without storing prompts, bodies, or response content.
+
+```bash
+jcx stats
+```
 
 Create a response:
 
@@ -664,7 +670,13 @@ explicit error event instead of a false successful completion. Override it with:
 
 ```bash
 export JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS=120
+export JOOCODE_MAX_SSE_EVENT_BYTES=1048576
+export JOOCODE_MAX_TOOL_ARGUMENT_BYTES=1048576
 ```
+
+Oversized SSE events and accumulated streamed tool arguments are terminated with
+explicit incomplete/error semantics. Dropping the client response body also
+drops the upstream stream immediately.
 
 Configure upstream request retries when needed:
 

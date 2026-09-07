@@ -121,6 +121,18 @@ mod tests {
     }
 
     #[test]
+    fn accepts_stats_command() {
+        let cli =
+            Cli::try_parse_from(["jcx", "stats", "--url", "http://127.0.0.1:10101/api/status"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Stats { url, token: None })
+                if url == "http://127.0.0.1:10101/api/status"
+        ));
+    }
+
+    #[test]
     fn accepts_antigravity_patch_commands() {
         assert!(matches!(
             Cli::try_parse_from(["jcx", "antigravity", "patch"])
@@ -158,6 +170,15 @@ pub enum Command {
     Models,
     /// Validate configuration discovery and provider loading.
     Doctor,
+    /// Show privacy-safe runtime counters from a running Joocode proxy.
+    Stats {
+        /// Joocode status endpoint to query.
+        #[arg(long, default_value = "http://127.0.0.1:10100/api/status")]
+        url: String,
+        /// Authentication token required by a remotely bound Joocode proxy.
+        #[arg(long, env = "JOOCODE_API_AUTH_TOKEN")]
+        token: Option<String>,
+    },
     /// Add discovered models to Codex while retaining built-in OpenAI models.
     CodexInstall {
         /// URL where Codex can reach the local Responses API.

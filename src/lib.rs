@@ -51,6 +51,9 @@ pub async fn run() -> anyhow::Result<()> {
         println!("Joocode background proxy started.");
         return Ok(());
     }
+    if let Some(Command::Stats { url, token }) = &cli.command {
+        return app::stats(url, token.as_deref()).await;
+    }
     if let Some(Command::Antigravity { command }) = &cli.command {
         match command {
             AntigravityCommand::Patch { base_url } => {
@@ -118,6 +121,7 @@ pub async fn run() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::Stats { .. } => unreachable!("stats is handled before config discovery"),
         Command::Doctor => {
             for report in registry.source_reports() {
                 println!(
