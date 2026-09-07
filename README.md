@@ -22,6 +22,22 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 jcx
 ```
 
+Latency-aware routing uses passive EWMA measurements and provider health. It
+does not send synthetic probe requests:
+
+```json
+{
+  "combos": [{
+    "name": "fastest",
+    "strategy": "lowest-latency",
+    "models": [
+      "crabcode/clip/claude-sonnet-4.6",
+      "opencode/openrouter/gpt-5.5"
+    ]
+  }]
+}
+```
+
 > **`jcx` is the flagship command.** `joocode` ships as a fully compatible alias for existing scripts and installations.
 
 ```text
@@ -621,8 +637,10 @@ discovery reports, and passive runtime availability. Provider URLs, headers,
 and credentials are never included.
 
 `/api/metrics` exposes the same privacy-safe process, request-counter, registry,
-and provider-runtime data in Prometheus text format. It does not contain request
-content, provider URLs, headers, or credentials.
+provider-runtime, latency, failure-streak, and tool-call data in Prometheus text
+format. Codex Browser/Computer Use calls are counted separately and by
+namespace/tool name. Arguments, results, prompts, provider URLs, headers, and
+credentials are never recorded.
 
 ```bash
 jcx stats
@@ -631,7 +649,8 @@ jcx reload
 
 `jcx reload` atomically re-discovers enabled provider sources in the running
 proxy. If discovery fails or produces an empty registry, the existing registry
-remains active. Remote management calls use the same `JOOCODE_API_AUTH_TOKEN`.
+remains active. Remote management calls use the separate
+`JOOCODE_MANAGEMENT_AUTH_TOKEN`.
 
 Create a response:
 
@@ -655,7 +674,10 @@ LAN/non-loopback interface requires a real Joocode admission token:
 
 ```bash
 export JOOCODE_API_AUTH_TOKEN='replace-with-a-long-random-token'
+export JOOCODE_MANAGEMENT_AUTH_TOKEN='replace-with-a-different-random-token'
 export JOOCODE_ALLOWED_ORIGINS='https://app.example.com,https://admin.example.com'
+export JOOCODE_REMOTE_REQUESTS_PER_SECOND=20
+export JOOCODE_REMOTE_REQUEST_BURST=40
 jcx serve --host 0.0.0.0 --port 10100
 ```
 
@@ -672,7 +694,9 @@ x-joocode-api-key: <JOOCODE_API_AUTH_TOKEN>
 ```
 
 Joocode rejects non-loopback startup without `JOOCODE_API_AUTH_TOKEN`. Remote
-CORS is disabled unless origins are listed in `JOOCODE_ALLOWED_ORIGINS`.
+CORS is disabled unless origins are listed in `JOOCODE_ALLOWED_ORIGINS`. Remote
+management routes require a different `JOOCODE_MANAGEMENT_AUTH_TOKEN`. A global
+token-bucket rate limiter protects authenticated remote traffic.
 Admission credentials are removed before forwarding requests upstream.
 
 Request bodies are limited to 16 MiB by default. Override the limit in bytes:
@@ -703,6 +727,8 @@ export JOOCODE_RETRY_INITIAL_MS=250
 export JOOCODE_RETRY_MAX_MS=2000
 export JOOCODE_PROVIDER_CONCURRENCY=8
 export JOOCODE_PROVIDER_COOLDOWN_MS=1000
+export JOOCODE_PROVIDER_MAX_COOLDOWN_MS=60000
+export JOOCODE_PROVIDER_MIN_INTERVAL_MS=0
 ```
 
 Joocode retries transport failures and HTTP `408`, `429`, `500`, `502`, `503`,
@@ -713,6 +739,10 @@ replayed.
 Concurrency is bounded per discovered provider and the permit is held until the
 response body or stream finishes. Providers that exhaust retries enter a short
 cooldown; combo routes skip cooling candidates while direct model requests wait.
+Repeated failures increase cooldown exponentially up to the configured maximum.
+`JOOCODE_PROVIDER_MIN_INTERVAL_MS` adds proactive pacing before upstream limits
+are reached. `lowest-latency` combos prefer healthy providers using passive EWMA
+latency, then retain the remaining candidates as failover.
 
 ## CLI
 

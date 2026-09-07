@@ -54,9 +54,9 @@ Status legend: **Complete**, **Partial**, **Planned**, or **Intentional**.
 | Routing | Generic retries/backoff | Yes | Retryable transport/status classification and `Retry-After` | **Complete** |
 | Routing | Provider cooldown | Yes | Fixed cooldown and combo skip | **Complete** |
 | Routing | Per-provider concurrency budgets | Yes | Stream-lifetime permits | **Complete** |
-| Routing | Request pacing | Yes | No proactive pacing | **Planned P1** |
-| Routing | Adaptive quota/error cooldown | Yes | Fixed/basic cooldown only | **Planned P1** |
-| Routing | Lowest-latency/health-aware selection | Yes | No latency scoring yet | **Planned P1/P4** |
+| Routing | Request pacing | Yes | Configurable minimum interval per provider | **Complete** |
+| Routing | Adaptive quota/error cooldown | Yes | Retry-After plus bounded exponential error-streak cooldown | **Complete** |
+| Routing | Lowest-latency/health-aware selection | Yes | Passive EWMA latency and health-aware combo routing | **Complete** |
 | Credentials | Source-owned credentials | Yes | Reuses each source's credential store without copying secrets | **Complete** |
 | Credentials | Generic API-key pools | Yes | One credential route per discovered provider | **Planned P2** |
 | Credentials | Multi-account OAuth pools | Yes | Limited source-specific support | **Planned P2** |
@@ -66,8 +66,8 @@ Status legend: **Complete**, **Partial**, **Planned**, or **Intentional**.
 | Security | SSE event/tool argument limits | Yes | Configurable, default 1 MiB each | **Complete** |
 | Security | Stream idle timeout/incomplete semantics | Yes | Configurable timeout and explicit protocol errors | **Complete** |
 | Security | Downstream cancellation propagation | Yes | Upstream stream dropped on client disconnect | **Complete** |
-| Security | Remote rate limiting | Yes | No admission rate limiter yet | **Planned P0** |
-| Security | Separate management-plane credential | Yes | Management shares data-plane admission token | **Planned P0** |
+| Security | Remote rate limiting | Yes | Configurable token-bucket admission limiter | **Complete** |
+| Security | Separate management-plane credential | Yes | Dedicated management token required remotely | **Complete** |
 | Integrations | Desktop auto-configuration | Yes | Codex, Zed, Claude Code, Grok Build, GitHub Copilot App; JetBrains endpoint guidance | **Complete/Partial by client** |
 | Integrations | Configuration ownership journal | Yes | Managed-subtree conflict detection for Zed | **Partial** — other clients pending |
 | Integrations | Background service and auto-start | Yes | macOS, Linux, Windows lifecycle controls | **Complete** |
@@ -78,7 +78,9 @@ Status legend: **Complete**, **Partial**, **Planned**, or **Intentional**.
 | Observability | Runtime status | Yes | `jcx stats` and `/api/status` | **Complete** |
 | Observability | Provider/catalog status | Yes | `/api/providers`, active requests and cooldown state | **Complete** |
 | Observability | Prometheus metrics | Yes | `/api/metrics` | **Complete** |
-| Observability | Token/latency/retry/failover breakdown | Yes | Not recorded yet | **Planned P4** |
+| Observability | Latency and provider health | Yes | Provider EWMA latency, failure streak, cooldown and saturation | **Complete** |
+| Observability | Codex browser/computer tool calls | No/limited | Privacy-safe total and per-tool Prometheus metrics | **Complete — Joocode advantage** |
+| Observability | Token/retry/failover breakdown | Yes | Tool and request counters shipped; token/retry/failover counters pending | **Partial P4** |
 | UI | Browser management dashboard | Yes | Compact Ratatui dashboard and modals | **Intentional difference** |
 | Ecosystem | Remote authenticated hub | Yes | No | **Planned P5** |
 | Ecosystem | Web-search/vision sidecars | Yes | No | **Planned P5** |

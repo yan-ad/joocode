@@ -184,7 +184,7 @@ pub enum Command {
         #[arg(long, default_value = "http://127.0.0.1:10100/api/status")]
         url: String,
         /// Authentication token required by a remotely bound Joocode proxy.
-        #[arg(long, env = "JOOCODE_API_AUTH_TOKEN")]
+        #[arg(long, env = "JOOCODE_MANAGEMENT_AUTH_TOKEN")]
         token: Option<String>,
     },
     /// Reload provider sources in a running Joocode proxy.
@@ -193,7 +193,7 @@ pub enum Command {
         #[arg(long, default_value = "http://127.0.0.1:10100/api/reload")]
         url: String,
         /// Authentication token required by a remotely bound Joocode proxy.
-        #[arg(long, env = "JOOCODE_API_AUTH_TOKEN")]
+        #[arg(long, env = "JOOCODE_MANAGEMENT_AUTH_TOKEN")]
         token: Option<String>,
     },
     /// Add discovered models to Codex while retaining built-in OpenAI models.

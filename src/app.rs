@@ -20,11 +20,7 @@ async fn antigravity_bridge(
     antigravity::handle(&registry, method, uri, headers, body).await
 }
 
-async fn remote_rate_limit(
-    State(limiter): State<RateLimiter>,
-    request: Request,
-    next: Next,
-) -> Response {
+async fn authenticated_request(limiter: RateLimiter, request: Request, next: Next) -> Response {
     if limiter.allow().await {
         next.run(request).await
     } else {
@@ -143,7 +139,11 @@ async fn api_metrics(State(state): State<AppState>) -> impl IntoResponse {
 # HELP joocode_provider_cooldown_seconds Remaining provider cooldown in seconds.\n\
 # TYPE joocode_provider_cooldown_seconds gauge\n\
 # HELP joocode_provider_available Whether a provider route is currently available.\n\
-# TYPE joocode_provider_available gauge\n",
+# TYPE joocode_provider_available gauge\n\
+# HELP joocode_provider_latency_milliseconds Provider response latency EWMA in milliseconds.\n\
+# TYPE joocode_provider_latency_milliseconds gauge\n\
+# HELP joocode_provider_consecutive_failures Consecutive provider failures.\n\
+# TYPE joocode_provider_consecutive_failures gauge\n",
     );
     for provider in provider_statuses {
         let name = prometheus_label(&provider.provider);
@@ -162,6 +162,15 @@ async fn api_metrics(State(state): State<AppState>) -> impl IntoResponse {
         output.push_str(&format!(
             "joocode_provider_available{{provider=\"{name}\"}} {}\n",
             u8::from(provider.state == "available")
+        ));
+        if let Some(latency_ms) = provider.latency_ms {
+            output.push_str(&format!(
+                "joocode_provider_latency_milliseconds{{provider=\"{name}\"}} {latency_ms:.3}\n"
+            ));
+        }
+        output.push_str(&format!(
+            "joocode_provider_consecutive_failures{{provider=\"{name}\"}} {}\n",
+            provider.consecutive_failures
         ));
     }
     (
@@ -449,9 +458,14 @@ async fn send_routed<F>(
 where
     F: Fn(&str) -> Result<Value, ApiError>,
 {
-    let candidates = registry
+    let mut candidates = registry
         .resolve_candidates(requested_model)
         .map_err(|error| ApiError::not_found(error.to_string()))?;
+    if registry.combo_strategy(requested_model) == Some(crate::combo::Strategy::LowestLatency) {
+        runtime
+            .order_by_health(&mut candidates, |candidate| candidate.0.as_str())
+            .await;
+    }
     let candidate_count = candidates.len();
     let mut last_error = None;
     for (index, (provider_key, provider, upstream_model)) in candidates.into_iter().enumerate() {
@@ -590,8 +604,12 @@ impl Metrics {
     fn record_tool_call(&self, namespace: Option<&str>, name: &str) {
         self.tool_calls.fetch_add(1, Ordering::Relaxed);
         let normalized_namespace = namespace.unwrap_or("function");
-        if normalized_namespace.to_ascii_lowercase().contains("browser")
-            || normalized_namespace.to_ascii_lowercase().contains("computer")
+        if normalized_namespace
+            .to_ascii_lowercase()
+            .contains("browser")
+            || normalized_namespace
+                .to_ascii_lowercase()
+                .contains("computer")
             || name.to_ascii_lowercase().contains("browser")
             || name.to_ascii_lowercase().contains("computer")
         {
@@ -672,6 +690,7 @@ struct AuthPolicy {
     remote: bool,
     token: Option<String>,
     label: &'static str,
+    rate_limiter: RateLimiter,
 }
 
 #[derive(Clone, Debug)]
@@ -736,9 +755,7 @@ impl ServerPolicy {
             );
         }
         if remote && management_token == auth_token {
-            anyhow::bail!(
-                "JOOCODE_MANAGEMENT_AUTH_TOKEN must differ from JOOCODE_API_AUTH_TOKEN"
-            );
+            anyhow::bail!("JOOCODE_MANAGEMENT_AUTH_TOKEN must differ from JOOCODE_API_AUTH_TOKEN");
         }
         let allowed_origins = std::env::var("JOOCODE_ALLOWED_ORIGINS")
             .ok()
@@ -850,11 +867,11 @@ async fn require_auth(
         .and_then(|value| value.to_str().ok());
     if api_key.is_some_and(|value| secure_eq(value, expected)) {
         request.headers_mut().remove("x-joocode-api-key");
-        return next.run(request).await;
+        return authenticated_request(policy.rate_limiter, request, next).await;
     }
     if authorization.is_some_and(|value| secure_eq(value, expected)) {
         request.headers_mut().remove(header::AUTHORIZATION);
-        return next.run(request).await;
+        return authenticated_request(policy.rate_limiter, request, next).await;
     }
     ApiError {
         status: StatusCode::UNAUTHORIZED,
@@ -1606,6 +1623,7 @@ fn build_router_with_selection(
                 remote: policy.remote,
                 token: policy.management_token.clone(),
                 label: "management",
+                rate_limiter: policy.rate_limiter.clone(),
             },
             require_auth,
         ));
@@ -1630,16 +1648,13 @@ fn build_router_with_selection(
                 remote: policy.remote,
                 token: policy.auth_token.clone(),
                 label: "API",
+                rate_limiter: policy.rate_limiter.clone(),
             },
             require_auth,
         ));
     let protected = Router::new()
         .merge(management)
         .merge(data_plane)
-        .route_layer(middleware::from_fn_with_state(
-            policy.rate_limiter.clone(),
-            remote_rate_limit,
-        ))
         .route_layer(middleware::from_fn_with_state(metrics, record_request));
     Router::new()
         .route("/healthz", get(healthz))
@@ -2246,10 +2261,7 @@ mod tests {
         };
         let app = Router::new()
             .route("/protected", get(echo_headers))
-            .route_layer(middleware::from_fn_with_state(
-                remote.clone(),
-                require_auth,
-            ));
+            .route_layer(middleware::from_fn_with_state(remote.clone(), require_auth));
 
         for (name, value) in [
             (header::AUTHORIZATION, "Bearer secret"),
@@ -2697,5 +2709,58 @@ mod tests {
 
         assert_eq!(listener.local_addr().unwrap().port(), requested_port);
         assert!(port_warning.is_none());
+    }
+    #[test]
+    fn codex_browser_tool_calls_are_counted_without_arguments() {
+        let metrics = Metrics::default();
+        metrics.record_responses_tool_calls(&json!({
+            "output": [{
+                "type": "function_call",
+                "namespace": "browser",
+                "name": "computer_click",
+                "arguments": "{\"secret\":true}"
+            }]
+        }));
+        assert_eq!(metrics.tool_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.browser_tool_calls.load(Ordering::Relaxed), 1);
+        let breakdown = metrics.tool_call_breakdown.lock().unwrap();
+        assert_eq!(breakdown.get("browser/computer_click"), Some(&1));
+        assert!(!format!("{breakdown:?}").contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn remote_rate_limiter_rejects_excess_requests() {
+        let limiter = RateLimiter::new(true, 1, 1);
+        assert!(limiter.allow().await);
+        assert!(!limiter.allow().await);
+    }
+
+    #[tokio::test]
+    async fn remote_management_uses_a_separate_token() {
+        let app = build_router(
+            RegistryStore::new(fixture_registry()),
+            &policy(true, Some("data-secret"), &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let data_token = app
+            .clone()
+            .oneshot(
+                HttpRequest::get("/api/status")
+                    .header(header::AUTHORIZATION, "Bearer data-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(data_token.status(), StatusCode::UNAUTHORIZED);
+        let management = app
+            .oneshot(
+                HttpRequest::get("/api/status")
+                    .header(header::AUTHORIZATION, "Bearer management-data-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(management.status(), StatusCode::OK);
     }
 }

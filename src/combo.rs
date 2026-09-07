@@ -9,6 +9,7 @@ pub enum Strategy {
     #[default]
     Failover,
     WeightedRoundRobin,
+    LowestLatency,
 }
 
 impl From<&str> for ComboModel {

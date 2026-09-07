@@ -70,8 +70,20 @@ pub struct Runtime {
 struct RuntimeInner {
     concurrency: usize,
     default_cooldown: Duration,
+    max_cooldown: Duration,
+    min_interval: Duration,
     semaphores: Mutex<HashMap<String, Arc<Semaphore>>>,
     cooldowns: Mutex<HashMap<String, Instant>>,
+    last_started: Mutex<HashMap<String, Instant>>,
+    health: Mutex<HashMap<String, ProviderHealth>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ProviderHealth {
+    consecutive_failures: u32,
+    latency_ms: Option<f64>,
+    requests: u64,
+    failures: u64,
 }
 
 impl Runtime {
@@ -83,16 +95,46 @@ impl Runtime {
         let default_cooldown = Duration::from_millis(
             parse_env("JOOCODE_PROVIDER_COOLDOWN_MS")?.unwrap_or(1_000) as u64,
         );
-        Ok(Self::new(concurrency, default_cooldown))
+        let max_cooldown = Duration::from_millis(
+            parse_env("JOOCODE_PROVIDER_MAX_COOLDOWN_MS")?.unwrap_or(60_000) as u64,
+        );
+        let min_interval = Duration::from_millis(
+            parse_env("JOOCODE_PROVIDER_MIN_INTERVAL_MS")?.unwrap_or(0) as u64,
+        );
+        Ok(Self::with_policy(
+            concurrency,
+            default_cooldown,
+            max_cooldown,
+            min_interval,
+        ))
     }
 
+    #[cfg(test)]
     pub fn new(concurrency: usize, default_cooldown: Duration) -> Self {
+        Self::with_policy(
+            concurrency,
+            default_cooldown,
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+    }
+
+    pub fn with_policy(
+        concurrency: usize,
+        default_cooldown: Duration,
+        max_cooldown: Duration,
+        min_interval: Duration,
+    ) -> Self {
         Self {
             inner: Arc::new(RuntimeInner {
                 concurrency,
                 default_cooldown,
+                max_cooldown,
+                min_interval,
                 semaphores: Mutex::new(HashMap::new()),
                 cooldowns: Mutex::new(HashMap::new()),
+                last_started: Mutex::new(HashMap::new()),
+                health: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -119,13 +161,33 @@ impl Runtime {
                 .or_insert_with(|| Arc::new(Semaphore::new(self.inner.concurrency)))
                 .clone()
         };
-        semaphore
+        let permit = semaphore
             .acquire_owned()
             .await
             .map_err(|error| SendFailure {
                 class: FailureClass::Transport,
                 message: format!("provider concurrency gate closed: {error}"),
-            })
+            })?;
+        if !self.inner.min_interval.is_zero() {
+            let wait = {
+                let mut started = self.inner.last_started.lock().await;
+                let now = Instant::now();
+                let wait = started
+                    .get(provider)
+                    .map(|last| {
+                        self.inner
+                            .min_interval
+                            .saturating_sub(now.duration_since(*last))
+                    })
+                    .unwrap_or_default();
+                started.insert(provider.to_owned(), now + wait);
+                wait
+            };
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
+            }
+        }
+        Ok(permit)
     }
 
     async fn cooldown_remaining(&self, provider: &str) -> Option<Duration> {
@@ -141,7 +203,19 @@ impl Runtime {
     }
 
     async fn mark_cooldown(&self, provider: &str, duration: Option<Duration>) {
-        let duration = duration.unwrap_or(self.inner.default_cooldown);
+        let failures = self
+            .inner
+            .health
+            .lock()
+            .await
+            .get(provider)
+            .map_or(1, |health| health.consecutive_failures.max(1));
+        let multiplier = 1_u32
+            .checked_shl(failures.saturating_sub(1).min(10))
+            .unwrap_or(u32::MAX);
+        let duration = duration
+            .unwrap_or_else(|| self.inner.default_cooldown.saturating_mul(multiplier))
+            .min(self.inner.max_cooldown);
         if duration.is_zero() {
             return;
         }
@@ -152,10 +226,61 @@ impl Runtime {
             .insert(provider.to_owned(), Instant::now() + duration);
     }
 
+    async fn record_result(&self, provider: &str, latency: Duration, success: bool) {
+        let mut health = self.inner.health.lock().await;
+        let entry = health.entry(provider.to_owned()).or_default();
+        entry.requests += 1;
+        let latency_ms = latency.as_secs_f64() * 1_000.0;
+        entry.latency_ms = Some(
+            entry
+                .latency_ms
+                .map_or(latency_ms, |previous| previous * 0.8 + latency_ms * 0.2),
+        );
+        if success {
+            entry.consecutive_failures = 0;
+        } else {
+            entry.failures += 1;
+            entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn record_result_for_test(&self, provider: &str, latency: Duration, success: bool) {
+        self.record_result(provider, latency, success).await;
+    }
+
+    pub async fn order_by_health<T, F>(&self, candidates: &mut [T], provider: F)
+    where
+        F: Fn(&T) -> &str,
+    {
+        let health = self.inner.health.lock().await;
+        let cooldowns = self.inner.cooldowns.lock().await;
+        let now = Instant::now();
+        candidates.sort_by(|left, right| {
+            let score = |candidate: &T| {
+                let key = provider(candidate);
+                let cooling = cooldowns.get(key).is_some_and(|until| *until > now);
+                let state = health.get(key);
+                (
+                    cooling,
+                    state.map_or(u32::MAX, |value| value.consecutive_failures),
+                    state.and_then(|value| value.latency_ms).unwrap_or(f64::MAX),
+                )
+            };
+            let left = score(left);
+            let right = score(right);
+            left.0
+                .cmp(&right.0)
+                .then(left.1.cmp(&right.1))
+                .then_with(|| left.2.total_cmp(&right.2))
+        });
+    }
+
     pub async fn provider_statuses(&self, providers: &[String]) -> Vec<ProviderStatus> {
         let now = Instant::now();
         let semaphores = self.inner.semaphores.lock().await;
         let cooldowns = self.inner.cooldowns.lock().await;
+        let health = self.inner.health.lock().await;
         providers
             .iter()
             .map(|provider| {
@@ -180,6 +305,10 @@ impl Runtime {
                     active_requests: self.inner.concurrency.saturating_sub(available),
                     concurrency_limit: self.inner.concurrency,
                     cooldown_ms,
+                    latency_ms: health.get(provider).and_then(|health| health.latency_ms),
+                    consecutive_failures: health
+                        .get(provider)
+                        .map_or(0, |health| health.consecutive_failures),
                 }
             })
             .collect()
@@ -193,6 +322,8 @@ pub struct ProviderStatus {
     pub active_requests: usize,
     pub concurrency_limit: usize,
     pub cooldown_ms: u64,
+    pub latency_ms: Option<f64>,
+    pub consecutive_failures: u32,
 }
 
 #[derive(Debug)]
@@ -261,6 +392,7 @@ pub async fn send_json(
         .acquire(budget.provider, budget.wait_for_cooldown)
         .await?;
     for attempt in 1..=attempts {
+        let started = Instant::now();
         match client
             .post(url)
             .headers(headers.clone())
@@ -270,6 +402,11 @@ pub async fn send_json(
         {
             Ok(response) => {
                 let class = classify_status(response.status());
+                let success = response.status().is_success();
+                budget
+                    .runtime
+                    .record_result(budget.provider, started.elapsed(), success)
+                    .await;
                 if attempt < attempts && retry_same_provider(class) {
                     let wait = retry_after(&response)
                         .unwrap_or(delay)
@@ -295,6 +432,10 @@ pub async fn send_json(
                 } else {
                     FailureClass::Transport
                 };
+                budget
+                    .runtime
+                    .record_result(budget.provider, started.elapsed(), false)
+                    .await;
                 if attempt < attempts {
                     tokio::time::sleep(delay.min(policy.max_delay)).await;
                     delay = delay.saturating_mul(2).min(policy.max_delay);
@@ -513,5 +654,62 @@ mod tests {
                 .available_permits(),
             1
         );
+    }
+    #[tokio::test]
+    async fn provider_pacing_delays_back_to_back_requests() {
+        let runtime = Runtime::with_policy(
+            2,
+            Duration::ZERO,
+            Duration::from_secs(1),
+            Duration::from_millis(30),
+        );
+        let first = runtime.acquire("fixture", true).await.unwrap();
+        drop(first);
+        let started = Instant::now();
+        let second = runtime.acquire("fixture", true).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(20));
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn latency_ordering_prefers_healthy_fast_provider() {
+        let runtime = Runtime::new(2, Duration::ZERO);
+        runtime
+            .record_result_for_test("slow", Duration::from_millis(100), true)
+            .await;
+        runtime
+            .record_result_for_test("fast", Duration::from_millis(10), true)
+            .await;
+        let mut candidates = vec!["slow".to_owned(), "fast".to_owned()];
+        runtime
+            .order_by_health(&mut candidates, String::as_str)
+            .await;
+        assert_eq!(candidates, ["fast", "slow"]);
+    }
+
+    #[tokio::test]
+    async fn adaptive_cooldown_tracks_failure_streaks() {
+        let runtime = Runtime::with_policy(
+            1,
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+            Duration::ZERO,
+        );
+        runtime
+            .record_result_for_test("fixture", Duration::from_millis(1), false)
+            .await;
+        runtime.mark_cooldown("fixture", None).await;
+        let first = runtime.cooldown_remaining("fixture").await.unwrap();
+        runtime
+            .record_result_for_test("fixture", Duration::from_millis(1), false)
+            .await;
+        runtime.mark_cooldown("fixture", None).await;
+        let second = runtime.cooldown_remaining("fixture").await.unwrap();
+        assert!(second > first);
+        runtime
+            .record_result_for_test("fixture", Duration::from_millis(1), true)
+            .await;
+        let status = runtime.provider_statuses(&["fixture".into()]).await;
+        assert_eq!(status[0].consecutive_failures, 0);
     }
 }

@@ -55,7 +55,7 @@ impl RegistryStore {
 impl ComboRoute {
     fn start_index(&self) -> usize {
         match self.strategy {
-            crate::combo::Strategy::Failover => 0,
+            crate::combo::Strategy::Failover | crate::combo::Strategy::LowestLatency => 0,
             crate::combo::Strategy::WeightedRoundRobin => {
                 let total = self
                     .weights
@@ -386,6 +386,7 @@ impl Registry {
                             match combo.strategy {
                                 crate::combo::Strategy::Failover => "failover",
                                 crate::combo::Strategy::WeightedRoundRobin => "weighted",
+                                crate::combo::Strategy::LowestLatency => "lowest latency",
                             }
                         ),
                         reasoning: combo.models.iter().any(|model| {
@@ -469,6 +470,10 @@ impl Registry {
     }
     pub fn provider_count(&self) -> usize {
         self.inner.providers.len()
+    }
+
+    pub fn combo_strategy(&self, model: &str) -> Option<crate::combo::Strategy> {
+        self.inner.combos.get(model).map(|combo| combo.strategy)
     }
 
     pub fn provider_keys(&self) -> Vec<String> {
