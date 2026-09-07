@@ -16,6 +16,71 @@ async fn antigravity_bridge(
     antigravity::handle(&registry, method, uri, headers, body).await
 }
 
+async fn send_routed<F>(
+    registry: &Registry,
+    requested_model: &str,
+    retry_policy: &upstream::RetryPolicy,
+    local_key: Option<HeaderValue>,
+    make_body: F,
+) -> Result<reqwest::Response, ApiError>
+where
+    F: Fn(&str) -> Result<Value, ApiError>,
+{
+    let candidates = registry
+        .resolve_candidates(requested_model)
+        .map_err(|error| ApiError::not_found(error.to_string()))?;
+    let candidate_count = candidates.len();
+    let mut last_error = None;
+    for (index, (provider, upstream_model)) in candidates.into_iter().enumerate() {
+        let body = make_body(&upstream_model)?;
+        let (base_url, mut headers) = match provider.request_parts(registry.client()).await {
+            Ok(parts) => parts,
+            Err(error) if index + 1 < candidate_count => {
+                last_error = Some(error.to_string());
+                continue;
+            }
+            Err(error) => {
+                return Err(ApiError::upstream(
+                    StatusCode::BAD_GATEWAY,
+                    error.to_string(),
+                ));
+            }
+        };
+        if let Some(value) = &local_key {
+            headers.insert("x-joocode-api-key", value.clone());
+        }
+        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        let response =
+            match upstream::send_json(registry.client(), &url, &headers, &body, retry_policy).await
+            {
+                Ok(response) => response,
+                Err(failure) => {
+                    if index + 1 < candidate_count && upstream::failover_eligible(failure.class) {
+                        last_error = Some(failure.message);
+                        continue;
+                    }
+                    return Err(ApiError::upstream(StatusCode::BAD_GATEWAY, failure.message));
+                }
+            };
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        let status = response.status();
+        let class = upstream::classify_status(status);
+        let body = response.text().await.unwrap_or_default();
+        let message = format!("upstream returned {status}: {body}");
+        if index + 1 < candidate_count && upstream::failover_eligible(class) {
+            last_error = Some(message);
+            continue;
+        }
+        return Err(ApiError::upstream(StatusCode::BAD_GATEWAY, message));
+    }
+    Err(ApiError::upstream(
+        StatusCode::BAD_GATEWAY,
+        last_error.unwrap_or_else(|| "all combo candidates failed".into()),
+    ))
+}
+
 use anyhow::Context;
 use async_stream::stream;
 use axum::{
@@ -47,13 +112,14 @@ use crate::{
     provider::{ModelInfo, Registry, RegistryStore},
     sources::SourceSelection,
     target_config::TargetPreferences,
-    upgrade,
+    upgrade, upstream,
 };
 
 #[derive(Clone)]
 struct AppState {
     registry: RegistryStore,
     stream_idle_timeout: Duration,
+    retry_policy: upstream::RetryPolicy,
 }
 
 const DEFAULT_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -65,6 +131,7 @@ struct ServerPolicy {
     allowed_origins: Vec<HeaderValue>,
     max_request_bytes: usize,
     stream_idle_timeout: Duration,
+    retry_policy: upstream::RetryPolicy,
     remote: bool,
 }
 
@@ -120,11 +187,13 @@ impl ServerPolicy {
         if stream_idle_timeout.is_zero() {
             anyhow::bail!("JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS must be greater than zero");
         }
+        let retry_policy = upstream::RetryPolicy::from_env()?;
         Ok(Self {
             auth_token,
             allowed_origins,
             max_request_bytes,
             stream_idle_timeout,
+            retry_policy,
             remote,
         })
     }
@@ -215,33 +284,14 @@ async fn anthropic_messages(
     let routable_model = requested_model
         .strip_prefix("claude-joocode/")
         .unwrap_or(requested_model);
-    let (provider, upstream_model) = registry
-        .resolve(routable_model)
-        .map_err(|error| ApiError::not_found(error.to_string()))?;
-    let chat_request = protocol::anthropic_to_chat_request(&request, &upstream_model)?;
-    let (base_url, upstream_headers) = provider
-        .request_parts(registry.client())
-        .await
-        .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
-    let response = registry
-        .client()
-        .post(format!(
-            "{}/chat/completions",
-            base_url.trim_end_matches('/')
-        ))
-        .headers(upstream_headers)
-        .json(&chat_request)
-        .send()
-        .await
-        .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(ApiError::upstream(
-            StatusCode::BAD_GATEWAY,
-            format!("upstream returned {status}: {body}"),
-        ));
-    }
+    let response = send_routed(
+        &registry,
+        routable_model,
+        &state.retry_policy,
+        None,
+        |upstream_model| protocol::anthropic_to_chat_request(&request, upstream_model),
+    )
+    .await?;
     if request
         .get("stream")
         .and_then(Value::as_bool)
@@ -454,7 +504,7 @@ fn desktop_base_url(address: std::net::SocketAddr) -> String {
 async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut request): Json<Value>,
+    Json(request): Json<Value>,
 ) -> Result<ResponseBody, ApiError> {
     let registry = state.registry.snapshot();
     let requested_model = request
@@ -462,28 +512,19 @@ async fn chat_completions(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("missing 'model'"))?
         .to_owned();
-    let (provider, upstream_model) = registry
-        .resolve(&requested_model)
-        .map_err(|e| ApiError::not_found(e.to_string()))?;
-    request["model"] = Value::String(upstream_model);
-    let (base_url, mut upstream_headers) = provider
-        .request_parts(registry.client())
-        .await
-        .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
-    if let Some(value) = headers.get("x-joocode-api-key") {
-        upstream_headers.insert("x-joocode-api-key", value.clone());
-    }
-    let response = registry
-        .client()
-        .post(format!(
-            "{}/chat/completions",
-            base_url.trim_end_matches('/')
-        ))
-        .headers(upstream_headers)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| ApiError::upstream(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let local_key = headers.get("x-joocode-api-key").cloned();
+    let response = send_routed(
+        &registry,
+        &requested_model,
+        &state.retry_policy,
+        local_key,
+        |upstream_model| {
+            let mut request = request.clone();
+            request["model"] = Value::String(upstream_model.to_owned());
+            Ok(request)
+        },
+    )
+    .await?;
     let status = response.status();
     let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
     let stream = response.bytes_stream().map_err(std::io::Error::other);
@@ -513,14 +554,15 @@ async fn proxy_openai(
     for name in [header::HOST, header::CONTENT_LENGTH, header::CONTENT_TYPE] {
         headers.remove(name);
     }
-    let response = registry
-        .client()
-        .post(url)
-        .headers(headers)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| ApiError::upstream(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let response = upstream::send_json(
+        registry.client(),
+        url,
+        &headers,
+        &request,
+        &state.retry_policy,
+    )
+    .await
+    .map_err(|failure| ApiError::upstream(StatusCode::BAD_GATEWAY, failure.message))?;
     let status = response.status();
     let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
     let stream = response.bytes_stream().map_err(std::io::Error::other);
@@ -871,6 +913,7 @@ fn build_router(registry: RegistryStore, policy: &ServerPolicy) -> Router {
     let state = AppState {
         registry,
         stream_idle_timeout: policy.stream_idle_timeout,
+        retry_policy: policy.retry_policy.clone(),
     };
     let protected = Router::new()
         .route("/v1/models", get(models))
@@ -1119,44 +1162,29 @@ async fn responses(
         return proxy_openai(state, headers, request).await;
     }
     let registry = state.registry.snapshot();
-    let (provider, upstream_model) = registry
-        .resolve(&requested_model)
-        .map_err(|e| ApiError::not_found(e.to_string()))?;
-    let chat_request = protocol::to_chat_request(&request, &upstream_model)?;
+    let first_candidate = registry
+        .resolve_candidates(&requested_model)
+        .map_err(|error| ApiError::not_found(error.to_string()))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::not_found(format!("unknown model '{requested_model}'")))?;
+    let chat_request = protocol::to_chat_request(&request, &first_candidate.1)?;
     let tool_namespaces = chat_request.tool_namespaces.clone();
-    let (base_url, mut upstream_headers) = provider
-        .request_parts(registry.client())
-        .await
-        .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
-    if let Some(value) = headers
+    let local_key = headers
         .get("x-joocode-api-key")
         .or_else(|| headers.get("x-joc-api-key"))
         .or_else(|| headers.get("x-open-initiative-api-key"))
-    {
-        upstream_headers.insert("x-joocode-api-key", value.clone());
-    }
-    let response = registry
-        .client()
-        .post(format!(
-            "{}/chat/completions",
-            base_url.trim_end_matches('/')
-        ))
-        .headers(upstream_headers)
-        .json(&chat_request.body)
-        .send()
-        .await
-        .map_err(|e| ApiError::upstream(StatusCode::BAD_GATEWAY, e.to_string()))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "upstream request failed".into());
-        return Err(ApiError::upstream(
-            StatusCode::BAD_GATEWAY,
-            format!("upstream returned {status}: {body}"),
-        ));
-    }
+        .cloned();
+    let response = send_routed(
+        &registry,
+        &requested_model,
+        &state.retry_policy,
+        local_key,
+        |upstream_model| {
+            protocol::to_chat_request(&request, upstream_model).map(|request| request.body)
+        },
+    )
+    .await?;
     if request
         .get("stream")
         .and_then(Value::as_bool)
@@ -1304,6 +1332,7 @@ mod tests {
                 .collect(),
             max_request_bytes: limit,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+            retry_policy: upstream::RetryPolicy::default(),
             remote,
         }
     }
@@ -1526,6 +1555,100 @@ mod tests {
         assert!(body.contains("event: error"));
         assert!(body.contains("upstream stream was idle"));
         assert!(!body.contains("event: message_stop"));
+    }
+
+    #[tokio::test]
+    async fn combo_fails_over_to_the_next_candidate() {
+        use crate::{
+            combo::Combo,
+            provider::{Credential, Provider},
+            sources::{DiscoveredCatalog, DiscoveredModel, DiscoveredProvider},
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        async fn provider_server(status: StatusCode, attempts: Arc<AtomicUsize>) -> SocketAddr {
+            let app = Router::new().route(
+                "/v1/chat/completions",
+                post(move |Json(body): Json<Value>| {
+                    let attempts = attempts.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        (
+                            status,
+                            Json(json!({
+                                "model": body["model"],
+                                "choices": [{"message":{"role":"assistant","content":"ok"}}]
+                            })),
+                        )
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            address
+        }
+
+        let first_attempts = Arc::new(AtomicUsize::new(0));
+        let second_attempts = Arc::new(AtomicUsize::new(0));
+        let first = provider_server(StatusCode::SERVICE_UNAVAILABLE, first_attempts.clone()).await;
+        let second = provider_server(StatusCode::OK, second_attempts.clone()).await;
+        let make_provider = |key: &str, address: SocketAddr, model: &str| DiscoveredProvider {
+            key: key.into(),
+            provider: Provider {
+                base_url: format!("http://{address}/v1"),
+                credential: Credential::None,
+                headers: HeaderMap::new(),
+            },
+            models: vec![DiscoveredModel {
+                info: ModelInfo {
+                    id: format!("{key}/{model}"),
+                    provider: key.into(),
+                    upstream_id: model.into(),
+                    name: model.into(),
+                    reasoning: false,
+                    context_window: None,
+                    max_output_tokens: None,
+                },
+            }],
+        };
+        let registry = Registry::from_catalogs_and_combos_for_test(
+            reqwest::Client::new(),
+            vec![Ok(DiscoveredCatalog {
+                source: "fixture".into(),
+                detail: None,
+                providers: vec![
+                    make_provider("first", first, "model-a"),
+                    make_provider("second", second, "model-b"),
+                ],
+            })],
+            vec![Combo {
+                name: "coding".into(),
+                models: vec!["first/model-a".into(), "second/model-b".into()],
+            }],
+        )
+        .unwrap();
+
+        let response = send_routed(
+            &registry,
+            "combo/coding",
+            &upstream::RetryPolicy {
+                max_attempts: 1,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+            },
+            None,
+            |model| Ok(json!({"model": model})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(first_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(second_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(response.json::<Value>().await.unwrap()["model"], "model-b");
     }
 
     #[test]

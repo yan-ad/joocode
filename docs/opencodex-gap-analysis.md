@@ -35,9 +35,9 @@ Joocode should not become:
 | Model/provider discovery | Yes | Yes, multi-source | Complete |
 | OpenAI-compatible local gateway | Yes | Yes | Complete |
 | Desktop-client auto-configuration | Yes | Codex, Zed, Claude Code, GitHub Copilot App, Grok Build, others | Stronger/different |
-| Combo failover routing | Yes | No | P1 |
+| Combo failover routing | Yes | Yes, ordered candidates | Complete |
 | Weighted round-robin | Yes | No | P1 |
-| Generic request retry/backoff | Yes | Limited | P1 |
+| Generic request retry/backoff | Yes | Yes, configurable with `Retry-After` | Complete |
 | Provider pacing and cooldown | Yes | No | P1 |
 | Non-loopback authentication | Yes | Yes, token required | Complete |
 | Restrictive remote CORS | Yes | Yes, explicit origin allowlist | Complete |
@@ -183,6 +183,8 @@ This is the highest-value feature group for Joocode's product direction.
 
 ### Model combos
 
+Status: **ordered failover shipped**. Weighted strategies remain pending.
+
 Expose virtual models such as:
 
 ```text
@@ -216,6 +218,9 @@ Supported strategies should eventually include:
 ### Retry policy
 
 Classify upstream failures before retrying:
+
+Status: **generic retries and failover classification shipped**. Provider pacing,
+cooldown state, and shared concurrency limits remain pending.
 
 ```rust
 enum UpstreamFailure {

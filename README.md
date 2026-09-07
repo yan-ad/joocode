@@ -302,6 +302,34 @@ The flat JSON format is deliberately simple:
 The running registry and detected desktop catalogs reload automatically. Override
 the path with `JOOCODE_PROVIDERS=/custom/providers.json`.
 
+## Failover combos
+
+Create virtual models that try multiple routed models in order:
+
+```text
+~/.config/joocode/combos.json
+```
+
+```json
+{
+  "combos": [
+    {
+      "name": "coding",
+      "models": [
+        "crabcode/clip/claude-sonnet-4.6",
+        "opencode/openrouter/gpt-5.5"
+      ]
+    }
+  ]
+}
+```
+
+The virtual model appears as `combo/coding`. Joocode retries transient failures
+on each candidate and moves to the next model for authentication, rate-limit,
+capacity, timeout, or transport failures. Invalid requests do not fail over.
+
+Override the file with `JOOCODE_COMBOS=/custom/combos.json`.
+
 ## Provider discovery
 
 All detected sources are enabled by default. Disable individual sources from
@@ -605,6 +633,19 @@ explicit error event instead of a false successful completion. Override it with:
 ```bash
 export JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS=120
 ```
+
+Configure upstream request retries when needed:
+
+```bash
+export JOOCODE_RETRY_ATTEMPTS=3
+export JOOCODE_RETRY_INITIAL_MS=250
+export JOOCODE_RETRY_MAX_MS=2000
+```
+
+Joocode retries transport failures and HTTP `408`, `429`, `500`, `502`, `503`,
+and `504`, while respecting numeric `Retry-After` headers. Streaming is retried
+only before a successful upstream response begins; emitted stream data is never
+replayed.
 
 ## CLI
 

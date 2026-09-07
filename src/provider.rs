@@ -199,6 +199,7 @@ struct RegistryInner {
     client: Client,
     providers: BTreeMap<String, Provider>,
     routes: BTreeMap<String, Route>,
+    combos: BTreeMap<String, Vec<Route>>,
     models: Vec<ModelInfo>,
     source_reports: Vec<SourceReport>,
 }
@@ -221,9 +222,27 @@ impl Registry {
         Self::from_catalogs(client, catalogs)
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_catalogs_and_combos_for_test(
+        client: Client,
+        catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
+        combos: Vec<crate::combo::Combo>,
+    ) -> anyhow::Result<Self> {
+        Self::from_catalogs_and_combos(client, catalogs, Ok(combos))
+    }
+
     fn from_catalogs(
         client: Client,
         catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
+    ) -> anyhow::Result<Self> {
+        let combos = crate::combo::load();
+        Self::from_catalogs_and_combos(client, catalogs, combos)
+    }
+
+    fn from_catalogs_and_combos(
+        client: Client,
+        catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
+        configured_combos: anyhow::Result<Vec<crate::combo::Combo>>,
     ) -> anyhow::Result<Self> {
         let mut providers = BTreeMap::new();
         let mut routes = BTreeMap::new();
@@ -291,12 +310,89 @@ impl Registry {
             }
         }
 
+        let mut combos = BTreeMap::new();
+        match configured_combos {
+            Ok(configured) => {
+                let mut combo_models = 0;
+                for combo in configured {
+                    let candidates = combo
+                        .models
+                        .iter()
+                        .filter_map(|model| routes.get(model).cloned())
+                        .collect::<Vec<_>>();
+                    if candidates.len() != combo.models.len() {
+                        source_reports.push(SourceReport {
+                            source: format!("combo/{}", combo.name),
+                            status: "error",
+                            providers: 0,
+                            models: 0,
+                            detail: Some("one or more combo models are unavailable".into()),
+                        });
+                        continue;
+                    }
+                    let id = format!("combo/{}", combo.name);
+                    combos.insert(id.clone(), candidates);
+                    models.push(ModelInfo {
+                        id,
+                        provider: "combo".into(),
+                        upstream_id: combo.name.clone(),
+                        name: format!("{} (failover)", combo.name),
+                        reasoning: combo.models.iter().any(|model| {
+                            models
+                                .iter()
+                                .any(|info| info.id == *model && info.reasoning)
+                        }),
+                        context_window: combo
+                            .models
+                            .iter()
+                            .filter_map(|model| {
+                                models
+                                    .iter()
+                                    .find(|info| info.id == *model)
+                                    .and_then(|info| info.context_window)
+                            })
+                            .min(),
+                        max_output_tokens: combo
+                            .models
+                            .iter()
+                            .filter_map(|model| {
+                                models
+                                    .iter()
+                                    .find(|info| info.id == *model)
+                                    .and_then(|info| info.max_output_tokens)
+                            })
+                            .min(),
+                    });
+                    combo_models += 1;
+                }
+                if combo_models > 0 {
+                    source_reports.push(SourceReport {
+                        source: "combos".into(),
+                        status: "loaded",
+                        providers: 0,
+                        models: combo_models,
+                        detail: crate::combo::path()
+                            .ok()
+                            .map(|path| path.display().to_string()),
+                    });
+                }
+            }
+            Err(error) => source_reports.push(SourceReport {
+                source: "combos".into(),
+                status: "error",
+                providers: 0,
+                models: 0,
+                detail: Some(error.to_string()),
+            }),
+        }
+
         models.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(Self {
             inner: Arc::new(RegistryInner {
                 client,
                 providers,
                 routes,
+                combos,
                 models,
                 source_reports,
             }),
@@ -308,7 +404,7 @@ impl Registry {
         client: Client,
         catalogs: Vec<anyhow::Result<DiscoveredCatalog>>,
     ) -> anyhow::Result<Self> {
-        Self::from_catalogs(client, catalogs)
+        Self::from_catalogs_and_combos(client, catalogs, Ok(Vec::new()))
     }
 
     pub fn client(&self) -> &Client {
@@ -329,6 +425,12 @@ impl Registry {
             .inner
             .routes
             .get(model)
+            .or_else(|| {
+                self.inner
+                    .combos
+                    .get(model)
+                    .and_then(|routes| routes.first())
+            })
             .with_context(|| format!("unknown model '{model}'"))?;
         let provider = self
             .inner
@@ -336,6 +438,24 @@ impl Registry {
             .get(&route.provider_key)
             .with_context(|| format!("provider route for '{model}' is unavailable"))?;
         Ok((provider, route.upstream_id.clone()))
+    }
+
+    pub fn resolve_candidates(&self, model: &str) -> anyhow::Result<Vec<(Provider, String)>> {
+        if let Some(routes) = self.inner.combos.get(model) {
+            return routes
+                .iter()
+                .map(|route| {
+                    let provider = self
+                        .inner
+                        .providers
+                        .get(&route.provider_key)
+                        .with_context(|| format!("provider route for '{model}' is unavailable"))?;
+                    Ok((provider.clone(), route.upstream_id.clone()))
+                })
+                .collect();
+        }
+        let (provider, upstream_id) = self.resolve(model)?;
+        Ok(vec![(provider.clone(), upstream_id)])
     }
 }
 

@@ -4,6 +4,7 @@ mod autostart;
 mod claude;
 mod cli;
 mod codex;
+mod combo;
 mod config;
 mod copilot_app;
 mod dashboard;
@@ -18,6 +19,7 @@ mod provider;
 mod sources;
 mod target_config;
 mod upgrade;
+mod upstream;
 mod zed;
 
 use anyhow::Context;
