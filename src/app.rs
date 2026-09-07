@@ -3197,23 +3197,22 @@ fn websocket_response_request(
         .get("model")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("missing 'model'"))?;
-    if websocket_uses_local_history(state, requested_model) {
-        if let Some(previous_id) = object
+    if websocket_uses_local_history(state, requested_model)
+        && let Some(previous_id) = object
             .remove("previous_response_id")
             .and_then(|value| value.as_str().map(str::to_owned))
-        {
-            let (_, prior) = history
-                .iter()
-                .find(|(id, _)| id == &previous_id)
-                .ok_or_else(|| {
-                    ApiError::not_found(format!(
-                        "unknown WebSocket previous_response_id '{previous_id}'"
-                    ))
-                })?;
-            let mut input = prior.clone();
-            input.extend(response_input_items(object.get("input"))?);
-            object.insert("input".into(), Value::Array(input));
-        }
+    {
+        let (_, prior) = history
+            .iter()
+            .find(|(id, _)| id == &previous_id)
+            .ok_or_else(|| {
+                ApiError::not_found(format!(
+                    "unknown WebSocket previous_response_id '{previous_id}'"
+                ))
+            })?;
+        let mut input = prior.clone();
+        input.extend(response_input_items(object.get("input"))?);
+        object.insert("input".into(), Value::Array(input));
     }
     Ok(event)
 }
