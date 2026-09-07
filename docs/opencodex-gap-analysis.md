@@ -38,7 +38,7 @@ Joocode should not become:
 | Combo failover routing | Yes | Yes, ordered candidates | Complete |
 | Weighted round-robin | Yes | No | P1 |
 | Generic request retry/backoff | Yes | Yes, configurable with `Retry-After` | Complete |
-| Provider pacing and cooldown | Yes | No | P1 |
+| Provider pacing and cooldown | Yes | Cooldown shipped; pacing pending | P1 |
 | Non-loopback authentication | Yes | Yes, token required | Complete |
 | Restrictive remote CORS | Yes | Yes, explicit origin allowlist | Complete |
 | Readiness endpoint | Yes | Yes, `/readyz` | Complete |
@@ -220,7 +220,8 @@ Supported strategies should eventually include:
 Classify upstream failures before retrying:
 
 Status: **generic retries and failover classification shipped**. Provider pacing,
-cooldown state, and shared concurrency limits remain pending.
+and adaptive quota-aware cooldown remain pending. Basic provider cooldown and
+per-provider concurrency limits are shipped.
 
 ```rust
 enum UpstreamFailure {

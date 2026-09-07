@@ -20,9 +20,10 @@ async fn send_routed<F>(
     registry: &Registry,
     requested_model: &str,
     retry_policy: &upstream::RetryPolicy,
+    runtime: &upstream::Runtime,
     local_key: Option<HeaderValue>,
     make_body: F,
-) -> Result<reqwest::Response, ApiError>
+) -> Result<upstream::UpstreamResponse, ApiError>
 where
     F: Fn(&str) -> Result<Value, ApiError>,
 {
@@ -31,7 +32,7 @@ where
         .map_err(|error| ApiError::not_found(error.to_string()))?;
     let candidate_count = candidates.len();
     let mut last_error = None;
-    for (index, (provider, upstream_model)) in candidates.into_iter().enumerate() {
+    for (index, (provider_key, provider, upstream_model)) in candidates.into_iter().enumerate() {
         let body = make_body(&upstream_model)?;
         let (base_url, mut headers) = match provider.request_parts(registry.client()).await {
             Ok(parts) => parts,
@@ -50,18 +51,29 @@ where
             headers.insert("x-joocode-api-key", value.clone());
         }
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-        let response =
-            match upstream::send_json(registry.client(), &url, &headers, &body, retry_policy).await
-            {
-                Ok(response) => response,
-                Err(failure) => {
-                    if index + 1 < candidate_count && upstream::failover_eligible(failure.class) {
-                        last_error = Some(failure.message);
-                        continue;
-                    }
-                    return Err(ApiError::upstream(StatusCode::BAD_GATEWAY, failure.message));
+        let response = match upstream::send_json(
+            registry.client(),
+            &url,
+            &headers,
+            &body,
+            retry_policy,
+            upstream::RouteBudget {
+                runtime,
+                provider: &provider_key,
+                wait_for_cooldown: candidate_count == 1,
+            },
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(failure) => {
+                if index + 1 < candidate_count && upstream::failover_eligible(failure.class) {
+                    last_error = Some(failure.message);
+                    continue;
                 }
-            };
+                return Err(ApiError::upstream(StatusCode::BAD_GATEWAY, failure.message));
+            }
+        };
         if response.status().is_success() {
             return Ok(response);
         }
@@ -120,6 +132,7 @@ struct AppState {
     registry: RegistryStore,
     stream_idle_timeout: Duration,
     retry_policy: upstream::RetryPolicy,
+    upstream_runtime: upstream::Runtime,
 }
 
 const DEFAULT_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -132,6 +145,7 @@ struct ServerPolicy {
     max_request_bytes: usize,
     stream_idle_timeout: Duration,
     retry_policy: upstream::RetryPolicy,
+    upstream_runtime: upstream::Runtime,
     remote: bool,
 }
 
@@ -188,12 +202,14 @@ impl ServerPolicy {
             anyhow::bail!("JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS must be greater than zero");
         }
         let retry_policy = upstream::RetryPolicy::from_env()?;
+        let upstream_runtime = upstream::Runtime::from_env()?;
         Ok(Self {
             auth_token,
             allowed_origins,
             max_request_bytes,
             stream_idle_timeout,
             retry_policy,
+            upstream_runtime,
             remote,
         })
     }
@@ -288,6 +304,7 @@ async fn anthropic_messages(
         &registry,
         routable_model,
         &state.retry_policy,
+        &state.upstream_runtime,
         None,
         |upstream_model| protocol::anthropic_to_chat_request(&request, upstream_model),
     )
@@ -517,6 +534,7 @@ async fn chat_completions(
         &registry,
         &requested_model,
         &state.retry_policy,
+        &state.upstream_runtime,
         local_key,
         |upstream_model| {
             let mut request = request.clone();
@@ -560,6 +578,11 @@ async fn proxy_openai(
         &headers,
         &request,
         &state.retry_policy,
+        upstream::RouteBudget {
+            runtime: &state.upstream_runtime,
+            provider: "openai-native",
+            wait_for_cooldown: true,
+        },
     )
     .await
     .map_err(|failure| ApiError::upstream(StatusCode::BAD_GATEWAY, failure.message))?;
@@ -914,6 +937,7 @@ fn build_router(registry: RegistryStore, policy: &ServerPolicy) -> Router {
         registry,
         stream_idle_timeout: policy.stream_idle_timeout,
         retry_policy: policy.retry_policy.clone(),
+        upstream_runtime: policy.upstream_runtime.clone(),
     };
     let protected = Router::new()
         .route("/v1/models", get(models))
@@ -1168,7 +1192,7 @@ async fn responses(
         .into_iter()
         .next()
         .ok_or_else(|| ApiError::not_found(format!("unknown model '{requested_model}'")))?;
-    let chat_request = protocol::to_chat_request(&request, &first_candidate.1)?;
+    let chat_request = protocol::to_chat_request(&request, &first_candidate.2)?;
     let tool_namespaces = chat_request.tool_namespaces.clone();
     let local_key = headers
         .get("x-joocode-api-key")
@@ -1179,6 +1203,7 @@ async fn responses(
         &registry,
         &requested_model,
         &state.retry_policy,
+        &state.upstream_runtime,
         local_key,
         |upstream_model| {
             protocol::to_chat_request(&request, upstream_model).map(|request| request.body)
@@ -1333,6 +1358,7 @@ mod tests {
             max_request_bytes: limit,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
             retry_policy: upstream::RetryPolicy::default(),
+            upstream_runtime: upstream::Runtime::new(8, Duration::ZERO),
             remote,
         }
     }
@@ -1640,6 +1666,7 @@ mod tests {
                 initial_delay: Duration::ZERO,
                 max_delay: Duration::ZERO,
             },
+            &upstream::Runtime::new(8, Duration::ZERO),
             None,
             |model| Ok(json!({"model": model})),
         )

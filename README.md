@@ -640,12 +640,18 @@ Configure upstream request retries when needed:
 export JOOCODE_RETRY_ATTEMPTS=3
 export JOOCODE_RETRY_INITIAL_MS=250
 export JOOCODE_RETRY_MAX_MS=2000
+export JOOCODE_PROVIDER_CONCURRENCY=8
+export JOOCODE_PROVIDER_COOLDOWN_MS=1000
 ```
 
 Joocode retries transport failures and HTTP `408`, `429`, `500`, `502`, `503`,
 and `504`, while respecting numeric `Retry-After` headers. Streaming is retried
 only before a successful upstream response begins; emitted stream data is never
 replayed.
+
+Concurrency is bounded per discovered provider and the permit is held until the
+response body or stream finishes. Providers that exhaust retries enter a short
+cooldown; combo routes skip cooling candidates while direct model requests wait.
 
 ## CLI
 

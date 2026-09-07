@@ -1,7 +1,12 @@
-use std::time::Duration;
+use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
 
+use anyhow::Context;
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Response, StatusCode, header::HeaderMap};
 use serde_json::Value;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::time::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FailureClass {
@@ -10,8 +15,26 @@ pub enum FailureClass {
     Capacity,
     Timeout,
     Transport,
+    Cooldown,
     InvalidRequest,
     Provider,
+}
+
+#[derive(Clone, Debug)]
+pub struct RetryPolicy {
+    pub max_attempts: usize,
+    pub initial_delay: Duration,
+    pub max_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(250),
+            max_delay: Duration::from_secs(2),
+        }
+    }
 }
 
 impl RetryPolicy {
@@ -37,31 +60,95 @@ impl RetryPolicy {
     }
 }
 
-fn parse_env(name: &str) -> anyhow::Result<Option<usize>> {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            value
-                .parse::<usize>()
-                .map_err(|error| anyhow::anyhow!("{name} must be a non-negative integer: {error}"))
-        })
-        .transpose()
-}
-
 #[derive(Clone, Debug)]
-pub struct RetryPolicy {
-    pub max_attempts: usize,
-    pub initial_delay: Duration,
-    pub max_delay: Duration,
+pub struct Runtime {
+    inner: Arc<RuntimeInner>,
 }
 
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_attempts: 3,
-            initial_delay: Duration::from_millis(250),
-            max_delay: Duration::from_secs(2),
+#[derive(Debug)]
+struct RuntimeInner {
+    concurrency: usize,
+    default_cooldown: Duration,
+    semaphores: Mutex<HashMap<String, Arc<Semaphore>>>,
+    cooldowns: Mutex<HashMap<String, Instant>>,
+}
+
+impl Runtime {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let concurrency = parse_env("JOOCODE_PROVIDER_CONCURRENCY")?.unwrap_or(8);
+        if concurrency == 0 {
+            anyhow::bail!("JOOCODE_PROVIDER_CONCURRENCY must be greater than zero");
         }
+        let default_cooldown = Duration::from_millis(
+            parse_env("JOOCODE_PROVIDER_COOLDOWN_MS")?.unwrap_or(1_000) as u64,
+        );
+        Ok(Self::new(concurrency, default_cooldown))
+    }
+
+    pub fn new(concurrency: usize, default_cooldown: Duration) -> Self {
+        Self {
+            inner: Arc::new(RuntimeInner {
+                concurrency,
+                default_cooldown,
+                semaphores: Mutex::new(HashMap::new()),
+                cooldowns: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    async fn acquire(
+        &self,
+        provider: &str,
+        wait_for_cooldown: bool,
+    ) -> Result<OwnedSemaphorePermit, SendFailure> {
+        if let Some(remaining) = self.cooldown_remaining(provider).await {
+            if wait_for_cooldown {
+                tokio::time::sleep(remaining).await;
+            } else {
+                return Err(SendFailure {
+                    class: FailureClass::Cooldown,
+                    message: format!("provider '{provider}' is cooling down"),
+                });
+            }
+        }
+        let semaphore = {
+            let mut semaphores = self.inner.semaphores.lock().await;
+            semaphores
+                .entry(provider.to_owned())
+                .or_insert_with(|| Arc::new(Semaphore::new(self.inner.concurrency)))
+                .clone()
+        };
+        semaphore
+            .acquire_owned()
+            .await
+            .map_err(|error| SendFailure {
+                class: FailureClass::Transport,
+                message: format!("provider concurrency gate closed: {error}"),
+            })
+    }
+
+    async fn cooldown_remaining(&self, provider: &str) -> Option<Duration> {
+        let mut cooldowns = self.inner.cooldowns.lock().await;
+        let until = cooldowns.get(provider).copied()?;
+        let now = Instant::now();
+        if until <= now {
+            cooldowns.remove(provider);
+            None
+        } else {
+            Some(until.duration_since(now))
+        }
+    }
+
+    async fn mark_cooldown(&self, provider: &str, duration: Option<Duration>) {
+        let duration = duration.unwrap_or(self.inner.default_cooldown);
+        if duration.is_zero() {
+            return;
+        }
+        self.inner
+            .cooldowns
+            .lock()
+            .await
+            .insert(provider.to_owned(), Instant::now() + duration);
     }
 }
 
@@ -71,15 +158,65 @@ pub struct SendFailure {
     pub message: String,
 }
 
+#[derive(Clone, Copy)]
+pub struct RouteBudget<'a> {
+    pub runtime: &'a Runtime,
+    pub provider: &'a str,
+    pub wait_for_cooldown: bool,
+}
+
+pub struct UpstreamResponse {
+    response: Response,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl UpstreamResponse {
+    pub fn status(&self) -> StatusCode {
+        self.response.status()
+    }
+
+    pub fn headers(&self) -> &HeaderMap {
+        self.response.headers()
+    }
+
+    pub async fn text(self) -> Result<String, reqwest::Error> {
+        self.response.text().await
+    }
+
+    pub async fn json<T: serde::de::DeserializeOwned>(self) -> Result<T, reqwest::Error> {
+        self.response.json().await
+    }
+
+    pub fn bytes_stream(self) -> Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> {
+        let UpstreamResponse {
+            response,
+            _permit: permit,
+        } = self;
+        let stream = async_stream::stream! {
+            let _permit = permit;
+            let mut upstream = Box::pin(response.bytes_stream());
+            while let Some(item) = upstream.next().await {
+                yield item;
+            }
+        };
+        Box::pin(stream)
+    }
+}
+
 pub async fn send_json(
     client: &Client,
     url: &str,
     headers: &HeaderMap,
     body: &Value,
     policy: &RetryPolicy,
-) -> Result<Response, SendFailure> {
+    budget: RouteBudget<'_>,
+) -> Result<UpstreamResponse, SendFailure> {
     let attempts = policy.max_attempts.max(1);
     let mut delay = policy.initial_delay;
+    let permit = budget
+        .runtime
+        .acquire(budget.provider, budget.wait_for_cooldown)
+        .await?;
     for attempt in 1..=attempts {
         match client
             .post(url)
@@ -98,7 +235,16 @@ pub async fn send_json(
                     delay = delay.saturating_mul(2).min(policy.max_delay);
                     continue;
                 }
-                return Ok(response);
+                if failover_eligible(class) {
+                    budget
+                        .runtime
+                        .mark_cooldown(budget.provider, retry_after(&response))
+                        .await;
+                }
+                return Ok(UpstreamResponse {
+                    response,
+                    _permit: permit,
+                });
             }
             Err(error) => {
                 let class = if error.is_timeout() {
@@ -111,6 +257,7 @@ pub async fn send_json(
                     delay = delay.saturating_mul(2).min(policy.max_delay);
                     continue;
                 }
+                budget.runtime.mark_cooldown(budget.provider, None).await;
                 return Err(SendFailure {
                     class,
                     message: error.to_string(),
@@ -150,6 +297,7 @@ pub fn failover_eligible(class: FailureClass) -> bool {
             | FailureClass::Capacity
             | FailureClass::Timeout
             | FailureClass::Transport
+            | FailureClass::Cooldown
     )
 }
 
@@ -163,6 +311,17 @@ fn retry_after(response: &Response) -> Option<Duration> {
         .parse::<u64>()
         .ok()
         .map(Duration::from_secs)
+}
+
+fn parse_env(name: &str) -> anyhow::Result<Option<usize>> {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .with_context(|| format!("{name} must be a non-negative integer"))
+        })
+        .transpose()
 }
 
 #[cfg(test)]
@@ -226,10 +385,76 @@ mod tests {
                 initial_delay: Duration::from_secs(5),
                 max_delay: Duration::from_secs(5),
             },
+            RouteBudget {
+                runtime: &Runtime::new(8, Duration::ZERO),
+                provider: "fixture",
+                wait_for_cooldown: true,
+            },
         )
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cooldown_can_skip_combo_candidates() {
+        let runtime = Runtime::new(1, Duration::from_secs(60));
+        runtime.mark_cooldown("busy", None).await;
+        let failure = runtime.acquire("busy", false).await.unwrap_err();
+        assert_eq!(failure.class, FailureClass::Cooldown);
+    }
+
+    #[tokio::test]
+    async fn concurrency_permit_is_held_until_the_body_finishes() {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { Json(json!({"ok":true})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let runtime = Runtime::new(1, Duration::ZERO);
+        let response = send_json(
+            &Client::new(),
+            &format!("http://{address}/v1/chat/completions"),
+            &HeaderMap::new(),
+            &json!({}),
+            &RetryPolicy {
+                max_attempts: 1,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+            },
+            RouteBudget {
+                runtime: &runtime,
+                provider: "fixture",
+                wait_for_cooldown: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            runtime
+                .inner
+                .semaphores
+                .lock()
+                .await
+                .get("fixture")
+                .unwrap()
+                .available_permits(),
+            0
+        );
+        drop(response);
+        assert_eq!(
+            runtime
+                .inner
+                .semaphores
+                .lock()
+                .await
+                .get("fixture")
+                .unwrap()
+                .available_permits(),
+            1
+        );
     }
 }

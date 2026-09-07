@@ -440,7 +440,10 @@ impl Registry {
         Ok((provider, route.upstream_id.clone()))
     }
 
-    pub fn resolve_candidates(&self, model: &str) -> anyhow::Result<Vec<(Provider, String)>> {
+    pub fn resolve_candidates(
+        &self,
+        model: &str,
+    ) -> anyhow::Result<Vec<(String, Provider, String)>> {
         if let Some(routes) = self.inner.combos.get(model) {
             return routes
                 .iter()
@@ -450,12 +453,29 @@ impl Registry {
                         .providers
                         .get(&route.provider_key)
                         .with_context(|| format!("provider route for '{model}' is unavailable"))?;
-                    Ok((provider.clone(), route.upstream_id.clone()))
+                    Ok((
+                        route.provider_key.clone(),
+                        provider.clone(),
+                        route.upstream_id.clone(),
+                    ))
                 })
                 .collect();
         }
-        let (provider, upstream_id) = self.resolve(model)?;
-        Ok(vec![(provider.clone(), upstream_id)])
+        let route = self
+            .inner
+            .routes
+            .get(model)
+            .with_context(|| format!("unknown model '{model}'"))?;
+        let provider = self
+            .inner
+            .providers
+            .get(&route.provider_key)
+            .with_context(|| format!("provider route for '{model}' is unavailable"))?;
+        Ok(vec![(
+            route.provider_key.clone(),
+            provider.clone(),
+            route.upstream_id.clone(),
+        )])
     }
 }
 
