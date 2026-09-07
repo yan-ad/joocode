@@ -50,7 +50,7 @@ Joocode should not become:
 | Native Anthropic upstream | Yes | Mostly translated through Chat Completions | P3 |
 | Native Gemini upstream | Yes | Partial/source-specific | P3 |
 | Native Responses upstream | Yes | Partial | P3 |
-| Responses compact endpoint | Yes | No | P3 |
+| Responses compact endpoint | Yes | Native OpenAI passthrough; routed models pending | P3 |
 | Responses WebSocket | Yes | No | P3 |
 | Image generation/edit endpoints | Yes | No | P3 |
 | Realtime/Live API | Yes | No | P5 |

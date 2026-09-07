@@ -16,6 +16,63 @@ async fn antigravity_bridge(
     antigravity::handle(&registry, method, uri, headers, body).await
 }
 
+fn compact_upstream_url(chatgpt_session: bool) -> &'static str {
+    if chatgpt_session {
+        "https://chatgpt.com/backend-api/codex/responses/compact"
+    } else {
+        "https://api.openai.com/v1/responses/compact"
+    }
+}
+
+async fn compact_responses(
+    State(state): State<AppState>,
+    mut headers: HeaderMap,
+    Json(request): Json<Value>,
+) -> Result<ResponseBody, ApiError> {
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("missing 'model'"))?;
+    if model.contains('/') {
+        return Err(ApiError {
+            status: StatusCode::NOT_IMPLEMENTED,
+            kind: "unsupported_feature",
+            message: "routed models do not expose native Responses compaction; use an OpenAI native model or shorten the conversation client-side".into(),
+        });
+    }
+    let registry = state.registry.snapshot();
+    let url = compact_upstream_url(headers.contains_key("chatgpt-account-id"));
+    for name in [header::HOST, header::CONTENT_LENGTH, header::CONTENT_TYPE] {
+        headers.remove(name);
+    }
+    let response = upstream::send_json(
+        registry.client(),
+        url,
+        &headers,
+        &request,
+        &state.retry_policy,
+        upstream::RouteBudget {
+            runtime: &state.upstream_runtime,
+            provider: "openai-native",
+            wait_for_cooldown: true,
+        },
+    )
+    .await
+    .map_err(|failure| ApiError::upstream(StatusCode::BAD_GATEWAY, failure.message))?;
+    let status = response.status();
+    let body = response
+        .json::<Value>()
+        .await
+        .map_err(|error| ApiError::upstream(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    if !status.is_success() {
+        return Err(ApiError::upstream(
+            StatusCode::BAD_GATEWAY,
+            format!("upstream returned {status}: {body}"),
+        ));
+    }
+    Ok(ResponseBody::Json(Json(body)))
+}
+
 async fn send_routed<F>(
     registry: &Registry,
     requested_model: &str,
@@ -954,6 +1011,7 @@ fn build_router(registry: RegistryStore, policy: &ServerPolicy) -> Router {
     let protected = Router::new()
         .route("/v1/models", get(models))
         .route("/v1/responses", post(responses))
+        .route("/v1/responses/compact", post(compact_responses))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/messages/count_tokens", post(anthropic_count_tokens))
@@ -1568,6 +1626,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn routed_models_report_native_compaction_as_unsupported() {
+        let app = build_router(
+            RegistryStore::new(fixture_registry()),
+            &policy(false, None, &[], DEFAULT_MAX_REQUEST_BYTES),
+        );
+        let response = app
+            .oneshot(
+                HttpRequest::post("/v1/responses/compact")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"model":"fixture/model-a","input":"history"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("native Responses compaction"));
+    }
+
+    #[test]
+    fn compaction_uses_the_matching_openai_backend() {
+        assert_eq!(
+            compact_upstream_url(false),
+            "https://api.openai.com/v1/responses/compact"
+        );
+        assert_eq!(
+            compact_upstream_url(true),
+            "https://chatgpt.com/backend-api/codex/responses/compact"
+        );
     }
 
     #[tokio::test]

@@ -502,6 +502,11 @@ Upstream models may only call tools declared by the client request. Hallucinated
 tool names are rejected; streaming Responses become incomplete and Anthropic
 streams emit an error rather than forwarding an unauthorized tool execution.
 
+`POST /v1/responses/compact` is supported for native OpenAI/ChatGPT models and
+preserves Codex-managed authentication. Routed Chat Completions models return an
+explicit `501` because the official compaction item is opaque/encrypted and
+cannot be emulated safely without a native Responses upstream.
+
 Manual provider configuration:
 
 ```toml
