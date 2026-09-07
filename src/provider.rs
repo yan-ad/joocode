@@ -6,6 +6,7 @@ use reqwest::{
     header::{HeaderMap, HeaderValue},
 };
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
 #[cfg(test)]
@@ -21,6 +22,13 @@ pub struct ModelInfo {
     pub reasoning: bool,
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u64>,
+}
+
+struct ComboRoute {
+    routes: Vec<Route>,
+    weights: Vec<u32>,
+    strategy: crate::combo::Strategy,
+    cursor: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -41,6 +49,30 @@ impl RegistryStore {
 
     pub fn replace(&self, registry: Registry) {
         *self.inner.write().expect("registry lock poisoned") = registry;
+    }
+}
+
+impl ComboRoute {
+    fn start_index(&self) -> usize {
+        match self.strategy {
+            crate::combo::Strategy::Failover => 0,
+            crate::combo::Strategy::WeightedRoundRobin => {
+                let total = self
+                    .weights
+                    .iter()
+                    .map(|weight| u64::from(*weight))
+                    .sum::<u64>();
+                let position = self.cursor.fetch_add(1, Ordering::Relaxed) % total;
+                let mut boundary = 0_u64;
+                self.weights
+                    .iter()
+                    .position(|weight| {
+                        boundary += u64::from(*weight);
+                        position < boundary
+                    })
+                    .unwrap_or(0)
+            }
+        }
     }
 }
 
@@ -199,7 +231,7 @@ struct RegistryInner {
     client: Client,
     providers: BTreeMap<String, Provider>,
     routes: BTreeMap<String, Route>,
-    combos: BTreeMap<String, Vec<Route>>,
+    combos: BTreeMap<String, ComboRoute>,
     models: Vec<ModelInfo>,
     source_reports: Vec<SourceReport>,
 }
@@ -318,7 +350,7 @@ impl Registry {
                     let candidates = combo
                         .models
                         .iter()
-                        .filter_map(|model| routes.get(model).cloned())
+                        .filter_map(|model| routes.get(model.model()).cloned())
                         .collect::<Vec<_>>();
                     if candidates.len() != combo.models.len() {
                         source_reports.push(SourceReport {
@@ -331,16 +363,35 @@ impl Registry {
                         continue;
                     }
                     let id = format!("combo/{}", combo.name);
-                    combos.insert(id.clone(), candidates);
+                    combos.insert(
+                        id.clone(),
+                        ComboRoute {
+                            routes: candidates,
+                            weights: combo
+                                .models
+                                .iter()
+                                .map(crate::combo::ComboModel::weight)
+                                .collect(),
+                            strategy: combo.strategy,
+                            cursor: AtomicU64::new(0),
+                        },
+                    );
                     models.push(ModelInfo {
                         id,
                         provider: "combo".into(),
                         upstream_id: combo.name.clone(),
-                        name: format!("{} (failover)", combo.name),
+                        name: format!(
+                            "{} ({})",
+                            combo.name,
+                            match combo.strategy {
+                                crate::combo::Strategy::Failover => "failover",
+                                crate::combo::Strategy::WeightedRoundRobin => "weighted",
+                            }
+                        ),
                         reasoning: combo.models.iter().any(|model| {
                             models
                                 .iter()
-                                .any(|info| info.id == *model && info.reasoning)
+                                .any(|info| info.id == model.model() && info.reasoning)
                         }),
                         context_window: combo
                             .models
@@ -348,7 +399,7 @@ impl Registry {
                             .filter_map(|model| {
                                 models
                                     .iter()
-                                    .find(|info| info.id == *model)
+                                    .find(|info| info.id == model.model())
                                     .and_then(|info| info.context_window)
                             })
                             .min(),
@@ -358,7 +409,7 @@ impl Registry {
                             .filter_map(|model| {
                                 models
                                     .iter()
-                                    .find(|info| info.id == *model)
+                                    .find(|info| info.id == model.model())
                                     .and_then(|info| info.max_output_tokens)
                             })
                             .min(),
@@ -429,7 +480,7 @@ impl Registry {
                 self.inner
                     .combos
                     .get(model)
-                    .and_then(|routes| routes.first())
+                    .and_then(|combo| combo.routes.first())
             })
             .with_context(|| format!("unknown model '{model}'"))?;
         let provider = self
@@ -444,9 +495,14 @@ impl Registry {
         &self,
         model: &str,
     ) -> anyhow::Result<Vec<(String, Provider, String)>> {
-        if let Some(routes) = self.inner.combos.get(model) {
-            return routes
+        if let Some(combo) = self.inner.combos.get(model) {
+            let start = combo.start_index();
+            return combo
+                .routes
                 .iter()
+                .cycle()
+                .skip(start)
+                .take(combo.routes.len())
                 .map(|route| {
                     let provider = self
                         .inner
@@ -521,5 +577,62 @@ mod tests {
         let (provider, upstream_id) = registry.resolve("hermes/local/model-a").unwrap();
         assert_eq!(provider.base_url, "https://example.test/v1");
         assert_eq!(upstream_id, "model-a");
+    }
+
+    #[test]
+    fn weighted_combo_rotates_primary_candidate_by_weight() {
+        use crate::combo::{Combo, ComboModel, Strategy};
+
+        let discovered = |key: &str, model: &str| DiscoveredProvider {
+            key: key.into(),
+            provider: Provider {
+                base_url: format!("https://{key}.example/v1"),
+                credential: Credential::None,
+                headers: HeaderMap::new(),
+            },
+            models: vec![DiscoveredModel {
+                info: ModelInfo {
+                    id: format!("{key}/{model}"),
+                    provider: key.into(),
+                    upstream_id: model.into(),
+                    name: model.into(),
+                    reasoning: false,
+                    context_window: None,
+                    max_output_tokens: None,
+                },
+            }],
+        };
+        let registry = Registry::from_catalogs_and_combos_for_test(
+            Client::new(),
+            vec![Ok(DiscoveredCatalog {
+                source: "fixture".into(),
+                detail: None,
+                providers: vec![discovered("a", "model"), discovered("b", "model")],
+            })],
+            vec![Combo {
+                name: "balanced".into(),
+                strategy: Strategy::WeightedRoundRobin,
+                models: vec![
+                    ComboModel::Weighted {
+                        model: "a/model".into(),
+                        weight: 3,
+                    },
+                    ComboModel::Weighted {
+                        model: "b/model".into(),
+                        weight: 1,
+                    },
+                ],
+            }],
+        )
+        .unwrap();
+
+        let primaries = (0..8)
+            .map(|_| {
+                registry.resolve_candidates("combo/balanced").unwrap()[0]
+                    .0
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(primaries, vec!["a", "a", "a", "b", "a", "a", "a", "b"]);
     }
 }

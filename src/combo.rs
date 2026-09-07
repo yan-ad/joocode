@@ -3,10 +3,48 @@ use std::{collections::BTreeSet, fs, path::PathBuf};
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Strategy {
+    #[default]
+    Failover,
+    WeightedRoundRobin,
+}
+
+impl From<&str> for ComboModel {
+    fn from(model: &str) -> Self {
+        Self::Model(model.to_owned())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ComboModel {
+    Model(String),
+    Weighted { model: String, weight: u32 },
+}
+
+impl ComboModel {
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Model(model) | Self::Weighted { model, .. } => model,
+        }
+    }
+
+    pub fn weight(&self) -> u32 {
+        match self {
+            Self::Model(_) => 1,
+            Self::Weighted { weight, .. } => *weight,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Combo {
     pub name: String,
-    pub models: Vec<String>,
+    #[serde(default)]
+    pub strategy: Strategy,
+    pub models: Vec<ComboModel>,
 }
 
 #[derive(Deserialize)]
@@ -58,6 +96,24 @@ fn validate(combos: Vec<Combo>) -> anyhow::Result<Vec<Combo>> {
         if combo.models.is_empty() {
             bail!("combo '{name}' must contain at least one model");
         }
+        let mut models = BTreeSet::new();
+        for model in &combo.models {
+            if model.model().trim().is_empty() {
+                bail!("combo '{name}' contains an empty model ID");
+            }
+            if !models.insert(model.model()) {
+                bail!(
+                    "combo '{name}' contains duplicate model '{}'",
+                    model.model()
+                );
+            }
+            if model.weight() == 0 {
+                bail!(
+                    "combo '{name}' model '{}' must have a positive weight",
+                    model.model()
+                );
+            }
+        }
     }
     Ok(combos)
 }
@@ -67,7 +123,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loads_list_and_object_forms() {
+    fn loads_legacy_and_weighted_forms() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("combos.json");
         fs::write(
@@ -76,11 +132,17 @@ mod tests {
         )
         .unwrap();
         let combos = load_from(&path).unwrap();
-        assert_eq!(combos[0].name, "coding");
-        assert_eq!(combos[0].models.len(), 2);
+        assert_eq!(combos[0].strategy, Strategy::Failover);
+        assert_eq!(combos[0].models[0].model(), "a/model");
 
-        fs::write(&path, r#"[{"name":"fast","models":["a/model"]}]"#).unwrap();
-        assert_eq!(load_from(&path).unwrap()[0].name, "fast");
+        fs::write(
+            &path,
+            r#"[{"name":"balanced","strategy":"weighted-round-robin","models":[{"model":"a/model","weight":3},{"model":"b/model","weight":1}]}]"#,
+        )
+        .unwrap();
+        let combo = load_from(&path).unwrap().remove(0);
+        assert_eq!(combo.strategy, Strategy::WeightedRoundRobin);
+        assert_eq!(combo.models[0].weight(), 3);
     }
 
     #[test]
@@ -88,14 +150,27 @@ mod tests {
         assert!(
             validate(vec![Combo {
                 name: "bad/name".into(),
-                models: vec!["a/model".into()]
+                strategy: Strategy::Failover,
+                models: vec![ComboModel::Model("a/model".into())]
             }])
             .is_err()
         );
         assert!(
             validate(vec![Combo {
                 name: "empty".into(),
+                strategy: Strategy::Failover,
                 models: vec![]
+            }])
+            .is_err()
+        );
+        assert!(
+            validate(vec![Combo {
+                name: "zero".into(),
+                strategy: Strategy::WeightedRoundRobin,
+                models: vec![ComboModel::Weighted {
+                    model: "a/model".into(),
+                    weight: 0
+                }]
             }])
             .is_err()
         );

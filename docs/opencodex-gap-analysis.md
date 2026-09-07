@@ -36,7 +36,7 @@ Joocode should not become:
 | OpenAI-compatible local gateway | Yes | Yes | Complete |
 | Desktop-client auto-configuration | Yes | Codex, Zed, Claude Code, GitHub Copilot App, Grok Build, others | Stronger/different |
 | Combo failover routing | Yes | Yes, ordered candidates | Complete |
-| Weighted round-robin | Yes | No | P1 |
+| Weighted round-robin | Yes | Yes, deterministic weighted selection | Complete |
 | Generic request retry/backoff | Yes | Yes, configurable with `Retry-After` | Complete |
 | Provider pacing and cooldown | Yes | Cooldown shipped; pacing pending | P1 |
 | Non-loopback authentication | Yes | Yes, token required | Complete |
@@ -183,7 +183,7 @@ This is the highest-value feature group for Joocode's product direction.
 
 ### Model combos
 
-Status: **ordered failover shipped**. Weighted strategies remain pending.
+Status: **ordered failover and weighted round-robin shipped**.
 
 Expose virtual models such as:
 

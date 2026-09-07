@@ -328,6 +328,24 @@ The virtual model appears as `combo/coding`. Joocode retries transient failures
 on each candidate and moves to the next model for authentication, rate-limit,
 capacity, timeout, or transport failures. Invalid requests do not fail over.
 
+Weighted round-robin uses object entries while preserving failover to the other
+candidates when the selected provider is unavailable:
+
+```json
+{
+  "combos": [
+    {
+      "name": "balanced",
+      "strategy": "weighted-round-robin",
+      "models": [
+        { "model": "crabcode/clip/claude-sonnet-4.6", "weight": 3 },
+        { "model": "opencode/openrouter/gpt-5.5", "weight": 1 }
+      ]
+    }
+  ]
+}
+```
+
 Override the file with `JOOCODE_COMBOS=/custom/combos.json`.
 
 ## Provider discovery
