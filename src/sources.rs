@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use clap::ValueEnum;
+use futures_util::{StreamExt, stream};
 use reqwest::{
     Client,
     header::{HeaderMap, HeaderName, HeaderValue},
@@ -594,12 +595,18 @@ pub async fn discover(
 ) -> Vec<anyhow::Result<DiscoveredCatalog>> {
     let mut catalogs = Vec::new();
     if selection.enabled(SourceKind::OpenCode) {
-        catalogs
-            .push(discover_opencode(selection).map_err(|error| source_error("opencode", error)));
+        catalogs.push(
+            discover_opencode(selection, client)
+                .await
+                .map_err(|error| source_error("opencode", error)),
+        );
     }
     if selection.enabled(SourceKind::CrabCode) {
-        catalogs
-            .push(discover_crabcode(selection).map_err(|error| source_error("crabcode", error)));
+        catalogs.push(
+            discover_crabcode(selection, client)
+                .await
+                .map_err(|error| source_error("crabcode", error)),
+        );
     }
     if selection.enabled(SourceKind::Ocx) {
         catalogs.push(discover_ocx(selection).map_err(|error| source_error("ocx", error)));
@@ -672,7 +679,10 @@ fn empty_catalog(source: &str, detail: impl Into<String>) -> DiscoveredCatalog {
     }
 }
 
-fn discover_opencode(selection: &SourceSelection) -> anyhow::Result<DiscoveredCatalog> {
+async fn discover_opencode(
+    selection: &SourceSelection,
+    client: &Client,
+) -> anyhow::Result<DiscoveredCatalog> {
     let Some(paths) = ConfigPaths::discover(
         selection.opencode_config.clone(),
         selection.opencode_auth.clone(),
@@ -680,10 +690,14 @@ fn discover_opencode(selection: &SourceSelection) -> anyhow::Result<DiscoveredCa
     else {
         return Ok(empty_catalog("opencode", "config not found"));
     };
-    load_opencode_catalog("opencode", None, &paths)
+    let catalog = load_opencode_catalog("opencode", None, &paths)?;
+    Ok(enrich_opencode_models(catalog, client).await)
 }
 
-fn discover_crabcode(selection: &SourceSelection) -> anyhow::Result<DiscoveredCatalog> {
+async fn discover_crabcode(
+    selection: &SourceSelection,
+    client: &Client,
+) -> anyhow::Result<DiscoveredCatalog> {
     let config = resolve_opencode_config(selection.opencode_config.clone())?;
     let auth = resolve_crabcode_auth()?;
     if !config.is_file() {
@@ -698,7 +712,186 @@ fn discover_crabcode(selection: &SourceSelection) -> anyhow::Result<DiscoveredCa
             format!("CrabCode auth not found at {}", auth.display()),
         ));
     }
-    load_opencode_catalog("crabcode", Some("crabcode"), &ConfigPaths { config, auth })
+    let catalog =
+        load_opencode_catalog("crabcode", Some("crabcode"), &ConfigPaths { config, auth })?;
+    Ok(enrich_opencode_models(catalog, client).await)
+}
+
+const MODEL_DISCOVERY_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+async fn enrich_opencode_models(
+    mut catalog: DiscoveredCatalog,
+    client: &Client,
+) -> DiscoveredCatalog {
+    let jobs = catalog
+        .providers
+        .iter()
+        .cloned()
+        .enumerate()
+        .filter(|(_, provider)| {
+            matches!(
+                provider.wire_api,
+                WireApi::OpenAiChat | WireApi::OpenAiResponses
+            )
+        })
+        .map(|(index, provider)| {
+            let client = client.clone();
+            async move {
+                let result = discover_provider_models(&client, &provider).await;
+                (index, result)
+            }
+        })
+        .collect::<Vec<_>>();
+    let discoveries = stream::iter(jobs)
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut added = 0_usize;
+    let mut failures = Vec::new();
+    for (index, result) in discoveries {
+        match result {
+            Ok(models) => {
+                let provider = &mut catalog.providers[index];
+                let existing = provider
+                    .models
+                    .iter()
+                    .map(|model| model.info.id.clone())
+                    .collect::<BTreeSet<_>>();
+                for model in models {
+                    if !existing.contains(&model.info.id) {
+                        provider.models.push(model);
+                        added += 1;
+                    }
+                }
+                provider
+                    .models
+                    .sort_by(|left, right| left.info.id.cmp(&right.info.id));
+            }
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+
+    let mut details = catalog.detail.take().into_iter().collect::<Vec<_>>();
+    if added > 0 {
+        details.push(format!("{added} gateway models discovered"));
+    }
+    if !failures.is_empty() {
+        details.push(format!(
+            "{} model endpoint{} unavailable",
+            failures.len(),
+            if failures.len() == 1 { "" } else { "s" }
+        ));
+    }
+    catalog.detail = (!details.is_empty()).then(|| details.join("; "));
+    catalog
+}
+
+async fn discover_provider_models(
+    client: &Client,
+    discovered: &DiscoveredProvider,
+) -> anyhow::Result<Vec<DiscoveredModel>> {
+    let (base_url, headers) = discovered
+        .provider
+        .request_parts(client)
+        .await
+        .with_context(|| format!("{} credential resolution failed", discovered.key))?;
+    let response = client
+        .get(format!("{}/models", base_url.trim_end_matches('/')))
+        .headers(headers)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .with_context(|| format!("{} /models request failed", discovered.key))?
+        .error_for_status()
+        .with_context(|| format!("{} /models request was rejected", discovered.key))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MODEL_DISCOVERY_MAX_BYTES as u64)
+    {
+        bail!("{} /models response is too large", discovered.key);
+    }
+    let body = response
+        .bytes()
+        .await
+        .with_context(|| format!("{} /models response failed", discovered.key))?;
+    if body.len() > MODEL_DISCOVERY_MAX_BYTES {
+        bail!("{} /models response is too large", discovered.key);
+    }
+    let payload: Value = serde_json::from_slice(&body)
+        .with_context(|| format!("{} /models returned invalid JSON", discovered.key))?;
+    let items = payload
+        .get("data")
+        .or_else(|| payload.get("models"))
+        .and_then(Value::as_array)
+        .or_else(|| payload.as_array())
+        .with_context(|| format!("{} /models contains no model list", discovered.key))?;
+    let public_provider = discovered
+        .models
+        .first()
+        .map(|model| model.info.provider.as_str())
+        .or_else(|| discovered.key.split_once(':').map(|(_, value)| value))
+        .unwrap_or(&discovered.key);
+
+    let mut seen = BTreeSet::new();
+    let mut models = Vec::new();
+    for item in items {
+        let Some(upstream_id) = item
+            .get("id")
+            .or_else(|| item.get("name"))
+            .and_then(Value::as_str)
+            .map(|value| value.trim_start_matches("models/"))
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if !seen.insert(upstream_id.to_owned()) {
+            continue;
+        }
+        let name = item
+            .get("display_name")
+            .or_else(|| item.get("displayName"))
+            .or_else(|| item.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or(upstream_id);
+        let context_window =
+            model_limit(item, &["context_window", "context_length"]).or_else(|| {
+                item.pointer("/capabilities/limits/max_prompt_tokens")
+                    .and_then(Value::as_u64)
+            });
+        let max_output_tokens = model_limit(item, &["max_output_tokens", "max_completion_tokens"])
+            .or_else(|| {
+                item.pointer("/capabilities/limits/max_output_tokens")
+                    .and_then(Value::as_u64)
+            });
+        let reasoning = item
+            .get("reasoning")
+            .or_else(|| item.get("supports_reasoning"))
+            .and_then(Value::as_bool)
+            .or_else(|| {
+                item.pointer("/capabilities/supports/reasoning_effort")
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false);
+        models.push(DiscoveredModel {
+            info: ModelInfo {
+                id: format!("{public_provider}/{upstream_id}"),
+                provider: public_provider.to_owned(),
+                upstream_id: upstream_id.to_owned(),
+                name: name.to_owned(),
+                reasoning,
+                context_window,
+                max_output_tokens,
+            },
+        });
+    }
+    Ok(models)
+}
+
+fn model_limit(item: &Value, names: &[&str]) -> Option<u64> {
+    names
+        .iter()
+        .find_map(|name| item.get(*name).and_then(Value::as_u64))
 }
 
 fn discover_ocx(selection: &SourceSelection) -> anyhow::Result<DiscoveredCatalog> {
@@ -1406,7 +1599,186 @@ fn resolve_opencode_auth(override_path: Option<PathBuf>) -> anyhow::Result<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use axum::{Json, Router, http::StatusCode, routing::get};
     use tempfile::tempdir;
+
+    async fn model_gateway(
+        expected_token: &'static str,
+        response: Value,
+        status: StatusCode,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let response = Arc::new(response);
+        let app = Router::new().route(
+            "/v1/models",
+            get(move |headers: HeaderMap| {
+                let response = Arc::clone(&response);
+                async move {
+                    let authorized = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        == Some(expected_token);
+                    if !authorized {
+                        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({})));
+                    }
+                    (status, Json((*response).clone()))
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{address}/v1")
+    }
+
+    fn gateway_provider(
+        key: &str,
+        public_provider: &str,
+        base_url: String,
+        models: Vec<DiscoveredModel>,
+    ) -> DiscoveredProvider {
+        DiscoveredProvider {
+            key: key.into(),
+            provider: Provider {
+                base_url,
+                credential: Credential::Bearer("gateway-secret".into()),
+                headers: HeaderMap::new(),
+                wire_api: WireApi::OpenAiChat,
+            },
+            wire_api: WireApi::OpenAiChat,
+            models: models
+                .into_iter()
+                .map(|mut model| {
+                    model.info.provider = public_provider.into();
+                    model
+                })
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn discovers_gateway_models_with_provider_auth() {
+        let base_url = model_gateway(
+            "Bearer gateway-secret",
+            serde_json::json!({
+                "data": [{
+                    "id": "remote-smart",
+                    "display_name": "Remote Smart",
+                    "context_window": 128000,
+                    "max_output_tokens": 8192,
+                    "reasoning": true
+                }]
+            }),
+            StatusCode::OK,
+        )
+        .await;
+        let provider = gateway_provider("opencode:gateway", "gateway", base_url, Vec::new());
+
+        let models = discover_provider_models(&Client::new(), &provider)
+            .await
+            .unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].info.id, "gateway/remote-smart");
+        assert_eq!(models[0].info.name, "Remote Smart");
+        assert_eq!(models[0].info.context_window, Some(128_000));
+        assert_eq!(models[0].info.max_output_tokens, Some(8_192));
+        assert!(models[0].info.reasoning);
+    }
+
+    #[tokio::test]
+    async fn gateway_catalog_merge_preserves_explicit_metadata_and_crabcode_namespace() {
+        let base_url = model_gateway(
+            "Bearer gateway-secret",
+            serde_json::json!({
+                "models": [
+                    {"id":"configured", "display_name":"Remote Override"},
+                    {"id":"gateway-only"}
+                ]
+            }),
+            StatusCode::OK,
+        )
+        .await;
+        let explicit = DiscoveredModel {
+            info: ModelInfo {
+                id: "crabcode/gateway/configured".into(),
+                provider: "crabcode/gateway".into(),
+                upstream_id: "configured".into(),
+                name: "Configured Name".into(),
+                reasoning: true,
+                context_window: Some(64_000),
+                max_output_tokens: Some(4_096),
+            },
+        };
+        let catalog = DiscoveredCatalog {
+            source: "crabcode".into(),
+            providers: vec![gateway_provider(
+                "crabcode:crabcode/gateway",
+                "crabcode/gateway",
+                base_url,
+                vec![explicit],
+            )],
+            detail: Some("config.jsonc".into()),
+        };
+
+        let enriched = enrich_opencode_models(catalog, &Client::new()).await;
+        let models = &enriched.providers[0].models;
+
+        assert_eq!(models.len(), 2);
+        let configured = models
+            .iter()
+            .find(|model| model.info.id.ends_with("/configured"))
+            .unwrap();
+        assert_eq!(configured.info.name, "Configured Name");
+        assert!(configured.info.reasoning);
+        assert!(
+            models
+                .iter()
+                .any(|model| model.info.id == "crabcode/gateway/gateway-only")
+        );
+        assert!(
+            enriched
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("1 gateway models discovered")
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_discovery_failure_keeps_configured_models() {
+        let base_url = model_gateway(
+            "Bearer gateway-secret",
+            serde_json::json!({"error":"unavailable"}),
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+        .await;
+        let explicit = simple_model("gateway", "configured", "configured", None, None);
+        let catalog = DiscoveredCatalog {
+            source: "opencode".into(),
+            providers: vec![gateway_provider(
+                "opencode:gateway",
+                "gateway",
+                base_url,
+                vec![explicit],
+            )],
+            detail: None,
+        };
+
+        let enriched = enrich_opencode_models(catalog, &Client::new()).await;
+
+        assert_eq!(enriched.providers[0].models.len(), 1);
+        assert!(
+            enriched
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("1 model endpoint unavailable")
+        );
+    }
 
     #[test]
     fn determines_native_hermes_transport() {
