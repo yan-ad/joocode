@@ -3127,14 +3127,23 @@ fn draw_models_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, sel
         )),
         summary,
     );
-    let [status, inner] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+    let [status, legend, inner] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .areas(inner);
     frame.render_widget(
         Paragraph::new(format!(
             "Maximum catalog entries: {}",
             data.subagent_catalog.max_entries
         )),
         status,
+    );
+    frame.render_widget(
+        Paragraph::new("* reasoning is declared by provider metadata; not actively verified")
+            .style(Style::default().fg(Color::DarkGray)),
+        legend,
     );
     if data.models.is_empty() {
         frame.render_widget(Paragraph::new("No models are currently loaded."), inner);
@@ -3166,7 +3175,7 @@ fn draw_models_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, sel
                 ),
                 Span::styled(format!("  {}", model.name), Style::default().fg(MUTED_TEXT)),
                 Span::styled(
-                    if model.reasoning { "  reasoning" } else { "" },
+                    if model.reasoning { "  reasoning*" } else { "" },
                     Style::default().fg(Color::LightCyan),
                 ),
             ]))
@@ -3736,6 +3745,8 @@ mod tests {
         assert!(rendered.contains("Integrations"));
         assert!(rendered.contains("demo/reasoner"));
         assert!(rendered.contains("Demo Reasoner"));
+        assert!(rendered.contains("reasoning*"));
+        assert!(rendered.contains("declared by provider metadata"));
     }
 
     #[test]
