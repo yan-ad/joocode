@@ -110,7 +110,139 @@ pub enum Credential {
     /// this is sent in `x-goog-api-key`, not as a bearer token.
     GoogleApiKey(String),
     BearerPool(Arc<BearerPool>),
+    OpenAiOAuth(OpenAiOAuthCredential),
     Copilot(CopilotCredential),
+}
+
+#[derive(Clone, Debug)]
+pub struct OpenAiOAuthCredential {
+    state: Arc<Mutex<OpenAiOAuthState>>,
+    account_id: Option<Arc<str>>,
+    auth_file: Option<Arc<std::path::PathBuf>>,
+    provider_id: Arc<str>,
+}
+
+#[derive(Debug)]
+struct OpenAiOAuthState {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at_ms: u64,
+}
+
+impl OpenAiOAuthCredential {
+    pub fn new(
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_at_ms: Option<u64>,
+        account_id: Option<String>,
+        auth_file: Option<std::path::PathBuf>,
+        provider_id: String,
+    ) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(OpenAiOAuthState {
+                access_token,
+                refresh_token,
+                expires_at_ms: expires_at_ms.unwrap_or(u64::MAX),
+            })),
+            account_id: account_id.map(Into::into),
+            auth_file: auth_file.map(Arc::new),
+            provider_id: provider_id.into(),
+        }
+    }
+
+    async fn access_token(&self, client: &Client) -> anyhow::Result<String> {
+        let now_ms = unix_timestamp().saturating_mul(1_000);
+        let mut state = self.state.lock().await;
+        if state.expires_at_ms > now_ms.saturating_add(60_000) || state.refresh_token.is_none() {
+            return Ok(state.access_token.clone());
+        }
+        let refresh_token = state.refresh_token.as_deref().unwrap_or_default();
+        let response = client
+            .post("https://auth.openai.com/oauth/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(format!(
+                "grant_type=refresh_token&refresh_token={}&client_id=app_EMoamEEZ73f0CkXaXp7hrann",
+                percent_encode_form(refresh_token)
+            ))
+            .send()
+            .await
+            .context("OpenAI OAuth token refresh failed")?
+            .error_for_status()
+            .context("OpenAI rejected OAuth token refresh")?
+            .json::<serde_json::Value>()
+            .await
+            .context("OpenAI returned an invalid OAuth refresh response")?;
+        state.access_token = response
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|token| !token.is_empty())
+            .context("OpenAI OAuth refresh returned no access token")?
+            .to_owned();
+        if let Some(refresh_token) = response
+            .get("refresh_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|token| !token.is_empty())
+        {
+            state.refresh_token = Some(refresh_token.to_owned());
+        }
+        state.expires_at_ms = now_ms.saturating_add(
+            response
+                .get("expires_in")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(3_600)
+                .saturating_mul(1_000),
+        );
+        if let Some(auth_file) = self.auth_file.as_deref() {
+            persist_openai_oauth(
+                auth_file,
+                &self.provider_id,
+                &state.access_token,
+                state.refresh_token.as_deref(),
+                state.expires_at_ms,
+            )?;
+        }
+        Ok(state.access_token.clone())
+    }
+}
+
+fn persist_openai_oauth(
+    path: &std::path::Path,
+    provider_id: &str,
+    access: &str,
+    refresh: Option<&str>,
+    expires: u64,
+) -> anyhow::Result<()> {
+    let mut root: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let entry = root
+        .get_mut(provider_id)
+        .and_then(serde_json::Value::as_object_mut)
+        .context("OpenAI OAuth auth entry is missing")?;
+    entry.insert("access".into(), serde_json::Value::String(access.into()));
+    entry.insert("expires".into(), serde_json::Value::Number(expires.into()));
+    if let Some(refresh) = refresh {
+        entry.insert("refresh".into(), serde_json::Value::String(refresh.into()));
+    }
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec_pretty(&root)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(temporary, path)?;
+    Ok(())
+}
+
+fn percent_encode_form(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![char::from(byte)]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -243,6 +375,12 @@ impl Provider {
                 headers.insert("x-goog-api-key", HeaderValue::from_str(token)?);
             }
             Credential::BearerPool(pool) => insert_bearer(&mut headers, pool.next())?,
+            Credential::OpenAiOAuth(credential) => {
+                insert_bearer(&mut headers, &credential.access_token(client).await?)?;
+                if let Some(account_id) = credential.account_id.as_deref() {
+                    headers.insert("chatgpt-account-id", HeaderValue::from_str(account_id)?);
+                }
+            }
             Credential::Copilot(credential) => {
                 let (token, discovered_base_url) = credential.exchange(client).await?;
                 insert_bearer(&mut headers, &token)?;
@@ -250,6 +388,21 @@ impl Provider {
                     base_url = discovered_base_url;
                 }
             }
+        }
+        if base_url.contains("opencode.ai/zen") {
+            let session = uuid::Uuid::new_v4().to_string();
+            headers.insert("x-opencode-session", HeaderValue::from_str(&session)?);
+            headers.insert(
+                "x-opencode-request",
+                HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())?,
+            );
+            headers.insert("x-opencode-client", HeaderValue::from_static("cli"));
+            headers
+                .entry("user-agent")
+                .or_insert(HeaderValue::from_static(concat!(
+                    "joocode/",
+                    env!("CARGO_PKG_VERSION")
+                )));
         }
         if self.wire_api == WireApi::AnthropicMessages {
             if let Some(authorization) = headers.remove("authorization")
@@ -776,6 +929,75 @@ mod tests {
             values.push(headers["authorization"].to_str().unwrap().to_owned());
         }
         assert_eq!(values, ["Bearer a", "Bearer b", "Bearer a", "Bearer b"]);
+    }
+
+    #[tokio::test]
+    async fn opencode_routes_receive_required_session_headers() {
+        let provider = Provider {
+            base_url: "https://opencode.ai/zen/go/v1".into(),
+            credential: Credential::Bearer("secret".into()),
+            headers: HeaderMap::new(),
+            wire_api: WireApi::OpenAiChat,
+        };
+
+        let (_, headers) = provider.request_parts(&Client::new()).await.unwrap();
+
+        assert_eq!(headers["authorization"], "Bearer secret");
+        assert_eq!(headers["x-opencode-client"], "cli");
+        assert!(!headers["x-opencode-session"].is_empty());
+        assert!(!headers["x-opencode-request"].is_empty());
+    }
+
+    #[tokio::test]
+    async fn openai_oauth_routes_include_account_and_origin_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
+        let provider = Provider {
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
+            credential: Credential::OpenAiOAuth(OpenAiOAuthCredential::new(
+                "access-token".into(),
+                None,
+                None,
+                Some("account-1".into()),
+                None,
+                "openai".into(),
+            )),
+            headers,
+            wire_api: WireApi::OpenAiResponses,
+        };
+
+        let (base_url, headers) = provider.request_parts(&Client::new()).await.unwrap();
+
+        assert_eq!(base_url, "https://chatgpt.com/backend-api/codex");
+        assert_eq!(headers["authorization"], "Bearer access-token");
+        assert_eq!(headers["chatgpt-account-id"], "account-1");
+        assert_eq!(headers["originator"], "codex_cli_rs");
+    }
+
+    #[test]
+    fn oauth_refresh_form_values_are_percent_encoded() {
+        assert_eq!(percent_encode_form("a+b/c="), "a%2Bb%2Fc%3D");
+    }
+
+    #[test]
+    fn oauth_refresh_persistence_updates_only_the_selected_auth_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"openai":{"type":"oauth","access":"old","refresh":"old-refresh","expires":1,"accountId":"account"},"other":{"type":"api","key":"keep"}}"#,
+        )
+        .unwrap();
+
+        persist_openai_oauth(&path, "openai", "new", Some("new-refresh"), 42).unwrap();
+
+        let root: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root["openai"]["access"], "new");
+        assert_eq!(root["openai"]["refresh"], "new-refresh");
+        assert_eq!(root["openai"]["expires"], 42);
+        assert_eq!(root["openai"]["accountId"], "account");
+        assert_eq!(root["other"]["key"], "keep");
     }
 
     #[test]

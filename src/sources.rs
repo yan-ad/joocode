@@ -13,12 +13,16 @@ use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
 };
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
     config::{self, AuthEntry, ConfigPaths, ModelConfig},
     local_config,
-    provider::{BearerPool, CopilotCredential, Credential, ModelInfo, Provider, WireApi},
+    provider::{
+        BearerPool, CopilotCredential, Credential, ModelInfo, OpenAiOAuthCredential, Provider,
+        WireApi,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, ValueEnum)]
@@ -33,6 +37,16 @@ pub enum SourceKind {
     Copilot,
     Antigravity,
     Joocode,
+}
+
+fn should_discover_remote_models(provider: &DiscoveredProvider) -> bool {
+    provider.models.is_empty()
+        || !(provider.provider.base_url.contains("opencode.ai/zen")
+            || provider
+                .provider
+                .base_url
+                .contains("chatgpt.com/backend-api/codex")
+            || provider.provider.base_url == "https://api.openai.com/v1")
 }
 
 fn opencode_wire_api(configured: &config::ProviderConfig) -> WireApi {
@@ -690,7 +704,7 @@ async fn discover_opencode(
     else {
         return Ok(empty_catalog("opencode", "config not found"));
     };
-    let catalog = load_opencode_catalog("opencode", None, &paths)?;
+    let catalog = load_opencode_catalog_with_builtins("opencode", None, &paths, client).await?;
     Ok(enrich_opencode_models(catalog, client).await)
 }
 
@@ -712,9 +726,304 @@ async fn discover_crabcode(
             format!("CrabCode auth not found at {}", auth.display()),
         ));
     }
-    let catalog =
-        load_opencode_catalog("crabcode", Some("crabcode"), &ConfigPaths { config, auth })?;
+    let catalog = load_opencode_catalog_with_builtins(
+        "crabcode",
+        Some("crabcode"),
+        &ConfigPaths { config, auth },
+        client,
+    )
+    .await?;
     Ok(enrich_opencode_models(catalog, client).await)
+}
+
+const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+const MODELS_DEV_CACHE_TTL: u64 = 24 * 60 * 60;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct ModelsDevProvider {
+    #[serde(default)]
+    api: String,
+    #[serde(default)]
+    models: BTreeMap<String, ModelsDevModel>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct ModelsDevModel {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    reasoning: bool,
+    #[serde(default)]
+    limit: Option<ModelsDevLimit>,
+    #[serde(default)]
+    modalities: Option<ModelsDevModalities>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct ModelsDevLimit {
+    #[serde(default)]
+    context: u64,
+    #[serde(default)]
+    output: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct ModelsDevModalities {
+    #[serde(default)]
+    output: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrabCodeModelsDevCache {
+    data: BTreeMap<String, ModelsDevProvider>,
+}
+
+async fn load_opencode_catalog_with_builtins(
+    source: &str,
+    namespace: Option<&str>,
+    paths: &ConfigPaths,
+    client: &Client,
+) -> anyhow::Result<DiscoveredCatalog> {
+    let mut catalog = load_opencode_catalog(source, namespace, paths)?;
+    let (configured, auth) = config::load(paths)?;
+    let explicit = configured.provider.keys().cloned().collect::<BTreeSet<_>>();
+    let models_dev = load_models_dev(source, client).await.unwrap_or_default();
+    let mut added = 0_usize;
+
+    for (provider_id, auth_entry) in auth {
+        if explicit.contains(&provider_id) {
+            continue;
+        }
+        let Some(metadata) = models_dev.get(&provider_id) else {
+            continue;
+        };
+        let Some(discovered) = builtin_provider(
+            source,
+            namespace,
+            &provider_id,
+            auth_entry,
+            metadata,
+            Some(&paths.auth),
+        )?
+        else {
+            continue;
+        };
+        added += discovered.models.len();
+        catalog.providers.push(discovered);
+    }
+    if added > 0 {
+        let detail = catalog.detail.get_or_insert_default();
+        if !detail.is_empty() {
+            detail.push_str("; ");
+        }
+        detail.push_str(&format!("{added} authenticated built-in models"));
+    }
+    Ok(catalog)
+}
+
+fn builtin_provider(
+    source: &str,
+    namespace: Option<&str>,
+    provider_id: &str,
+    auth: AuthEntry,
+    metadata: &ModelsDevProvider,
+    auth_file: Option<&Path>,
+) -> anyhow::Result<Option<DiscoveredProvider>> {
+    if !matches!(provider_id, "openai" | "opencode" | "opencode-go") {
+        return Ok(None);
+    }
+    let public_provider = namespace
+        .map(|prefix| format!("{prefix}/{provider_id}"))
+        .unwrap_or_else(|| provider_id.to_owned());
+    let (base_url, credential, wire_api, headers) = match (provider_id, auth) {
+        (
+            "openai",
+            AuthEntry::Oauth {
+                access,
+                refresh,
+                expires,
+                account_id,
+            },
+        ) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "user-agent",
+                HeaderValue::from_static(concat!("joocode/", env!("CARGO_PKG_VERSION"))),
+            );
+            headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
+            (
+                "https://chatgpt.com/backend-api/codex".to_owned(),
+                Credential::OpenAiOAuth(OpenAiOAuthCredential::new(
+                    access,
+                    refresh,
+                    expires,
+                    account_id.clone(),
+                    auth_file.map(Path::to_path_buf),
+                    provider_id.to_owned(),
+                )),
+                WireApi::OpenAiResponses,
+                headers,
+            )
+        }
+        ("openai", AuthEntry::Api { key }) => (
+            "https://api.openai.com/v1".to_owned(),
+            Credential::Bearer(key),
+            WireApi::OpenAiResponses,
+            HeaderMap::new(),
+        ),
+        (_, AuthEntry::Api { key }) if !metadata.api.trim().is_empty() => (
+            metadata.api.trim_end_matches('/').to_owned(),
+            Credential::Bearer(key),
+            WireApi::OpenAiChat,
+            HeaderMap::new(),
+        ),
+        _ => return Ok(None),
+    };
+    let models = metadata
+        .models
+        .iter()
+        .filter(|(_, model)| model_is_selectable(model))
+        .map(|(model_id, model)| {
+            let upstream_id = if model.id.is_empty() {
+                model_id.as_str()
+            } else {
+                model.id.as_str()
+            };
+            DiscoveredModel {
+                info: ModelInfo {
+                    id: format!("{public_provider}/{model_id}"),
+                    provider: public_provider.clone(),
+                    upstream_id: upstream_id.to_owned(),
+                    name: if model.name.is_empty() {
+                        model_id.clone()
+                    } else {
+                        model.name.clone()
+                    },
+                    reasoning: model.reasoning,
+                    context_window: model
+                        .limit
+                        .as_ref()
+                        .map(|limit| limit.context)
+                        .filter(|value| *value > 0),
+                    max_output_tokens: model
+                        .limit
+                        .as_ref()
+                        .map(|limit| limit.output)
+                        .filter(|value| *value > 0),
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(DiscoveredProvider {
+        key: format!("{source}:{public_provider}"),
+        provider: Provider {
+            base_url,
+            credential,
+            headers,
+            wire_api,
+        },
+        wire_api,
+        models,
+    }))
+}
+
+fn model_is_selectable(model: &ModelsDevModel) -> bool {
+    if matches!(model.status.as_deref(), Some("alpha" | "deprecated")) {
+        return false;
+    }
+    model.modalities.as_ref().is_none_or(|modalities| {
+        modalities.output.is_empty()
+            || (modalities.output.iter().any(|value| value == "text")
+                && !modalities.output.iter().any(|value| value == "image"))
+    })
+}
+
+async fn load_models_dev(
+    source: &str,
+    client: &Client,
+) -> anyhow::Result<BTreeMap<String, ModelsDevProvider>> {
+    if source == "crabcode"
+        && let Some(catalog) = read_crabcode_models_dev_cache()?
+    {
+        return Ok(catalog);
+    }
+    let cache = models_dev_cache_path()?;
+    if let Some(catalog) = read_models_dev_cache(&cache, MODELS_DEV_CACHE_TTL)? {
+        return Ok(catalog);
+    }
+    let response = client
+        .get(MODELS_DEV_URL)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .context("failed requesting models.dev")?
+        .error_for_status()
+        .context("models.dev rejected catalog request")?;
+    let body = response
+        .bytes()
+        .await
+        .context("failed reading models.dev")?;
+    if body.len() > MODEL_DISCOVERY_MAX_BYTES * 8 {
+        bail!("models.dev catalog is too large");
+    }
+    let catalog: BTreeMap<String, ModelsDevProvider> =
+        serde_json::from_slice(&body).context("models.dev returned invalid JSON")?;
+    if let Some(parent) = cache.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let _ = fs::write(&cache, &body);
+    Ok(catalog)
+}
+
+fn models_dev_cache_path() -> anyhow::Result<PathBuf> {
+    Ok(env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or(
+            dirs::home_dir()
+                .context("could not resolve home directory")?
+                .join(".cache"),
+        )
+        .join("joocode/models-dev.json"))
+}
+
+fn read_models_dev_cache(
+    path: &Path,
+    max_age_seconds: u64,
+) -> anyhow::Result<Option<BTreeMap<String, ModelsDevProvider>>> {
+    if path.is_file()
+        && fs::metadata(path)?
+            .modified()?
+            .elapsed()
+            .unwrap_or_default()
+            .as_secs()
+            <= max_age_seconds
+    {
+        let body = fs::read(path)?;
+        return Ok(Some(serde_json::from_slice(&body)?));
+    }
+    if let Some(catalog) = read_crabcode_models_dev_cache()? {
+        return Ok(Some(catalog));
+    }
+    Ok(None)
+}
+
+fn read_crabcode_models_dev_cache() -> anyhow::Result<Option<BTreeMap<String, ModelsDevProvider>>> {
+    let crabcode_cache = env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local/state")))
+        .map(|root| root.join("crabcode/cache/models_dev_cache.json"));
+    if let Some(path) = crabcode_cache.filter(|path| path.is_file()) {
+        let cache: CrabCodeModelsDevCache = serde_json::from_slice(&fs::read(path)?)?;
+        return Ok(Some(cache.data));
+    }
+    Ok(None)
 }
 
 const MODEL_DISCOVERY_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -732,7 +1041,7 @@ async fn enrich_opencode_models(
             matches!(
                 provider.wire_api,
                 WireApi::OpenAiChat | WireApi::OpenAiResponses
-            )
+            ) && should_discover_remote_models(provider)
         })
         .map(|(index, provider)| {
             let client = client.clone();
@@ -1687,6 +1996,85 @@ mod tests {
         assert_eq!(models[0].info.context_window, Some(128_000));
         assert_eq!(models[0].info.max_output_tokens, Some(8_192));
         assert!(models[0].info.reasoning);
+    }
+
+    #[test]
+    fn auth_only_builtin_providers_use_models_dev_routes() {
+        let metadata: ModelsDevProvider = serde_json::from_value(serde_json::json!({
+            "api": "https://opencode.ai/zen/go/v1",
+            "models": {
+                "kimi-k3": {
+                    "name": "Kimi K3",
+                    "reasoning": true,
+                    "limit": { "context": 262144, "output": 32768 },
+                    "modalities": { "output": ["text"] }
+                },
+                "old": { "status": "deprecated" }
+            }
+        }))
+        .unwrap();
+
+        let provider = builtin_provider(
+            "crabcode",
+            Some("crabcode"),
+            "opencode-go",
+            AuthEntry::Api {
+                key: "secret".into(),
+            },
+            &metadata,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(provider.key, "crabcode:crabcode/opencode-go");
+        assert_eq!(provider.provider.base_url, "https://opencode.ai/zen/go/v1");
+        assert_eq!(provider.wire_api, WireApi::OpenAiChat);
+        assert_eq!(provider.models.len(), 1);
+        assert_eq!(provider.models[0].info.id, "crabcode/opencode-go/kimi-k3");
+        assert_eq!(provider.models[0].info.context_window, Some(262_144));
+        assert!(provider.models[0].info.reasoning);
+    }
+
+    #[test]
+    fn openai_oauth_builtin_uses_chatgpt_responses_transport() {
+        let metadata: ModelsDevProvider = serde_json::from_value(serde_json::json!({
+            "models": {
+                "gpt-5.5": {
+                    "name": "GPT-5.5",
+                    "reasoning": true,
+                    "modalities": { "output": ["text"] }
+                }
+            }
+        }))
+        .unwrap();
+
+        let provider = builtin_provider(
+            "opencode",
+            None,
+            "openai",
+            AuthEntry::Oauth {
+                access: "access".into(),
+                refresh: Some("refresh".into()),
+                expires: Some(u64::MAX),
+                account_id: Some("account".into()),
+            },
+            &metadata,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            provider.provider.base_url,
+            "https://chatgpt.com/backend-api/codex"
+        );
+        assert_eq!(provider.wire_api, WireApi::OpenAiResponses);
+        assert_eq!(provider.models[0].info.id, "openai/gpt-5.5");
+        assert!(matches!(
+            provider.provider.credential,
+            Credential::OpenAiOAuth(_)
+        ));
     }
 
     #[tokio::test]

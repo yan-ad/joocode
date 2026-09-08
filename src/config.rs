@@ -143,11 +143,11 @@ pub enum AuthEntry {
     Oauth {
         access: String,
         #[serde(default)]
-        _refresh: Option<String>,
+        refresh: Option<String>,
         #[serde(default)]
-        _expires: Option<u64>,
+        expires: Option<u64>,
         #[serde(default, rename = "accountId")]
-        _account_id: Option<String>,
+        account_id: Option<String>,
     },
     #[serde(other)]
     Unknown,
