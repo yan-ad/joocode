@@ -1,5 +1,6 @@
 ---
 import Layout from '../components/Layout.astro';
+import CodeBlock from '../components/CodeBlock.astro';
 
 const description =
   'Joocode is a fast native Rust proxy that reuses your OpenCode, CrabCode, OCX, Hermes, and GitHub Copilot providers and wires them into Codex, Zed, JetBrains, Claude Code, Grok Build, and the Copilot App.';
@@ -94,12 +95,12 @@ const schema = {
       OpenAI-compatible endpoint at <code>http://127.0.0.1:10100/v1</code>, and routes
       each request back to the provider that owns the model.
     </p>
-    <pre><code>OpenCode ────────┐
+    <CodeBlock lang="text" code={`OpenCode ────────┐
 OCX ──────────────┤                    ┌─ Codex Responses API
 Hermes ───────────┤                    ├─ GitHub Copilot App BYOK
 GitHub Copilot ───┼─► Joocode proxy ───┼─ Zed / JetBrains
 Antigravity ──────┤                    ├─ Claude Code Messages API
-providers.json ───┘                    └─ Grok Build custom models</code></pre>
+providers.json ───┘                    └─ Grok Build custom models`} />
     <p class="small muted">
       Model IDs stay explicit: <code>provider/model</code>, <code>copilot/model</code>,
       <code>antigravity/gemini/model</code>, or a virtual <code>combo/name</code>.

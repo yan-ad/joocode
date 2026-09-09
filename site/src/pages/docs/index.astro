@@ -1,5 +1,6 @@
 ---
 import DocsLayout from '../../components/DocsLayout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
 
 const title = 'Documentation';
 const description = 'Joocode documentation: a fast native Rust proxy that reuses your existing AI provider configs and wires them into your desktop AI clients.';
@@ -23,8 +24,8 @@ const description = 'Joocode documentation: a fast native Rust proxy that reuses
 
   <h2>Quick start</h2>
   <p>Install, then start the dashboard:</p>
-  <pre><code>curl -fsSL https://joocode.yan.ad/install | bash
-jcx</code></pre>
+  <CodeBlock lang="bash" code={`curl -fsSL https://joocode.yan.ad/install | bash
+jcx`} />
   <p>
     <code>jcx</code> is the flagship command. <code>joocode</code> ships as a fully
     compatible alias for existing scripts and installations.

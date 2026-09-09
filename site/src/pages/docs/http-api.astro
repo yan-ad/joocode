@@ -34,9 +34,9 @@ jcx hub --host 0.0.0.0 --port 10100`;
     Joocode works as a fully local OpenAI-compatible gateway for any compatible
     application, without the desktop integrations.
   </p>
-  <pre><code>Base URL: http://127.0.0.1:10100/v1
+  <CodeBlock lang="text" code={`Base URL: http://127.0.0.1:10100/v1
 API key:  any non-empty local placeholder
-Model:    provider/model</code></pre>
+Model:    provider/model`} />
   <p>
     Joocode ignores the placeholder client key and uses credentials from the original
     provider source. It never exposes provider credentials to the client.
@@ -66,9 +66,9 @@ Model:    provider/model</code></pre>
 
   <h2>WebSocket</h2>
   <p>Responses WebSocket mode is available on the same resource:</p>
-  <pre><code>ws://127.0.0.1:10100/v1/responses</code></pre>
+  <CodeBlock lang="text" code={`ws://127.0.0.1:10100/v1/responses`} />
   <p>Server-to-server Realtime WebSocket relay for native OpenAI-compatible providers:</p>
-  <pre><code>ws://127.0.0.1:10100/v1/realtime?model=provider/model</code></pre>
+  <CodeBlock lang="text" code={`ws://127.0.0.1:10100/v1/realtime?model=provider/model`} />
 
   <h2>LAN or remote binding</h2>
   <p>

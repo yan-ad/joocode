@@ -46,8 +46,8 @@ JOOCODE_PROVIDER_CONCURRENCY=8`;
   </ul>
 
   <h2>Choose a listener</h2>
-  <pre><code>jcx --host 127.0.0.1 --port 10200 \
-  --base-url http://127.0.0.1:10200/v1</code></pre>
+  <CodeBlock lang="bash" code={`jcx --host 127.0.0.1 --port 10200 \\
+  --base-url http://127.0.0.1:10200/v1`} />
   <p class="small muted">
     Binding beyond loopback can expose access to every configured provider. Only do so
     behind trusted network controls.

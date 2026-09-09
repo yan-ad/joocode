@@ -1,15 +1,93 @@
 ---
+import { highlight } from '../lib/highlight';
+
 interface Props {
   code: string;
   lang?: string;
+  label?: string;
 }
 
-const { code, lang } = Astro.props;
-
-const escaped = code
-  .replace(/&/g, '&amp;')
-  .replace(/</g, '&lt;')
-  .replace(/>/g, '&gt;');
+const { code, lang = 'text', label } = Astro.props;
+const html = await highlight(code.trim(), lang);
 ---
 
-<pre class="codeblock"><code class={lang ? `language-${lang}` : undefined} set:html={escaped} /></pre>
+<div class="codeblock">
+  <div class="codeblock-head">
+    <span class="codeblock-lang">{label ?? lang}</span>
+    <button type="button" class="codeblock-copy" aria-label="Copy code">Copy</button>
+  </div>
+  <Fragment set:html={html} />
+</div>
+
+<style>
+  .codeblock {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin: 1.1em 0;
+  }
+  .codeblock-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.4em 0.9em;
+    background: #211c2e;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .codeblock-lang {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--code-muted);
+  }
+  .codeblock-copy {
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--code-muted);
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 6px;
+    padding: 0.1em 0.65em;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .codeblock-copy:hover {
+    color: var(--code-ink);
+    border-color: rgba(255, 255, 255, 0.35);
+  }
+
+  .codeblock :global(pre.shiki) {
+    margin: 0;
+    border-radius: 0;
+    background-color: var(--code-bg) !important;
+    color: var(--code-ink) !important;
+    padding: 1em 1.1em;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .codeblock :global(pre.shiki code) {
+    font-size: 0.88em;
+    background: none;
+    padding: 0;
+  }
+</style>
+
+<script>
+  document.querySelectorAll<HTMLButtonElement>('.codeblock-copy').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const block = btn.closest('.codeblock');
+      const pre = block?.querySelector('pre.shiki');
+      if (!pre) return;
+      const text = pre.textContent ?? '';
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = 'Copied!';
+      } catch {
+        btn.textContent = 'Copy failed';
+      }
+      setTimeout(() => (btn.textContent = 'Copy'), 1600);
+    });
+  });
+</script>
