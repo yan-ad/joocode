@@ -1,0 +1,86 @@
+---
+import DocsLayout from '../../components/DocsLayout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+
+const title = 'HTTP API';
+const description = 'Use Joocode as a fully local OpenAI-compatible gateway. Responses API, Chat Completions, WebSocket, health and metrics endpoints, and LAN binding.';
+
+const endpoints = `curl http://127.0.0.1:10100/healthz
+curl http://127.0.0.1:10100/readyz
+curl http://127.0.0.1:10100/api/status
+curl http://127.0.0.1:10100/api/providers
+curl http://127.0.0.1:10100/api/metrics
+curl http://127.0.0.1:10100/v1/models`;
+
+const response = `curl http://127.0.0.1:10100/v1/responses \\
+  -H 'content-type: application/json' \\
+  -d '{
+    "model": "provider/model",
+    "input": "Reply with hello",
+    "stream": false
+  }'`;
+
+const lan = `export JOOCODE_API_AUTH_TOKEN='replace-with-a-long-random-token'
+export JOOCODE_MANAGEMENT_AUTH_TOKEN='replace-with-a-different-random-token'
+export JOOCODE_ALLOWED_ORIGINS='https://app.example.com,https://admin.example.com'
+export JOOCODE_REMOTE_REQUESTS_PER_SECOND=20
+export JOOCODE_REMOTE_REQUEST_BURST=40
+jcx hub --host 0.0.0.0 --port 10100`;
+---
+
+<DocsLayout title={title} description={description} path="/docs/http-api">
+  <h1>HTTP API</h1>
+  <p>
+    Joocode works as a fully local OpenAI-compatible gateway for any compatible
+    application, without the desktop integrations.
+  </p>
+  <pre><code>Base URL: http://127.0.0.1:10100/v1
+API key:  any non-empty local placeholder
+Model:    provider/model</code></pre>
+  <p>
+    Joocode ignores the placeholder client key and uses credentials from the original
+    provider source. It never exposes provider credentials to the client.
+  </p>
+
+  <h2>Endpoints</h2>
+  <CodeBlock code={endpoints} lang="bash" />
+  <ul>
+    <li><code>/healthz</code> — process liveness.</li>
+    <li><code>/readyz</code> — whether the registry can route requests, plus model/provider counts and status.</li>
+    <li><code>/api/status</code> — privacy-safe uptime and request counters plus passive provider runtime state.</li>
+    <li><code>/api/providers</code> — non-secret provider/model catalog and source discovery reports.</li>
+    <li><code>/api/metrics</code> — the same data in Prometheus text format.</li>
+    <li><code>/v1/models</code> — the merged model registry.</li>
+  </ul>
+  <p class="small muted">
+    Prompts, bodies, response content, provider URLs, headers, and credentials are never
+    stored or exposed.
+  </p>
+
+  <h2>Create a response</h2>
+  <CodeBlock code={response} lang="bash" />
+  <p>
+    Use <code>POST /v1/chat/completions</code> for OpenAI-compatible clients. Both endpoints
+    support SSE streaming and tool calls.
+  </p>
+
+  <h2>WebSocket</h2>
+  <p>Responses WebSocket mode is available on the same resource:</p>
+  <pre><code>ws://127.0.0.1:10100/v1/responses</code></pre>
+  <p>Server-to-server Realtime WebSocket relay for native OpenAI-compatible providers:</p>
+  <pre><code>ws://127.0.0.1:10100/v1/realtime?model=provider/model</code></pre>
+
+  <h2>LAN or remote binding</h2>
+  <p>
+    Loopback keeps the zero-configuration placeholder-key behavior. Binding to a
+    LAN or non-loopback interface requires a real admission token. <code>jcx hub</code> is
+    the lightweight remote mode for LAN, VPN, and tailnet use.
+  </p>
+  <CodeBlock code={lan} lang="bash" />
+  <p>
+    Remote clients send <code>Authorization: Bearer &lt;token&gt;</code> or
+    <code>x-joocode-api-key: &lt;token&gt;</code>. Joocode rejects non-loopback startup without
+    <code>JOOCODE_API_AUTH_TOKEN</code>, disables remote CORS unless origins are listed, and
+    applies a token-bucket rate limiter to authenticated remote traffic.
+  </p>
+</DocsLayout>

@@ -1,0 +1,86 @@
+---
+import DocsLayout from '../../components/DocsLayout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+
+const title = 'Desktop integrations';
+const description = 'How Joocode wires Codex, Zed, GitHub Copilot App, Antigravity, JetBrains, Claude Code, and Grok Build to your existing providers.';
+
+const codexToml = `model_provider = "joocode"
+
+[model_providers.joocode]
+name = "Joocode"
+base_url = "http://127.0.0.1:10100/v1"
+wire_api = "responses"
+requires_openai_auth = true`;
+
+const antigravity = `jcx antigravity patch
+jcx antigravity status
+jcx antigravity restore`;
+---
+
+<DocsLayout title={title} description={description} path="/docs/integrations">
+  <h1>Desktop integrations</h1>
+  <p>
+    Joocode detects installed clients and prepares only the integrations present on
+    your machine. Press <code>/</code> in the dashboard to toggle each target under
+    <strong>Proxy to</strong>.
+  </p>
+
+  <h2>Codex</h2>
+  <p>
+    Synchronize manually with <code>jcx codex-install</code>. Joocode preserves the existing
+    Codex login and default model, merges native OpenAI models with discovered entries,
+    registers the local Responses provider, and writes <code>~/.codex/joocode-models.json</code>.
+  </p>
+  <p>Manual provider configuration:</p>
+  <CodeBlock code={codexToml} lang="toml" />
+
+  <h2>Zed</h2>
+  <p>
+    When Zed is installed, automatic desktop mode writes the complete discovered catalog into
+    Zed's OpenAI-compatible provider settings. On macOS the system may ask for your password to
+    authorize Keychain access. Joocode stores only a harmless local placeholder key — never an
+    upstream credential. Restart Zed once after the first sync.
+  </p>
+
+  <h2>GitHub Copilot App</h2>
+  <p>
+    When the GitHub Copilot App is installed and has been opened at least once, automatic
+    desktop mode creates a <strong>Joocode</strong> BYOK provider and synchronizes the complete
+    model catalog. Existing accounts, sessions, and the selected model remain untouched. Restart
+    the app after the first sync so its in-memory catalog reloads.
+  </p>
+
+  <h2>Antigravity</h2>
+  <p>
+    Antigravity's model picker uses Google's internal Cloud Code protocol, so Joocode uses an
+    explicit, reversible integration that patches a copy of the app:
+  </p>
+  <CodeBlock code={antigravity} lang="bash" />
+  <p>
+    On macOS, <code>patch</code> creates <code>~/Applications/Antigravity Joocode.app</code>
+    from the installed Google application, changes only the language-server endpoints to the
+    local bridge, updates ASAR integrity metadata, and ad-hoc signs the copy. The original
+    <code>/Applications/Antigravity.app</code> remains untouched. Quit Antigravity before patching.
+  </p>
+
+  <h2>JetBrains AI Assistant</h2>
+  <p>Use the built-in endpoint when JetBrains asks for an OpenAI-compatible provider:</p>
+  <ul>
+    <li><strong>Base URL:</strong> <code>http://127.0.0.1:10100/v1</code></li>
+    <li><strong>API key:</strong> any non-empty local value, such as <code>joocode</code></li>
+    <li><strong>Model:</strong> any discovered ID from <code>jcx models</code></li>
+  </ul>
+
+  <h2>Claude Code</h2>
+  <p>
+    Joocode provides an Anthropic Messages gateway with model discovery, JSON/SSE streaming, and
+    tool calls. It is marked experimental and is stable across most upstream releases.
+  </p>
+
+  <h2>Grok Build</h2>
+  <p>
+    Joocode writes and removes custom models in <code>~/.grok/config.toml</code> so the complete
+    catalog is available from Grok Build's model picker.
+  </p>
+</DocsLayout>

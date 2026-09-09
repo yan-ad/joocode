@@ -1,0 +1,16 @@
+{
+  "name": "joocode-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "copy:install": "node scripts/copy-install.mjs",
+    "dev": "npm run copy:install && astro dev",
+    "build": "npm run copy:install && astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/sitemap": "^3.5.0",
+    "astro": "^5.16.0"
+  }
+}

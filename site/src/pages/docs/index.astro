@@ -1,0 +1,69 @@
+---
+import DocsLayout from '../../components/DocsLayout.astro';
+
+const title = 'Documentation';
+const description = 'Joocode documentation: a fast native Rust proxy that reuses your existing AI provider configs and wires them into your desktop AI clients.';
+---
+
+<DocsLayout title={title} description={description} path="/docs">
+  <h1>Documentation</h1>
+  <p class="lede">
+    Joocode is a single native Rust binary that reuses the provider configurations
+    you already have and wires them into your installed desktop AI clients — no second
+    provider dashboard, no copied API keys.
+  </p>
+
+  <h2>What Joocode does</h2>
+  <ul>
+    <li><strong>Discovers</strong> providers from OpenCode, CrabCode, OCX profiles, Hermes Agent, GitHub Copilot, Antigravity Gemini, and a flat <code>providers.json</code>.</li>
+    <li><strong>Exposes</strong> one local OpenAI-compatible endpoint at <code>http://127.0.0.1:10100/v1</code> with every discovered model.</li>
+    <li><strong>Wires</strong> detected desktop clients — Codex, GitHub Copilot App, Zed, JetBrains, Claude Code, and Grok Build — automatically.</li>
+    <li><strong>Keeps credentials</strong> in their original source. Joocode never prints authorization values.</li>
+  </ul>
+
+  <h2>Quick start</h2>
+  <p>Install, then start the dashboard:</p>
+  <pre><code>curl -fsSL https://joocode.yan.ad/install | bash
+jcx</code></pre>
+  <p>
+    <code>jcx</code> is the flagship command. <code>joocode</code> ships as a fully
+    compatible alias for existing scripts and installations.
+  </p>
+
+  <h2>Explore the docs</h2>
+  <div class="grid cols-2">
+    <div class="card">
+      <h3 class="tight"><a href="/docs/install">Install</a></h3>
+      <p class="muted small">macOS, Linux, WSL, Windows PowerShell, build from source, and uninstall.</p>
+    </div>
+    <div class="card">
+      <h3 class="tight"><a href="/docs/providers">Providers</a></h3>
+      <p class="muted small">Provider discovery, custom providers, API-key pools, and interactive combos.</p>
+    </div>
+    <div class="card">
+      <h3 class="tight"><a href="/docs/integrations">Desktop integrations</a></h3>
+      <p class="muted small">Codex, Zed, GitHub Copilot App, Antigravity, JetBrains, Claude Code, and Grok Build.</p>
+    </div>
+    <div class="card">
+      <h3 class="tight"><a href="/docs/http-api">HTTP API</a></h3>
+      <p class="muted small">Local OpenAI-compatible gateway, Responses and Chat Completions, WebSocket, and LAN binding.</p>
+    </div>
+    <div class="card">
+      <h3 class="tight"><a href="/docs/cli">CLI reference</a></h3>
+      <p class="muted small">Commands, upgrade flow, and configuration environment variables.</p>
+    </div>
+  </div>
+
+  <h2>How it works</h2>
+  <p>
+    Joocode builds one source-aware model registry, exposes it through
+    <code>GET /v1/models</code>, and routes each request back to the provider that
+    owns the selected model. Model IDs remain explicit, such as
+    <code>provider/model</code>, <code>copilot/model</code>, or a virtual
+    <code>combo/name</code>.
+  </p>
+</DocsLayout>
+
+<style>
+  .lede { font-size: 1.12rem; color: var(--ink-2); }
+</style>

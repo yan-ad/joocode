@@ -1,0 +1,118 @@
+---
+import DocsLayout from '../../components/DocsLayout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+
+const title = 'Providers';
+const description = 'How Joocode discovers providers from OpenCode, CrabCode, OCX, Hermes, GitHub Copilot, and providers.json — plus custom providers and failover combos.';
+
+const providersJson = `[
+  {
+    "name": "openrouter",
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key": "...",
+    "models": ["anthropic/claude-sonnet-4"]
+  }
+]`;
+
+const combosJson = `{
+  "combos": [
+    {
+      "name": "coding",
+      "models": [
+        "crabcode/clip/claude-sonnet-4.6",
+        "opencode/openrouter/gpt-5.5"
+      ]
+    }
+  ]
+}`;
+
+const weightedJson = `{
+  "combos": [
+    {
+      "name": "balanced",
+      "strategy": "weighted-round-robin",
+      "models": [
+        { "model": "crabcode/clip/claude-sonnet-4.6", "weight": 3 },
+        { "model": "opencode/openrouter/gpt-5.5", "weight": 1 }
+      ]
+    }
+  ]
+}`;
+---
+
+<DocsLayout title={title} description={description} path="/docs/providers">
+  <h1>Providers</h1>
+  <p>
+    All detected sources are enabled by default. Toggle individual sources from page
+    <strong>2 Providers</strong> in the dashboard, or restrict one invocation with
+    <code>--source</code>.
+  </p>
+  <pre><code>jcx --source opencode,crabcode,hermes models
+jcx --source copilot doctor
+jcx --source ocx serve</code></pre>
+  <p>
+    Supported values include <code>auto</code>, <code>opencode</code>, <code>crabcode</code>,
+    <code>ocx</code>, <code>hermes</code>, <code>copilot</code>, <code>antigravity</code>,
+    and <code>joocode</code>.
+  </p>
+
+  <h2>OpenCode and CrabCode</h2>
+  <p>
+    Joocode reads the OpenCode provider configuration and combines it with each
+    client's own credential store. CrabCode reuses the same provider file but keeps a
+    separate auth store, so both can expose the same provider with different credentials
+    (<code>crabcode/provider/model</code>).
+  </p>
+
+  <h2>OpenCodex / OCX</h2>
+  <p>
+    Joocode reads the OpenCodex config directory (<code>~/.opencodex</code> or
+    <code>$OPENCODEX_HOME</code>) directly. Models use <code>ocx/provider/model</code> and
+    requests go through the local OCX proxy, so OCX stays authoritative for OAuth refresh,
+    API-key pools, routing, and account failover.
+  </p>
+
+  <h2>OCX OpenCode profiles</h2>
+  <p>
+    Global OpenCode profiles under <code>$XDG_CONFIG_HOME/opencode/profiles/*/opencode.jsonc</code>
+    are discovered and exposed as <code>ocx-PROFILE/provider/model</code>.
+  </p>
+
+  <h2>Hermes Agent</h2>
+  <p>
+    Joocode reads <code>~/.hermes/config.yaml</code> (or <code>$HERMES_HOME/config.yaml</code>)
+    plus <code>~/.hermes/.env</code>. Models become <code>hermes/provider/model</code>.
+  </p>
+
+  <h2>GitHub Copilot</h2>
+  <p>
+    Joocode checks <code>COPILOT_GITHUB_TOKEN</code>, <code>GH_TOKEN</code>, <code>GITHUB_TOKEN</code>,
+    Copilot macOS Keychain entries, Copilot's plaintext fallback, and <code>gh auth token</code>.
+    The account's live model catalog is exposed as <code>copilot/model</code>; exchanged tokens
+    remain in memory only.
+  </p>
+
+  <h2>Custom providers</h2>
+  <p>
+    Press <code>n</code> on page <strong>2 Providers</strong> to add an OpenAI-compatible
+    provider. Joocode requests <code>GET /models</code>, saves the provider, and reloads the
+    catalog. The file lives at <code>~/.config/joocode/providers.json</code>:
+  </p>
+  <CodeBlock code={providersJson} lang="json" />
+  <p class="small muted">Override the path with <code>JOOCODE_PROVIDERS=/custom/providers.json</code>.</p>
+
+  <h2>Interactive combos</h2>
+  <p>
+    Press <code>c</code> on page <strong>2 Providers</strong> to open the Combo Builder and
+    choose <strong>Failover</strong>, <strong>Weighted round-robin</strong>, or
+    <strong>Lowest latency</strong>. The virtual model appears as <code>combo/name</code>.
+  </p>
+  <CodeBlock code={combosJson} lang="json" />
+  <p>
+    Joocode retries transient failures on each candidate and moves to the next model for
+    authentication, rate-limit, capacity, timeout, or transport failures. Invalid requests
+    do not fail over. Weighted round-robin preserves failover to other candidates:
+  </p>
+  <CodeBlock code={weightedJson} lang="json" />
+  <p class="small muted">Override the file with <code>JOOCODE_COMBOS=/custom/combos.json</code>.</p>
+</DocsLayout>

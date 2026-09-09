@@ -1,0 +1,77 @@
+---
+import DocsLayout from '../../components/DocsLayout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+
+const title = 'CLI reference';
+const description = 'Joocode CLI reference: jcx commands, upgrade flow, and configuration environment variables.';
+
+const commands = `jcx [--source SOURCE] [--host HOST] [--port PORT]
+jcx --all
+jcx doctor
+jcx models
+jcx codex-install [--base-url URL]
+jcx serve [--host HOST] [--port PORT]
+jcx upgrade [--version VERSION]
+jcx hub [--host HOST] [--port PORT]`;
+
+const upgrade = `jcx upgrade
+jcx upgrade --version 0.2.0`;
+
+const env = `RUST_LOG=joocode=debug,tower_http=debug
+JOOCODE_MAX_REQUEST_BYTES=33554432
+JOOCODE_STREAM_IDLE_TIMEOUT_SECONDS=120
+JOOCODE_RETRY_ATTEMPTS=3
+JOOCODE_RETRY_INITIAL_MS=250
+JOOCODE_RETRY_MAX_MS=2000
+JOOCODE_PROVIDER_CONCURRENCY=8`;
+---
+
+<DocsLayout title={title} description={description} path="/docs/cli">
+  <h1>CLI reference</h1>
+  <p>
+    <code>jcx</code> is the flagship command; <code>joocode</code> remains a fully
+    compatible alias.
+  </p>
+
+  <h2>Commands</h2>
+  <CodeBlock code={commands} lang="bash" />
+  <ul>
+    <li><code>jcx</code> — start automatic desktop mode and open the dashboard.</li>
+    <li><code>jcx --all</code> — force every integration even when its app is not detected.</li>
+    <li><code>jcx doctor</code> — check provider discovery and integration health.</li>
+    <li><code>jcx models</code> — list the merged model registry.</li>
+    <li><code>jcx serve</code> — run only the local proxy without the dashboard.</li>
+    <li><code>jcx hub</code> — lightweight remote mode for LAN, VPN, and tailnet use.</li>
+    <li><code>jcx start</code> / <code>jcx stop</code> — control the current background session.</li>
+  </ul>
+
+  <h2>Choose a listener</h2>
+  <pre><code>jcx --host 127.0.0.1 --port 10200 \
+  --base-url http://127.0.0.1:10200/v1</code></pre>
+  <p class="small muted">
+    Binding beyond loopback can expose access to every configured provider. Only do so
+    behind trusted network controls.
+  </p>
+
+  <h2>Upgrade</h2>
+  <CodeBlock code={upgrade} lang="bash" />
+  <p>
+    All platforms download the matching archive and <code>SHA256SUMS</code> before replacing
+    the executable. Linux and macOS replace the binary atomically; Windows stages a helper
+    that waits for the running process to exit.
+  </p>
+
+  <h2>Environment variables</h2>
+  <p>A selection of commonly used overrides:</p>
+  <CodeBlock code={env} lang="bash" />
+  <ul>
+    <li><code>JOOCODE_CONFIG</code> / <code>JOOCODE_AUTH</code> — override OpenCode config and auth paths.</li>
+    <li><code>JOOCODE_PROVIDERS</code> / <code>JOOCODE_COMBOS</code> — custom file locations.</li>
+    <li><code>JOOCODE_REPOSITORY</code> / <code>JOOCODE_VERSION</code> — installer overrides.</li>
+    <li><code>JOOCODE_API_AUTH_TOKEN</code> / <code>JOOCODE_MANAGEMENT_AUTH_TOKEN</code> — remote admission.</li>
+  </ul>
+  <p class="small muted">
+    Set <code>RUST_LOG=joocode=debug,tower_http=debug</code> for diagnostics. Joocode does not
+    log secrets or authorization headers.
+  </p>
+</DocsLayout>

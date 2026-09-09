@@ -9,6 +9,7 @@ Reuse OpenCode, CrabCode, OCX, Hermes, Copilot, Antigravity Gemini, and OpenAI-c
 </p>
 
 <p align="center">
+  <a href="https://joocode.yan.ad"><img src="https://img.shields.io/badge/docs-joocode.yan.ad-6f42c1" alt="Documentation"></a>
   <a href="https://github.com/yan-ad/joocode/releases/latest"><img src="https://img.shields.io/github/v/release/yan-ad/joocode?color=6f42c1&label=release" alt="Latest release"></a>
   <a href="https://github.com/yan-ad/joocode/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/yan-ad/joocode/ci.yml?branch=main&label=build" alt="Build status"></a>
   <a href="https://github.com/yan-ad/joocode/blob/main/LICENSE"><img src="https://img.shields.io/github/license/yan-ad/joocode?color=blue" alt="MIT license"></a>
@@ -17,8 +18,7 @@ Reuse OpenCode, CrabCode, OCX, Hermes, Copilot, Antigravity Gemini, and OpenAI-c
 </p>
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://raw.githubusercontent.com/yan-ad/joocode/main/install.bash | bash
+curl -fsSL https://joocode.yan.ad/install | bash
 jcx
 ```
 
@@ -116,8 +116,7 @@ host environment.
 ### macOS, Linux, WSL, or Git Bash (recommended)
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://raw.githubusercontent.com/yan-ad/joocode/main/install.bash | bash
+curl -fsSL https://joocode.yan.ad/install | bash
 jcx
 ```
 
@@ -125,7 +124,7 @@ The installer detects the platform, verifies `SHA256SUMS`, and installs to
 `~/.local/bin`. Install a specific version or directory with:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/yan-ad/joocode/main/install.bash -o install.bash
+curl -fsSL https://joocode.yan.ad/install -o install.bash
 JOOCODE_VERSION=0.1.9 JOOCODE_INSTALL_DIR=/usr/local/bin bash install.bash
 ```
 
@@ -153,7 +152,7 @@ artifacts and checksums are published at
 ### Windows PowerShell
 
 ```powershell
-irm https://raw.githubusercontent.com/yan-ad/joocode/main/install.ps1 | iex
+irm https://joocode.yan.ad/install.ps1 | iex
 ```
 
 Open a new PowerShell window, then run:
@@ -808,8 +807,7 @@ fallback when the current installation directory is not writable.
 ### Uninstall
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://raw.githubusercontent.com/yan-ad/joocode/main/uninstall.sh | sh
+curl -fsSL https://joocode.yan.ad/uninstall | sh
 ```
 
 The uninstaller removes the binary and preserves provider credentials plus

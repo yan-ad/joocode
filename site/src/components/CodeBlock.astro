@@ -1,0 +1,15 @@
+---
+interface Props {
+  code: string;
+  lang?: string;
+}
+
+const { code, lang } = Astro.props;
+
+const escaped = code
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;');
+---
+
+<pre class="codeblock"><code class={lang ? `language-${lang}` : undefined} set:html={escaped} /></pre>

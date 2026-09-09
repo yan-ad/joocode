@@ -1,0 +1,181 @@
+---
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description: string;
+  path?: string;
+  ogImage?: string;
+}
+
+const {
+  title,
+  description,
+  path = '/',
+  ogImage = '/joocode-icon.png',
+} = Astro.props;
+
+const base = 'https://joocode.yan.ad';
+const canonical = new URL(path, base).href;
+const fullTitle = title.includes('Joocode') ? title : `${title} · Joocode`;
+
+const nav = [
+  { href: '/', label: 'Home' },
+  { href: '/docs', label: 'Docs' },
+  { href: '/docs/install', label: 'Install' },
+  { href: '/docs/integrations', label: 'Integrations' },
+  { href: '/docs/http-api', label: 'API' },
+  { href: '/docs/cli', label: 'CLI' },
+];
+
+const isActive = (href: string) => path === href;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <meta name="robots" content="index, follow" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Joocode" />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={new URL(ogImage, base).href} />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={fullTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={new URL(ogImage, base).href} />
+
+    <link rel="icon" type="image/png" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#6f42c1" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="wrap nav-row">
+        <a class="brand" href="/">
+          <img src="/favicon-32.png" alt="" width="28" height="28" />
+          <span>Joocode</span>
+        </a>
+        <nav class="nav-links" aria-label="Main navigation">
+          {nav.map((item) => (
+            <a
+              href={item.href}
+              class={isActive(item.href) ? 'active' : undefined}
+              aria-current={isActive(item.href) ? 'page' : undefined}
+            >
+              {item.label}
+            </a>
+          ))}
+          <a href="https://github.com/yan-ad/joocode" rel="noopener" target="_blank">GitHub ↗</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <slot />
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap footer-grid">
+        <div>
+          <p class="brand">
+            <img src="/favicon-32.png" alt="" width="22" height="22" />
+            <span>Joocode</span>
+          </p>
+          <p class="muted small">Your AI configs, everywhere. One fast native Rust binary that reuses the providers you already have and wires them into your desktop AI clients.</p>
+        </div>
+        <div>
+          <h4 class="tight">Quick links</h4>
+          <ul class="footer-links">
+            <li><a href="/docs">Documentation</a></li>
+            <li><a href="/docs/install">Install</a></li>
+            <li><a href="/docs/integrations">Desktop integrations</a></li>
+            <li><a href="/docs/http-api">HTTP API</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 class="tight">Project</h4>
+          <ul class="footer-links">
+            <li><a href="https://github.com/yan-ad/joocode" rel="noopener" target="_blank">GitHub</a></li>
+            <li><a href="https://github.com/yan-ad/joocode/releases" rel="noopener" target="_blank">Releases</a></li>
+            <li><a href="https://github.com/yan-ad/joocode/blob/main/LICENSE" rel="noopener" target="_blank">MIT License</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="wrap footer-bottom muted small">
+        © {new Date().getFullYear()} Joocode. MIT licensed.
+      </div>
+    </footer>
+  </body>
+</html>
+
+<style>
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: rgba(251, 250, 253, 0.85);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 62px;
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5em;
+    font-weight: 700;
+    font-size: 1.08rem;
+    color: var(--ink);
+    border: none;
+  }
+  .brand img { border-radius: 6px; }
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: 1.15rem;
+    flex-wrap: wrap;
+  }
+  .nav-links a {
+    color: var(--ink-2);
+    font-weight: 500;
+    font-size: 0.94rem;
+    border: none;
+    padding: 0.25em 0;
+  }
+  .nav-links a:hover { color: var(--accent-strong); }
+  .nav-links a.active { color: var(--accent-strong); font-weight: 700; }
+
+  .site-footer {
+    margin-top: 4.5em;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    padding: 2.6em 0 0;
+  }
+  .footer-grid {
+    display: grid;
+    gap: 2em;
+    padding-bottom: 2em;
+  }
+  @media (min-width: 720px) {
+    .footer-grid { grid-template-columns: 1.6fr 1fr 1fr; }
+  }
+  .footer-grid .brand { display: inline-flex; gap: 0.5em; align-items: center; margin-bottom: 0.5em; }
+  .footer-links { list-style: none; padding: 0; margin: 0; }
+  .footer-links li { margin: 0.3em 0; }
+  .footer-links a { color: var(--ink-2); border: none; }
+  .footer-links a:hover { color: var(--accent-strong); }
+  .footer-bottom { padding: 1.2em 24px; border-top: 1px solid var(--border); text-align: center; }
+</style>

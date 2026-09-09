@@ -1,5 +1,5 @@
 # Installs the latest Joocode release for Windows. Run from PowerShell:
-# irm https://raw.githubusercontent.com/yan-ad/joocode/main/install.ps1 | iex
+# irm https://joocode.yan.ad/install.ps1 | iex
 # To install a version: & .\install.ps1 -Version 0.1.6
 [CmdletBinding()]
 param(

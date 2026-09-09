@@ -1,0 +1,205 @@
+---
+import Layout from '../components/Layout.astro';
+
+const description =
+  'Joocode is a fast native Rust proxy that reuses your OpenCode, CrabCode, OCX, Hermes, and GitHub Copilot providers and wires them into Codex, Zed, JetBrains, Claude Code, Grok Build, and the Copilot App.';
+
+const features = [
+  { t: 'Config-first', d: 'Discovers providers you already have — OpenCode, CrabCode, OCX profiles, Hermes Agent, GitHub Copilot, and a flat OpenAI-compatible file.' },
+  { t: 'Desktop-aware', d: 'Detects installed clients and prepares only the integrations present on your machine. No second dashboard to configure.' },
+  { t: 'One native process', d: 'A single Rust binary, one shared proxy. No Node or Bun runtime, no browser dashboard required.' },
+  { t: 'Provider control plane', d: 'Detected sources, custom providers, API-key pools, and virtual combos in one built-in terminal UI.' },
+  { t: 'Protocol bridge', d: 'Responses API and Chat Completions, JSON and SSE, images, tool calls, streamed arguments, and function results.' },
+  { t: 'Credential-safe', d: 'Upstream credentials stay in their original source. Joocode never prints authorization values.' },
+];
+
+const targets = [
+  ['Codex', '98%', 'Full catalog and Responses API integration'],
+  ['Zed', '95%', 'OpenAI-compatible catalog plus local credential registration'],
+  ['GitHub Copilot App', '90%', 'Automatic BYOK provider/model sync'],
+  ['Grok Build', '90%', 'Custom models written to ~/.grok/config.toml'],
+  ['Claude Code', '85%', 'Anthropic Messages gateway, models, JSON/SSE and tools'],
+  ['JetBrains', '80%', 'OpenAI-compatible endpoint via the built-in provider'],
+  ['Antigravity', '80%/70%', 'Official Gemini source plus an opt-in patched app'],
+];
+
+const schema = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'SoftwareApplication',
+      name: 'Joocode',
+      description,
+      url: 'https://joocode.yan.ad',
+      applicationCategory: 'DeveloperApplication',
+      operatingSystem: 'macOS, Linux, Windows',
+      softwareVersion: '0.1.29',
+      license: 'https://github.com/yan-ad/joocode/blob/main/LICENSE',
+      offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+      author: { '@type': 'Organization', name: 'yan.ad' },
+    },
+    {
+      '@type': 'WebSite',
+      name: 'Joocode',
+      url: 'https://joocode.yan.ad',
+      description,
+    },
+  ],
+};
+---
+
+<Layout title="Joocode — your AI configs, everywhere" description={description} path="/">
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
+
+  <section class="hero">
+    <div class="wrap hero-inner">
+      <p class="eyebrow">One binary · One local proxy</p>
+      <h1>Your AI configs,<br />everywhere.</h1>
+      <p class="lede">
+        Reuse the providers you already have — OpenCode, CrabCode, OCX, Hermes, Copilot —
+        and wire them into Codex, GitHub Copilot App, Zed, JetBrains, Claude Code, and Grok Build.
+        One fast native Rust binary. No second dashboard.
+      </p>
+
+      <div class="install-box">
+        <span class="prompt">$</span>
+        <code>curl -fsSL https://joocode.yan.ad/install | bash</code>
+      </div>
+
+      <div class="cta-row">
+        <a class="btn primary" href="/docs">Read the docs</a>
+        <a class="btn" href="https://github.com/yan-ad/joocode" rel="noopener" target="_blank">GitHub</a>
+      </div>
+
+      <p class="small muted">Then run <code>jcx</code> — the flagship command. <code>joocode</code> ships as a compatible alias.</p>
+    </div>
+  </section>
+
+  <section class="wrap">
+    <h2>Why Joocode?</h2>
+    <div class="grid cols-3">
+      {features.map((f) => (
+        <div class="card">
+          <h3 class="tight">{f.t}</h3>
+          <p class="muted small">{f.d}</p>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <section class="wrap">
+    <h2>How it works</h2>
+    <p>
+      Joocode builds one source-aware model registry, exposes it through a local
+      OpenAI-compatible endpoint at <code>http://127.0.0.1:10100/v1</code>, and routes
+      each request back to the provider that owns the model.
+    </p>
+    <pre><code>OpenCode ────────┐
+OCX ──────────────┤                    ┌─ Codex Responses API
+Hermes ───────────┤                    ├─ GitHub Copilot App BYOK
+GitHub Copilot ───┼─► Joocode proxy ───┼─ Zed / JetBrains
+Antigravity ──────┤                    ├─ Claude Code Messages API
+providers.json ───┘                    └─ Grok Build custom models</code></pre>
+    <p class="small muted">
+      Model IDs stay explicit: <code>provider/model</code>, <code>copilot/model</code>,
+      <code>antigravity/gemini/model</code>, or a virtual <code>combo/name</code>.
+    </p>
+  </section>
+
+  <section class="wrap">
+    <h2>Desktop integrations</h2>
+    <p class="muted small">
+      Probabilities estimate how likely each integration is to stay reliable across upstream
+      client releases — not uptime guarantees.
+    </p>
+    <table>
+      <thead>
+        <tr><th>Target</th><th>Probability</th><th>Current behavior</th></tr>
+      </thead>
+      <tbody>
+        {targets.map(([name, prob, behavior]) => (
+          <tr><td><strong>{name}</strong></td><td>{prob}</td><td>{behavior}</td></tr>
+        ))}
+      </tbody>
+    </table>
+    <p><a href="/docs/integrations">See integration details →</a></p>
+  </section>
+
+  <section class="wrap">
+    <h2>Fast by design</h2>
+    <table>
+      <thead>
+        <tr><th>Metric</th><th>Joocode</th><th>OpenCodex / ocx</th><th>Difference</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Startup time</td><td><strong>5.8 ms</strong></td><td>289.1 ms</td><td>~49.8× faster</td></tr>
+        <tr><td>Memory, idle</td><td><strong>5.8 MB</strong></td><td>15.3 MB</td><td>~62% less</td></tr>
+        <tr><td>Bundle footprint</td><td><strong>8.2 MiB</strong></td><td>110 MiB</td><td>~13.4× smaller</td></tr>
+      </tbody>
+    </table>
+    <p class="small muted">
+      CLI-only runtime footprint, measured on an Apple M1 (arm64, macOS 27), September 2026.
+      See the <a href="https://github.com/yan-ad/joocode#performance">README</a> for methodology.
+    </p>
+  </section>
+
+  <section class="wrap">
+    <h2>Get started</h2>
+    <div class="grid cols-2">
+      <div class="card">
+        <h3 class="tight">Install</h3>
+        <p class="muted small">One command for macOS, Linux, WSL, and Git Bash.</p>
+        <a href="/docs/install">Installation guide →</a>
+      </div>
+      <div class="card">
+        <h3 class="tight">Documentation</h3>
+        <p class="muted small">Providers, desktop integrations, HTTP API, and CLI reference.</p>
+        <a href="/docs">Browse the docs →</a>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .hero {
+    padding: 4rem 0 3rem;
+    background:
+      radial-gradient(60% 80% at 50% -20%, var(--accent-soft), transparent 70%),
+      var(--bg);
+    border-bottom: 1px solid var(--border);
+  }
+  .hero-inner { max-width: 780px; margin: 0 auto; text-align: center; }
+  .lede {
+    font-size: 1.12rem;
+    color: var(--ink-2);
+    max-width: 46em;
+    margin: 0 auto 1.6em;
+  }
+  .install-box {
+    display: flex;
+    align-items: center;
+    gap: 0.7em;
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border-radius: var(--radius);
+    padding: 0.9em 1.2em;
+    max-width: 34em;
+    margin: 0 auto 1.4em;
+    text-align: left;
+    overflow-x: auto;
+  }
+  .install-box code {
+    background: none;
+    color: var(--code-ink);
+    font-size: 0.95em;
+    white-space: nowrap;
+  }
+  .prompt { color: var(--code-muted); user-select: none; }
+  .cta-row {
+    display: flex;
+    gap: 0.7em;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-bottom: 1.2em;
+  }
+</style>

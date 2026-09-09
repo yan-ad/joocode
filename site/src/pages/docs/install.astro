@@ -1,0 +1,75 @@
+---
+import DocsLayout from '../../components/DocsLayout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+
+const title = 'Install Joocode';
+const description = 'Install Joocode with a single command on macOS, Linux, WSL, and Windows. The installer verifies SHA-256 checksums and installs jcx to ~/.local/bin.';
+
+const installCmd = `curl -fsSL https://joocode.yan.ad/install | bash`;
+
+const versionCmd = `curl -fsSL https://joocode.yan.ad/install -o install.bash
+JOOCODE_VERSION=0.1.9 JOOCODE_INSTALL_DIR=/usr/local/bin bash install.bash`;
+
+const windowsCmd = `irm https://joocode.yan.ad/install.ps1 | iex`;
+
+const sourceCmd = `git clone https://github.com/yan-ad/joocode.git
+cd joocode
+cargo build --release --locked
+./target/release/jcx`;
+
+const uninstallCmd = `curl -fsSL https://joocode.yan.ad/uninstall | sh`;
+---
+
+<DocsLayout title={title} description={description} path="/docs/install">
+  <h1>Install Joocode</h1>
+  <p>
+    One command installs the latest release, verifies the SHA-256 checksum, and
+    places <code>jcx</code> in <code>~/.local/bin</code>. Works on macOS, Linux, WSL,
+    and Git Bash.
+  </p>
+
+  <CodeBlock code={installCmd} lang="bash" />
+
+  <h2>Install a specific version or directory</h2>
+  <p>Download the installer and set environment variables before running it:</p>
+  <CodeBlock code={versionCmd} lang="bash" />
+  <ul>
+    <li><code>JOOCODE_VERSION</code> — pin a release, e.g. <code>0.1.9</code>.</li>
+    <li><code>JOOCODE_INSTALL_DIR</code> — change the target directory (default <code>~/.local/bin</code>).</li>
+  </ul>
+
+  <h2>Add to PATH</h2>
+  <p>
+    If <code>jcx</code> is not found after installing, add the default directory to
+    your shell <code>PATH</code> and open a new terminal:
+  </p>
+  <pre><code>export PATH="$HOME/.local/bin:$PATH"</code></pre>
+
+  <h2>Windows PowerShell</h2>
+  <CodeBlock code={windowsCmd} lang="powershell" />
+  <p>
+    The installer selects x64 or ARM64, verifies the SHA-256 checksum, installs
+    <code>joocode.exe</code> to <code>~/.local/bin</code>, and adds that directory to
+    your user <code>PATH</code>. Open a new PowerShell window, then run
+    <code>jcx --version</code> and <code>jcx</code>. Install a specific version with
+    <code>./install.ps1 -Version 0.1.9</code>.
+  </p>
+
+  <h2>Build from source</h2>
+  <CodeBlock code={sourceCmd} lang="bash" />
+
+  <h2>Homebrew status</h2>
+  <p>
+    The <code>yan-ad/tap</code> Homebrew tap is not published yet. Use the verified
+    installer above until the tap repository is available. Release artifacts and
+    checksums are published at
+    <a href="https://github.com/yan-ad/joocode/releases">GitHub Releases</a>.
+  </p>
+
+  <h2>Uninstall</h2>
+  <CodeBlock code={uninstallCmd} lang="bash" />
+  <p>
+    The uninstaller removes the binary and preserves provider credentials plus
+    Codex/Zed settings by default.
+  </p>
+</DocsLayout>
