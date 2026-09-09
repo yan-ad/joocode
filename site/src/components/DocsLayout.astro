@@ -54,7 +54,10 @@ const active = (href: string) => path === href;
   @media (min-width: 820px) {
     .docs-shell { grid-template-columns: 220px 1fr; }
   }
-  .docs-side { position: sticky; top: 86px; align-self: start; }
+  .docs-side { align-self: start; }
+  @media (min-width: 820px) {
+    .docs-side { position: sticky; top: 86px; }
+  }
   .docs-side ul { list-style: none; padding: 0; margin: 0.3em 0 1.6em; }
   .docs-side li { margin: 0.15em 0; }
   .docs-side a {

@@ -187,12 +187,17 @@ providers.json ───┘                    └─ Grok Build custom models</
     margin: 0 auto 1.4em;
     text-align: left;
     overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
   .install-box code {
     background: none;
     color: var(--code-ink);
     font-size: 0.95em;
     white-space: nowrap;
+  }
+  @media (max-width: 719px) {
+    .install-box { padding: 0.75em 0.9em; }
+    .install-box code { font-size: 0.82em; }
   }
   .prompt { color: var(--code-muted); user-select: none; }
   .cta-row {
