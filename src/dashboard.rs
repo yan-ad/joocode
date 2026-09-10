@@ -14,6 +14,8 @@ pub struct DashboardProviderRuntimeSnapshot {
     pub concurrency_limit: usize,
     pub cooldown_ms: u64,
     pub latency_ms: Option<f64>,
+    pub requests: u64,
+    pub failures: u64,
     pub consecutive_failures: u32,
 }
 
@@ -45,7 +47,7 @@ fn draw_success(frame: &mut Frame<'_>, message: &str) {
     );
 }
 
-fn draw_codex_set_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
+fn draw_codex_set_panel(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
     let advertised = data.subagent_catalog.resolve(&data.models).len();
     let enabled = data
         .proxy_targets
@@ -111,80 +113,283 @@ fn draw_codex_set_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) 
             Style::default().fg(Color::LightCyan),
         )),
     ];
-    draw_read_only_page(frame, area, "Codex Set", lines);
+    let panel = dashboard_panel("Codex Set", Color::LightMagenta);
+    let inner = panel.inner(area);
+    frame.render_widget(panel, area);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
-fn draw_usage_page(frame: &mut Frame<'_>, area: Rect, runtime: &DashboardRuntimeSnapshot) {
-    let mut lines = vec![
-        Line::from(format!("Uptime: {}", format_duration(runtime.uptime_secs))),
-        Line::from(format!(
-            "Requests: {}   Active: {}",
-            runtime.requests, runtime.active
-        )),
-        Line::from(format!(
-            "Successes: {}   Failures: {}",
-            runtime.successes, runtime.failures
-        )),
-        Line::from(format!(
-            "Tool calls: {}   Browser/computer: {}",
-            runtime.tool_calls, runtime.browser_tool_calls
-        )),
-        Line::from(format!(
-            "Tokens: {} in / {} out   Retries: {}   Failovers: {}",
-            runtime.input_tokens, runtime.output_tokens, runtime.retries, runtime.failovers
-        )),
-        Line::from(""),
-        Line::from("Provider                  State          Latency   Cooldown"),
-    ];
-    if runtime.providers.is_empty() {
-        lines.push(Line::from("No provider traffic has been observed yet."));
-    } else {
-        lines.extend(runtime.providers.iter().map(|provider| {
+const SUCCESS_PROBABILITY_TARGET: f64 = 95.0;
+
+fn success_probability(successes: u64, failures: u64) -> Option<f64> {
+    let total = successes.saturating_add(failures);
+    (total > 0).then(|| successes as f64 * 100.0 / total as f64)
+}
+
+fn provider_success_probability(provider: &DashboardProviderRuntimeSnapshot) -> Option<f64> {
+    success_probability(
+        provider.requests.saturating_sub(provider.failures),
+        provider.failures,
+    )
+}
+
+fn format_probability(probability: Option<f64>) -> String {
+    probability
+        .map(|value| format!("{value:.1}%"))
+        .unwrap_or_else(|| "no sample".into())
+}
+
+fn probability_summary(runtime: &DashboardRuntimeSnapshot) -> Line<'static> {
+    let overall = success_probability(runtime.successes, runtime.failures);
+    let below_target = runtime
+        .providers
+        .iter()
+        .filter_map(|provider| {
+            provider_success_probability(provider)
+                .filter(|probability| *probability < SUCCESS_PROBABILITY_TARGET)
+                .map(|probability| format!("{} {probability:.1}%", provider.provider))
+        })
+        .collect::<Vec<_>>();
+
+    let summary = match overall {
+        None => "Target summary: no completed requests yet".to_owned(),
+        Some(probability)
+            if probability >= SUCCESS_PROBABILITY_TARGET && below_target.is_empty() =>
+        {
+            format!("Target summary: all observed traffic meets {SUCCESS_PROBABILITY_TARGET:.0}%")
+        }
+        Some(probability) => {
+            let targets = if below_target.is_empty() {
+                "overall traffic".to_owned()
+            } else {
+                below_target.join(", ")
+            };
+            format!(
+                "Below {SUCCESS_PROBABILITY_TARGET:.0}% target: overall {probability:.1}%; {targets}"
+            )
+        }
+    };
+    Line::from(Span::styled(
+        summary,
+        Style::default().fg(match overall {
+            Some(probability) if probability < SUCCESS_PROBABILITY_TARGET => Color::Yellow,
+            Some(_) => Color::LightGreen,
+            None => Color::DarkGray,
+        }),
+    ))
+}
+
+fn draw_usage_panel(frame: &mut Frame<'_>, area: Rect, runtime: &DashboardRuntimeSnapshot) {
+    let panel = dashboard_panel("Usage and provider targets", Color::LightCyan);
+    let inner = panel.inner(area);
+    frame.render_widget(panel, area);
+    let [metrics, target, providers] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Min(1),
+    ])
+    .areas(inner);
+
+    frame.render_widget(
+        Paragraph::new(vec![
             Line::from(format!(
-                "{:<25} {:<14} {:>7}   {:>8}",
-                provider.provider,
-                provider.state,
+                "Uptime {}   Requests {}   Active {}   Success {}   Failed {}",
+                format_duration(runtime.uptime_secs),
+                runtime.requests,
+                runtime.active,
+                runtime.successes,
+                runtime.failures
+            )),
+            Line::from(format!(
+                "Tokens {} in / {} out   Tools {}   Browser {}   Retries {}   Failovers {}",
+                runtime.input_tokens,
+                runtime.output_tokens,
+                runtime.tool_calls,
+                runtime.browser_tool_calls,
+                runtime.retries,
+                runtime.failovers
+            )),
+        ])
+        .wrap(Wrap { trim: true }),
+        metrics,
+    );
+    frame.render_widget(Paragraph::new(probability_summary(runtime)), target);
+
+    if runtime.providers.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No provider traffic observed yet.")
+                .style(Style::default().fg(Color::DarkGray)),
+            providers,
+        );
+        return;
+    }
+
+    let probability_style = |success| {
+        Style::default().fg(match success {
+            Some(probability) if probability < SUCCESS_PROBABILITY_TARGET => Color::Yellow,
+            Some(_) => Color::LightGreen,
+            None => Color::DarkGray,
+        })
+    };
+    if providers.width < 82 {
+        let rows = runtime.providers.iter().map(|provider| {
+            let success = provider_success_probability(provider);
+            Row::new(vec![
+                Cell::from(provider.provider.clone()),
+                Cell::from(provider.state.clone()).style(Style::default().fg(Color::LightCyan)),
+                Cell::from(format_probability(success)).style(probability_style(success)),
+            ])
+        });
+        let header = Row::new(["PROVIDER", "STATE", "SUCCESS"])
+            .style(
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .bottom_margin(1);
+        frame.render_widget(
+            Table::new(
+                rows,
+                [
+                    Constraint::Min(20),
+                    Constraint::Length(14),
+                    Constraint::Length(10),
+                ],
+            )
+            .header(header)
+            .column_spacing(1),
+            providers,
+        );
+        return;
+    }
+
+    let rows = runtime.providers.iter().map(|provider| {
+        let success = provider_success_probability(provider);
+        Row::new(vec![
+            Cell::from(provider.provider.clone()),
+            Cell::from(provider.state.clone()).style(Style::default().fg(Color::LightCyan)),
+            Cell::from(format_probability(success)).style(probability_style(success)),
+            Cell::from(format!(
+                "{}/{}",
+                provider.active_requests, provider.concurrency_limit
+            )),
+            Cell::from(
                 provider
                     .latency_ms
                     .map(|value| format!("{value:.0}ms"))
-                    .unwrap_or_else(|| "—".into()),
-                if provider.cooldown_ms == 0 {
-                    "—".into()
-                } else {
-                    format!("{}ms", provider.cooldown_ms)
-                },
-            ))
-        }));
-    }
+                    .unwrap_or_else(|| "-".into()),
+            ),
+            Cell::from(if provider.cooldown_ms == 0 {
+                "-".into()
+            } else {
+                format!("{}ms", provider.cooldown_ms)
+            }),
+        ])
+    });
+    let header = Row::new([
+        "PROVIDER", "STATE", "SUCCESS", "ACTIVE", "LATENCY", "COOLDOWN",
+    ])
+    .style(
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .bottom_margin(1);
+    frame.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Min(22),
+                Constraint::Length(14),
+                Constraint::Length(10),
+                Constraint::Length(8),
+                Constraint::Length(9),
+                Constraint::Length(10),
+            ],
+        )
+        .header(header)
+        .column_spacing(2),
+        providers,
+    );
+}
 
-    draw_read_only_page(frame, area, "Usage", lines);
+fn draw_observability_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
+    let page = area.inner(Margin::new(1, 1));
+    if page.width >= 160 {
+        let [usage, logs] =
+            Layout::horizontal([Constraint::Percentage(46), Constraint::Percentage(54)])
+                .spacing(1)
+                .areas(page);
+        draw_usage_panel(frame, usage, &data.runtime);
+        draw_logs_panel(frame, logs, &data.request_events);
+        return;
+    }
+    let usage_height = if page.height >= 24 { 12 } else { 9 };
+    let [usage, logs] = Layout::vertical([
+        Constraint::Length(usage_height.min(page.height.saturating_sub(5))),
+        Constraint::Min(5),
+    ])
+    .spacing(1)
+    .areas(page);
+    draw_usage_panel(frame, usage, &data.runtime);
+    draw_logs_panel(frame, logs, &data.request_events);
 }
 
 fn draw_storage_page(frame: &mut Frame<'_>, area: Rect, storage: &DashboardStorageSnapshot) {
-    let mut lines = vec![
-        Line::from(format!(
+    let panel_area = area.inner(Margin::new(1, 1));
+    let panel = dashboard_panel("Storage", Color::LightCyan);
+    let inner = panel.inner(panel_area);
+    frame.render_widget(panel, panel_area);
+    let [summary, content] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(format!(
             "Tracked files: {}   Total size: {}",
             storage.entries.len(),
             format_bytes(storage.total_bytes())
         )),
-        Line::from(""),
-    ];
+        summary,
+    );
     if storage.entries.is_empty() {
-        lines.push(Line::from("Storage paths are unavailable."));
-    } else {
-        lines.extend(storage.entries.iter().map(|entry| {
-            Line::from(format!(
-                "{:<20} {:>10}  {}",
-                entry.label,
+        frame.render_widget(
+            Paragraph::new("Storage paths are unavailable.")
+                .style(Style::default().fg(Color::DarkGray)),
+            content,
+        );
+        return;
+    }
+    let rows = storage.entries.iter().map(|entry| {
+        Row::new(vec![
+            Cell::from(entry.label.clone()),
+            Cell::from(
                 entry
                     .size_bytes
                     .map(format_bytes)
                     .unwrap_or_else(|| "missing".into()),
-                entry.path,
-            ))
-        }));
-    }
-    draw_read_only_page(frame, area, "Storage", lines);
+            ),
+            Cell::from(entry.path.clone()).style(Style::default().fg(Color::Gray)),
+        ])
+    });
+    let header = Row::new(["FILE", "SIZE", "PATH"])
+        .style(
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .bottom_margin(1);
+    frame.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Length(22),
+                Constraint::Length(12),
+                Constraint::Min(24),
+            ],
+        )
+        .header(header)
+        .column_spacing(2),
+        content,
+    );
 }
 
 fn draw_system_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
@@ -250,11 +455,10 @@ fn draw_system_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData) {
     draw_read_only_page(frame, area, "System", lines);
 }
 
-fn draw_logs_page(frame: &mut Frame<'_>, area: Rect, events: &[DashboardRequestEvent]) {
-    let panel_area = area.inner(Margin::new(1, 1));
-    let panel = dashboard_panel("Logs — newest first", Color::LightCyan);
-    let inner = panel.inner(panel_area);
-    frame.render_widget(panel, panel_area);
+fn draw_logs_panel(frame: &mut Frame<'_>, area: Rect, events: &[DashboardRequestEvent]) {
+    let panel = dashboard_panel("Logs, newest first", Color::LightCyan);
+    let inner = panel.inner(area);
+    frame.render_widget(panel, area);
 
     if events.is_empty() {
         frame.render_widget(
@@ -573,6 +777,7 @@ fn page_screen(page: Page) -> Screen {
         Page::Providers => Screen::Providers { selected: 0 },
         Page::Models => Screen::Models { selected: 0 },
         Page::Subagents => Screen::Subagents { selected: 0 },
+        Page::Integrations => Screen::Config { selected: 0 },
         page => Screen::Base { page },
     }
 }
@@ -592,25 +797,21 @@ enum Page {
     Providers,
     Models,
     Subagents,
-    CodexSet,
-    Logs,
-    Usage,
-    Storage,
     Integrations,
+    Logs,
+    Storage,
     System,
 }
 
 impl Page {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 8] = [
         Self::Overview,
         Self::Providers,
         Self::Models,
         Self::Subagents,
-        Self::CodexSet,
-        Self::Logs,
-        Self::Usage,
-        Self::Storage,
         Self::Integrations,
+        Self::Logs,
+        Self::Storage,
         Self::System,
     ];
 
@@ -620,11 +821,9 @@ impl Page {
             Self::Providers => "Providers",
             Self::Models => "Models",
             Self::Subagents => "Subagents",
-            Self::CodexSet => "Codex Set",
-            Self::Logs => "Logs",
-            Self::Usage => "Usage",
-            Self::Storage => "Storage",
             Self::Integrations => "Integrations",
+            Self::Logs => "Usage & Logs",
+            Self::Storage => "Storage",
             Self::System => "System",
         }
     }
@@ -687,7 +886,7 @@ fn draw_provider_models(frame: &mut Frame<'_>, provider: &ProviderSummary, selec
     let mut state = ListState::default().with_selected(Some(selected));
     frame.render_stateful_widget(
         List::new(items)
-            .style(Style::default().fg(Color::Gray).bg(MODAL_BACKGROUND))
+            .style(Style::default().fg(Color::Gray))
             .highlight_style(
                 Style::default()
                     .fg(Color::White)
@@ -1467,20 +1666,18 @@ fn config_row_for_item(item: usize) -> usize {
         .unwrap_or(1)
 }
 
-fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
-    let modal = draw_modal_shell(
-        frame,
-        "Configuration",
-        86,
-        30,
-        Line::from(vec![
-            Span::styled("Space", Style::default().fg(MODAL_ACCENT)),
-            Span::raw(" toggle    "),
-            Span::styled("↑/↓", Style::default().fg(MODAL_ACCENT)),
-            Span::raw(" navigate"),
-        ]),
+fn draw_integrations_panel(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    selected: usize,
+) {
+    let panel = dashboard_panel(
+        "Integrations: Up/Down select, Space toggle",
+        Color::LightCyan,
     );
-
+    let inner = panel.inner(area);
+    frame.render_widget(panel, area);
     let marker = if data.autostart.enabled() {
         "●"
     } else {
@@ -1571,15 +1768,35 @@ fn draw_config(frame: &mut Frame<'_>, data: &DashboardData, selected: usize) {
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("● "),
-        modal.content,
+        inner,
         &mut state,
     );
-    draw_modal_scrollbar(
-        frame,
-        modal.content,
-        7 + ProxyTarget::ALL.len(),
-        config_row_for_item(selected),
-    );
+}
+
+fn draw_integrations_page(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    data: &DashboardData,
+    selected: usize,
+) {
+    let page = area.inner(Margin::new(1, 1));
+    if page.height < 12 {
+        draw_integrations_panel(frame, page, data, selected);
+    } else if page.width >= 70 {
+        let [integrations, codex] =
+            Layout::horizontal([Constraint::Percentage(54), Constraint::Percentage(46)])
+                .spacing(1)
+                .areas(page);
+        draw_integrations_panel(frame, integrations, data, selected);
+        draw_codex_set_panel(frame, codex, data);
+    } else {
+        let [integrations, codex] =
+            Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .spacing(1)
+                .areas(page);
+        draw_integrations_panel(frame, integrations, data, selected);
+        draw_codex_set_panel(frame, codex, data);
+    }
 }
 
 fn draw_error(frame: &mut Frame<'_>, error: &str) {
@@ -2102,9 +2319,7 @@ pub fn run(
                     Screen::Subagents { .. } => Screen::Base {
                         page: Page::Subagents,
                     },
-                    Screen::Config { .. } => Screen::Base {
-                        page: Page::Integrations,
-                    },
+                    Screen::Config { .. } => return Ok(DashboardExit::Quit),
                     _ => Screen::default(),
                 };
                 continue;
@@ -2551,21 +2766,6 @@ fn handle_key_with_providers(
                     });
                 }
             }
-            KeyCode::Enter if *page == Page::Integrations => {
-                *screen = Screen::Config { selected: 0 };
-            }
-            KeyCode::Enter | KeyCode::Char('s') if *page == Page::CodexSet => {
-                let _ = command_tx.send(DashboardCommand::SyncCodex);
-            }
-            KeyCode::Char('b') if *page == Page::CodexSet => {
-                let _ = command_tx.send(DashboardCommand::ToggleRunInBackground);
-            }
-            KeyCode::Char('a') if *page == Page::CodexSet => {
-                *screen = Screen::Subagents { selected: 0 };
-            }
-            KeyCode::Char('e') if *page == Page::CodexSet => {
-                let _ = command_tx.send(DashboardCommand::CycleReasoningEffortCap);
-            }
             KeyCode::Char('/') => *screen = Screen::Config { selected: 0 },
             _ => {}
         },
@@ -2678,7 +2878,7 @@ fn handle_key_with_providers(
         Screen::Subagents { selected } => match key {
             KeyCode::Up => *selected = selected.saturating_sub(1),
             KeyCode::Down => *selected = selected.saturating_add(1),
-            KeyCode::Tab => *screen = page_screen(Page::CodexSet),
+            KeyCode::Tab => *screen = page_screen(Page::Integrations),
             KeyCode::BackTab => *screen = page_screen(Page::Models),
             KeyCode::Char(character) if Page::from_number(character).is_some() => {
                 *screen = page_screen(Page::from_number(character).unwrap_or(Page::Subagents));
@@ -2698,6 +2898,21 @@ fn handle_key_with_providers(
                 if let Some(target) = target_for_config_item(*selected) {
                     let _ = command_tx.send(DashboardCommand::ToggleProxyTarget { target });
                 }
+            }
+            KeyCode::Enter | KeyCode::Char('s') => {
+                let _ = command_tx.send(DashboardCommand::SyncCodex);
+            }
+            KeyCode::Char('b') => {
+                let _ = command_tx.send(DashboardCommand::ToggleRunInBackground);
+            }
+            KeyCode::Char('a') => *screen = Screen::Subagents { selected: 0 },
+            KeyCode::Char('e') => {
+                let _ = command_tx.send(DashboardCommand::CycleReasoningEffortCap);
+            }
+            KeyCode::Tab => *screen = page_screen(Page::Logs),
+            KeyCode::BackTab => *screen = page_screen(Page::Subagents),
+            KeyCode::Char(character) if Page::from_number(character).is_some() => {
+                *screen = page_screen(Page::from_number(character).unwrap_or(Page::Integrations));
             }
             _ => {}
         },
@@ -2818,8 +3033,7 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             draw_shell_selected(frame, body, data, Page::Subagents, *selected);
         }
         Screen::Config { selected } => {
-            draw_shell(frame, body, data, Page::Integrations);
-            draw_config(frame, data, *selected);
+            draw_shell_selected(frame, body, data, Page::Integrations, *selected);
         }
         Screen::Providers { selected } => {
             draw_shell_selected(frame, body, data, Page::Providers, *selected);
@@ -2901,12 +3115,12 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
         Screen::Error(error) => draw_error(frame, error),
     }
 
-    if !matches!(screen, Screen::Base { .. }) {
+    if !matches!(screen, Screen::Base { .. } | Screen::Config { .. }) {
         return;
     }
 
     let help = match screen {
-        Screen::Base { .. } | Screen::Models { .. } | Screen::Subagents { .. } => vec![
+        Screen::Base { .. } => vec![
             Span::styled(
                 " esc ",
                 Style::default()
@@ -2932,8 +3146,22 @@ fn draw(frame: &mut Frame<'_>, data: &DashboardData, screen: &Screen) {
             ),
             Span::styled("  Jump    Enter open", Style::default().fg(MUTED_TEXT)),
         ],
-        Screen::Config { .. }
-        | Screen::Providers { .. }
+        Screen::Config { .. } => vec![
+            Span::styled(
+                " space ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " Toggle   ↑/↓ Select   s Sync Codex   tab Navigate",
+                Style::default().fg(MUTED_TEXT),
+            ),
+        ],
+        Screen::Providers { .. }
+        | Screen::Models { .. }
+        | Screen::Subagents { .. }
         | Screen::ProviderModels { .. }
         | Screen::ProviderBaseUrl { .. }
         | Screen::ProviderApiKey { .. }
@@ -3072,23 +3300,9 @@ fn draw_page(frame: &mut Frame<'_>, area: Rect, data: &DashboardData, page: Page
         Page::Providers => draw_providers_page(frame, area, data, selected),
         Page::Models => draw_models_page(frame, area, data, selected),
         Page::Subagents => draw_subagents_page(frame, area, data, selected),
-        Page::CodexSet => draw_codex_set_page(frame, area, data),
-        Page::Logs => draw_logs_page(frame, area, &data.request_events),
-        Page::Usage => draw_usage_page(frame, area, &data.runtime),
+        Page::Integrations => draw_integrations_page(frame, area, data, selected),
+        Page::Logs => draw_observability_page(frame, area, data),
         Page::Storage => draw_storage_page(frame, area, &data.storage),
-        Page::Integrations => draw_read_only_page(
-            frame,
-            area,
-            "Integrations",
-            vec![
-                Line::from(format!(
-                    "{} desktop targets enabled",
-                    data.ide_targets.len()
-                )),
-                Line::from(""),
-                Line::from("Press Enter to open configuration."),
-            ],
-        ),
         Page::System => draw_system_page(frame, area, data),
     }
 }
@@ -3682,7 +3896,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_opens_page_specific_existing_modals() {
+    fn pages_with_inline_controls_open_directly() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut providers = Screen::Base {
             page: Page::Providers,
@@ -3690,11 +3904,10 @@ mod tests {
         handle_key(&mut providers, KeyCode::Enter, &tx);
         assert!(matches!(providers, Screen::Providers { selected: 0 }));
 
-        let mut integrations = Screen::Base {
-            page: Page::Integrations,
-        };
-        handle_key(&mut integrations, KeyCode::Enter, &tx);
-        assert!(matches!(integrations, Screen::Config { selected: 0 }));
+        assert!(matches!(
+            page_screen(Page::Integrations),
+            Screen::Config { selected: 0 }
+        ));
     }
 
     #[test]
@@ -3870,7 +4083,7 @@ mod tests {
             .expect("Logs page should be present")
             + 1;
         assert!(rendered.contains("1 Overview"));
-        assert!(rendered.contains(&format!("{logs_index} Logs")));
+        assert!(rendered.contains(&format!("{logs_index} Usage & Logs")));
         assert!(rendered.contains("No requests yet"));
         assert!(rendered.contains("Requests routed through Joocode will appear here"));
     }
@@ -3910,6 +4123,59 @@ mod tests {
         assert!(rendered.contains("gpt-5.6-sol"));
         assert!(rendered.contains("12.4k"));
         assert!(rendered.contains("8.1s"));
+    }
+
+    #[test]
+    fn observability_page_summarizes_probability_below_target() {
+        let backend = TestBackend::new(150, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut data = empty_dashboard_data();
+        data.runtime = DashboardRuntimeSnapshot {
+            requests: 20,
+            successes: 18,
+            failures: 2,
+            providers: vec![DashboardProviderRuntimeSnapshot {
+                provider: "demo/provider".into(),
+                state: "available".into(),
+                requests: 10,
+                failures: 1,
+                ..DashboardProviderRuntimeSnapshot::default()
+            }],
+            ..DashboardRuntimeSnapshot::default()
+        };
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Base { page: Page::Logs }))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Below 95% target: overall 90.0%"));
+        assert!(rendered.contains("demo/provider 90.0%"));
+        assert!(rendered.contains("SUCCESS"));
+    }
+
+    #[test]
+    fn integrations_page_renders_controls_and_codex_side_by_side() {
+        let backend = TestBackend::new(150, 34);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let data = empty_dashboard_data();
+        terminal
+            .draw(|frame| draw(frame, &data, &Screen::Config { selected: 0 }))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Integrations: Up/Down select, Space toggle"));
+        assert!(rendered.contains("Codex Set"));
+        assert!(!rendered.contains("Press Enter to open configuration"));
     }
 
     #[test]
@@ -4410,7 +4676,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_opens_configuration_modal() {
+    fn slash_opens_inline_integrations_controls() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut screen = Screen::Base {
             page: Page::Overview,
@@ -4486,7 +4752,7 @@ mod tests {
     }
 
     #[test]
-    fn configuration_modal_renders_grouped_targets() {
+    fn integrations_page_renders_grouped_targets() {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let data = DashboardData {
@@ -4544,7 +4810,7 @@ mod tests {
     }
 
     #[test]
-    fn configuration_modal_scrolls_to_selected_item_in_small_terminal() {
+    fn integrations_page_prioritizes_selected_item_in_small_terminal() {
         let backend = TestBackend::new(52, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let data = DashboardData {

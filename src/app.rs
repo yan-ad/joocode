@@ -2424,6 +2424,8 @@ pub async fn serve_dashboard(
                         concurrency_limit: status.concurrency_limit,
                         cooldown_ms: status.cooldown_ms,
                         latency_ms: status.latency_ms,
+                        requests: status.requests,
+                        failures: status.failures,
                         consecutive_failures: status.consecutive_failures,
                     })
                     .collect(),

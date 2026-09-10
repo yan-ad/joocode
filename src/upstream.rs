@@ -399,6 +399,8 @@ impl Runtime {
                     concurrency_limit: self.inner.concurrency,
                     cooldown_ms,
                     latency_ms: health.get(provider).and_then(|health| health.latency_ms),
+                    requests: health.get(provider).map_or(0, |health| health.requests),
+                    failures: health.get(provider).map_or(0, |health| health.failures),
                     consecutive_failures: health
                         .get(provider)
                         .map_or(0, |health| health.consecutive_failures),
@@ -416,6 +418,8 @@ pub struct ProviderStatus {
     pub concurrency_limit: usize,
     pub cooldown_ms: u64,
     pub latency_ms: Option<f64>,
+    pub requests: u64,
+    pub failures: u64,
     pub consecutive_failures: u32,
 }
 
