@@ -72,6 +72,8 @@ pub struct TargetPreferences {
     pub disabled_models: BTreeSet<String>,
     #[serde(default)]
     pub subagent_catalog: SubagentCatalogPolicy,
+    #[serde(default)]
+    pub commit_rules: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -162,6 +164,7 @@ impl Default for TargetPreferences {
             disabled_local_providers: BTreeSet::new(),
             disabled_models: BTreeSet::new(),
             subagent_catalog: SubagentCatalogPolicy::default(),
+            commit_rules: None,
         }
     }
 }

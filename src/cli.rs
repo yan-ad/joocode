@@ -179,6 +179,27 @@ mod tests {
             Some(Command::Codex { args, .. }) if args == ["--model", "demo/model"]
         ));
     }
+
+    #[test]
+    fn accepts_commit_command() {
+        let cli = Cli::try_parse_from(["jcx", "commit"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Commit {
+                model: None,
+                dry_run: false
+            })
+        ));
+        let cli =
+            Cli::try_parse_from(["jcx", "commit", "--model", "demo/model", "--dry-run"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Commit {
+                model: Some(model),
+                dry_run: true
+            }) if model == "demo/model"
+        ));
+    }
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -250,6 +271,15 @@ pub enum Command {
     Antigravity {
         #[command(subcommand)]
         command: AntigravityCommand,
+    },
+    /// Create a conventional commit from the currently staged changes.
+    Commit {
+        /// Model used to generate the commit message.
+        #[arg(long)]
+        model: Option<String>,
+        /// Print the generated message without creating a commit.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

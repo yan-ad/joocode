@@ -785,10 +785,26 @@ jcx models
 jcx codex-install [--base-url URL]
 jcx serve [--host HOST] [--port PORT]
 jcx upgrade [--version VERSION]
+jcx commit [--model MODEL] [--dry-run]
 ```
 
 Set `RUST_LOG=joocode=debug,tower_http=debug` for diagnostics. Joocode does not
 log secrets or request authorization headers.
+
+### Commit
+
+```bash
+jcx commit
+jcx commit --model provider/model --dry-run
+```
+
+`jcx commit` generates a Conventional Commits message for the currently staged
+changes (`git diff --cached`) using the default model, then runs `git commit`.
+The work-item reference in the branch name (for example `AB#3340` from
+`sa/AB#3340`) is appended to the subject line automatically. Override the
+message-generation instructions with the `commit_rules` key in
+`settings.json`; when unset, Joocode uses its built-in Conventional Commits
+prompt.
 
 ### Upgrade
 

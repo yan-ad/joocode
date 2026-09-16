@@ -5,6 +5,7 @@ mod claude;
 mod cli;
 mod codex;
 mod combo;
+mod commit;
 mod config;
 mod copilot_app;
 mod dashboard;
@@ -165,6 +166,7 @@ pub async fn run() -> anyhow::Result<()> {
             println!("Restart Codex to reload the model picker.");
             Ok(())
         }
+        Command::Commit { model, dry_run } => commit::run(&registry, model.as_deref(), dry_run).await,
         Command::Upgrade { .. } => unreachable!("upgrade is handled before config discovery"),
         Command::Codex { .. } => unreachable!("Codex shim is handled before config discovery"),
         Command::Antigravity { .. } => {
