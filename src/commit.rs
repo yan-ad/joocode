@@ -265,13 +265,13 @@ fn append_co_authors(message: &str, co_authors: &[String]) -> String {
 }
 
 fn parse_co_author(token: &str) -> (String, String) {
-    if let Some(open) = token.find('<') {
-        if let Some(close) = token.rfind('>') {
-            let name = token[..open].trim();
-            let email = token[open + 1..close].trim();
-            if !name.is_empty() && !email.is_empty() {
-                return (name.to_owned(), email.to_owned());
-            }
+    if let Some(open) = token.find('<')
+        && let Some(close) = token.rfind('>')
+    {
+        let name = token[..open].trim();
+        let email = token[open + 1..close].trim();
+        if !name.is_empty() && !email.is_empty() {
+            return (name.to_owned(), email.to_owned());
         }
     }
     let email = token.trim().to_owned();
