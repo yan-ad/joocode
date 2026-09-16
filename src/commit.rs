@@ -22,7 +22,12 @@ Structure:
 - Add a body only when it provides useful context not present in the subject.
 - Return only the commit message, with no markdown fence or commentary.";
 
-pub async fn run(registry: &Registry, model: Option<&str>, dry_run: bool) -> anyhow::Result<()> {
+pub async fn run(
+    registry: &Registry,
+    model: Option<&str>,
+    dry_run: bool,
+    co_authors: &[String],
+) -> anyhow::Result<()> {
     let diff = staged_diff()?;
     if diff.trim().is_empty() {
         bail!("nothing staged to commit; stage changes with `git add` first");
@@ -31,12 +36,15 @@ pub async fn run(registry: &Registry, model: Option<&str>, dry_run: bool) -> any
     let model = select_model(registry, model)?;
     let rules = commit_rules();
     let mut message = generate_message(registry, &model, &rules, &diff).await?;
+    message = cleanup_message(&message);
+    if message.is_empty() {
+        bail!("model returned an empty commit message");
+    }
     if let Some(ticket) = ticket.as_deref() {
         message = append_ticket(&message, ticket);
     }
-    let message = cleanup_message(&message);
-    if message.is_empty() {
-        bail!("model returned an empty commit message");
+    if !co_authors.is_empty() {
+        message = append_co_authors(&message, co_authors);
     }
     println!("{message}");
     if dry_run {
@@ -238,6 +246,52 @@ fn append_ticket(message: &str, ticket: &str) -> String {
     output
 }
 
+/// Append `Co-authored-by` trailers for each co-author token. A token is
+/// either a bare email or `Name <email>`; bare emails derive a display name
+/// from their local part.
+fn append_co_authors(message: &str, co_authors: &[String]) -> String {
+    let trailers = co_authors
+        .iter()
+        .map(|token| {
+            let (name, email) = parse_co_author(token);
+            format!("Co-authored-by: {name} <{email}>")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{}\n\n{trailers}", message.trim_end())
+}
+
+fn parse_co_author(token: &str) -> (String, String) {
+    if let Some(open) = token.find('<') {
+        if let Some(close) = token.rfind('>') {
+            let name = token[..open].trim();
+            let email = token[open + 1..close].trim();
+            if !name.is_empty() && !email.is_empty() {
+                return (name.to_owned(), email.to_owned());
+            }
+        }
+    }
+    let email = token.trim().to_owned();
+    let name = name_from_email(&email);
+    (name, email)
+}
+
+fn name_from_email(email: &str) -> String {
+    let local = email.split('@').next().unwrap_or(email);
+    local
+        .split(['.', '_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn cleanup_message(message: &str) -> String {
     let mut lines: Vec<&str> = message.lines().collect();
     if lines.first().is_some_and(|line| line.trim().starts_with("```")) {
@@ -302,6 +356,29 @@ mod tests {
         assert_eq!(
             cleanup_message("```\nfeat: add search\n```"),
             "feat: add search"
+        );
+    }
+
+    #[test]
+    fn appends_co_author_trailers() {
+        assert_eq!(
+            append_co_authors(
+                "feat: add search",
+                &["yanuar@kiriminaja.com".into(), "claude@anthropic.com".into()]
+            ),
+            "feat: add search\n\nCo-authored-by: Yanuar <yanuar@kiriminaja.com>\nCo-authored-by: Claude <claude@anthropic.com>"
+        );
+    }
+
+    #[test]
+    fn parses_name_and_email_co_author() {
+        assert_eq!(
+            parse_co_author("Yanuar Aditia <yanuar@kiriminaja.com>"),
+            ("Yanuar Aditia".into(), "yanuar@kiriminaja.com".into())
+        );
+        assert_eq!(
+            parse_co_author("john.doe@example.com"),
+            ("John Doe".into(), "john.doe@example.com".into())
         );
     }
 }

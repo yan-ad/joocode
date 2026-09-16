@@ -187,17 +187,28 @@ mod tests {
             cli.command,
             Some(Command::Commit {
                 model: None,
-                dry_run: false
-            })
+                dry_run: false,
+                co_author
+            }) if co_author.is_empty()
         ));
-        let cli =
-            Cli::try_parse_from(["jcx", "commit", "--model", "demo/model", "--dry-run"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "jcx",
+            "commit",
+            "--model",
+            "demo/model",
+            "--dry-run",
+            "--co-author",
+            "yanuar@kiriminaja.com,claude@anthropic.com",
+        ])
+        .unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Commit {
                 model: Some(model),
-                dry_run: true
+                dry_run: true,
+                co_author
             }) if model == "demo/model"
+                && co_author == ["yanuar@kiriminaja.com", "claude@anthropic.com"]
         ));
     }
 }
@@ -280,6 +291,9 @@ pub enum Command {
         /// Print the generated message without creating a commit.
         #[arg(long)]
         dry_run: bool,
+        /// Comma-separated co-authors, as emails or "Name <email>".
+        #[arg(long = "co-author", value_delimiter = ',')]
+        co_author: Vec<String>,
     },
 }
 
