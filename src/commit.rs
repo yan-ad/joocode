@@ -216,7 +216,10 @@ async fn generate_message(
         WireApi::OpenAiResponses => body
             .get("output_text")
             .and_then(Value::as_str)
-            .or_else(|| body.pointer("/output/0/content/0/text").and_then(Value::as_str))
+            .or_else(|| {
+                body.pointer("/output/0/content/0/text")
+                    .and_then(Value::as_str)
+            })
             .map(str::to_owned),
         WireApi::AnthropicMessages => body
             .pointer("/content/0/text")
@@ -294,7 +297,10 @@ fn name_from_email(email: &str) -> String {
 
 fn cleanup_message(message: &str) -> String {
     let mut lines: Vec<&str> = message.lines().collect();
-    if lines.first().is_some_and(|line| line.trim().starts_with("```")) {
+    if lines
+        .first()
+        .is_some_and(|line| line.trim().starts_with("```"))
+    {
         lines.remove(0);
     }
     if lines.last().is_some_and(|line| line.trim() == "```") {
@@ -330,9 +336,15 @@ mod tests {
     fn extracts_work_item_from_branch() {
         assert_eq!(ticket_from_branch("sa/AB#3340"), Some("AB#3340".into()));
         assert_eq!(ticket_from_branch("main"), None);
-        assert_eq!(ticket_from_branch("feat/JIRA-1234"), Some("JIRA-1234".into()));
+        assert_eq!(
+            ticket_from_branch("feat/JIRA-1234"),
+            Some("JIRA-1234".into())
+        );
         assert_eq!(ticket_from_branch("release/v1.2.3"), None);
-        assert_eq!(ticket_from_branch("fix/PROJ-42-extra"), Some("PROJ-42".into()));
+        assert_eq!(
+            ticket_from_branch("fix/PROJ-42-extra"),
+            Some("PROJ-42".into())
+        );
     }
 
     #[test]
@@ -364,7 +376,10 @@ mod tests {
         assert_eq!(
             append_co_authors(
                 "feat: add search",
-                &["yanuar@kiriminaja.com".into(), "claude@anthropic.com".into()]
+                &[
+                    "yanuar@kiriminaja.com".into(),
+                    "claude@anthropic.com".into()
+                ]
             ),
             "feat: add search\n\nCo-authored-by: Yanuar <yanuar@kiriminaja.com>\nCo-authored-by: Claude <claude@anthropic.com>"
         );
