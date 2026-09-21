@@ -606,6 +606,8 @@ mod tests {
         run(root, "git", &["init", "-q"]).unwrap();
         run(root, "git", &["config", "user.name", "Test User"]).unwrap();
         run(root, "git", &["config", "user.email", "test@example.com"]).unwrap();
+        run(root, "git", &["config", "commit.gpgSign", "false"]).unwrap();
+        run(root, "git", &["config", "tag.gpgSign", "false"]).unwrap();
 
         fs::write(root.join("file.txt"), "one\n").unwrap();
         run(root, "git", &["add", "file.txt"]).unwrap();
