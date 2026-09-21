@@ -46,6 +46,7 @@ const PROVIDER_ID: &str = "joocode";
 const JOC_PROVIDER_ID: &str = "joc";
 const CRABCODEX_PROVIDER_ID: &str = "crabcodex";
 const LEGACY_PROVIDER_ID: &str = "open_initiative";
+const LOCAL_BEARER_TOKEN: &str = "joocode-local";
 
 #[derive(Debug)]
 pub struct InstallResult {
@@ -177,10 +178,9 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
     fs::write(&catalog_path, serde_json::to_vec_pretty(&catalog)?)
         .with_context(|| format!("failed to write {}", catalog_path.display()))?;
 
-    // Codex selects one provider globally. Joocode is a local aggregate
-    // provider; it handles upstream credentials itself. Reusing Codex's OpenAI
-    // auth makes ChatGPT sessions send qualified model IDs to OpenAI instead of
-    // this endpoint.
+    // Codex Desktop only exposes its model picker for providers marked as using
+    // OpenAI auth. An explicit provider token keeps that UI behavior while
+    // preventing the ambient ChatGPT session from becoming the request auth.
     document["model_provider"] = value(PROVIDER_ID);
     document["model_catalog_json"] = value(catalog_path.to_string_lossy().as_ref());
 
@@ -196,7 +196,8 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
     provider["name"] = value("Joocode");
     provider["base_url"] = value(base_url.trim_end_matches('/'));
     provider["wire_api"] = value("responses");
-    provider["requires_openai_auth"] = value(false);
+    provider["requires_openai_auth"] = value(true);
+    provider["experimental_bearer_token"] = value(LOCAL_BEARER_TOKEN);
     providers[PROVIDER_ID] = Item::Table(provider);
     providers.remove(JOC_PROVIDER_ID);
     providers.remove(CRABCODEX_PROVIDER_ID);
@@ -371,17 +372,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn joocode_provider_does_not_reuse_chatgpt_auth() {
+    fn joocode_provider_uses_explicit_local_auth() {
         let mut provider = Table::new();
         provider["name"] = value("Joocode");
         provider["base_url"] = value("http://127.0.0.1:10100/v1");
         provider["wire_api"] = value("responses");
-        provider["requires_openai_auth"] = value(false);
+        provider["requires_openai_auth"] = value(true);
+        provider["experimental_bearer_token"] = value(LOCAL_BEARER_TOKEN);
 
         assert_eq!(
             provider["requires_openai_auth"].as_bool(),
-            Some(false),
-            "local Joocode requests must not be redirected through ChatGPT auth"
+            Some(true),
+            "Codex Desktop needs the authenticated-provider model picker"
+        );
+        assert_eq!(
+            provider["experimental_bearer_token"].as_str(),
+            Some(LOCAL_BEARER_TOKEN),
+            "explicit provider auth must override the ambient ChatGPT session"
         );
     }
 
