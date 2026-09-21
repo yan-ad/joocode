@@ -93,6 +93,7 @@ fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
 }
 
 const PROVIDER_ID: &str = "joocode";
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const ZED_CREDENTIAL_USERNAME: &str = "Bearer";
 const COMMIT_INSTRUCTIONS_START: &str = "<!-- joocode:conventional-commits:start -->";
 const COMMIT_INSTRUCTIONS_END: &str = "<!-- joocode:conventional-commits:end -->";
