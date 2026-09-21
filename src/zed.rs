@@ -47,9 +47,14 @@ fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
         // Zed stores compatible-provider keys as Internet Password records using
-        // the configured API URL as the server field. A missing item is normal:
-        // the helper creates it in the user's available login/default keychain.
-        crate::macos_keychain::ensure_internet_password(PROVIDER_ID, base_url, LOCAL_API_KEY)?;
+        // the configured API URL as the server field and `Bearer` as the account.
+        // A missing item is normal: the helper creates it in the user's
+        // available login/default keychain.
+        crate::macos_keychain::ensure_internet_password(
+            ZED_CREDENTIAL_USERNAME,
+            base_url,
+            LOCAL_API_KEY,
+        )?;
     }
 
     #[cfg(target_os = "windows")]
@@ -61,7 +66,7 @@ fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
         let output = std::process::Command::new("cmdkey")
             .args([
                 format!("/generic:{target}"),
-                format!("/user:{PROVIDER_ID}"),
+                format!("/user:{ZED_CREDENTIAL_USERNAME}"),
                 format!("/pass:{LOCAL_API_KEY}"),
             ])
             .output()
@@ -88,6 +93,7 @@ fn install_local_api_key(base_url: &str) -> anyhow::Result<()> {
 }
 
 const PROVIDER_ID: &str = "joocode";
+const ZED_CREDENTIAL_USERNAME: &str = "Bearer";
 const COMMIT_INSTRUCTIONS_START: &str = "<!-- joocode:conventional-commits:start -->";
 const COMMIT_INSTRUCTIONS_END: &str = "<!-- joocode:conventional-commits:end -->";
 const CONVENTIONAL_COMMITS_INSTRUCTIONS: &str = r#"<!-- joocode:conventional-commits:start -->
@@ -364,6 +370,7 @@ mod tests {
             windows_credential_target("http://127.0.0.1:10100/v1"),
             "zed:url=http://127.0.0.1:10100/v1"
         );
+        assert_eq!(ZED_CREDENTIAL_USERNAME, "Bearer");
     }
 
     #[test]
