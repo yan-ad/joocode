@@ -219,10 +219,7 @@ fn provider_config(base_url: &str) -> Table {
     provider
 }
 
-fn model_catalog(
-    discovered_models: &[ModelInfo],
-    effort_cap: Option<ReasoningEffortCap>,
-) -> Value {
+fn model_catalog(discovered_models: &[ModelInfo], effort_cap: Option<ReasoningEffortCap>) -> Value {
     let mut models = Vec::new();
     let mut slugs = HashSet::new();
     for model in discovered_models {
@@ -378,7 +375,11 @@ mod tests {
             max_output_tokens: None,
         };
         let catalog = model_catalog(
-            &[model("demo/model-a"), model("demo/model-a"), model("demo/model-b")],
+            &[
+                model("demo/model-a"),
+                model("demo/model-a"),
+                model("demo/model-b"),
+            ],
             None,
         );
         let slugs = catalog["models"]
