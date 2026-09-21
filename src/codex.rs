@@ -177,9 +177,10 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
     fs::write(&catalog_path, serde_json::to_vec_pretty(&catalog)?)
         .with_context(|| format!("failed to write {}", catalog_path.display()))?;
 
-    // Codex selects one provider globally. Joocode is an aggregate provider:
-    // native OpenAI model slugs are passed through with Codex's existing auth,
-    // while qualified slugs are routed through the discovered provider sources.
+    // Codex selects one provider globally. Joocode is a local aggregate
+    // provider; it handles upstream credentials itself. Reusing Codex's OpenAI
+    // auth makes ChatGPT sessions send qualified model IDs to OpenAI instead of
+    // this endpoint.
     document["model_provider"] = value(PROVIDER_ID);
     document["model_catalog_json"] = value(catalog_path.to_string_lossy().as_ref());
 
@@ -195,7 +196,7 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
     provider["name"] = value("Joocode");
     provider["base_url"] = value(base_url.trim_end_matches('/'));
     provider["wire_api"] = value("responses");
-    provider["requires_openai_auth"] = value(true);
+    provider["requires_openai_auth"] = value(false);
     providers[PROVIDER_ID] = Item::Table(provider);
     providers.remove(JOC_PROVIDER_ID);
     providers.remove(CRABCODEX_PROVIDER_ID);
@@ -368,6 +369,21 @@ fn model_preset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joocode_provider_does_not_reuse_chatgpt_auth() {
+        let mut provider = Table::new();
+        provider["name"] = value("Joocode");
+        provider["base_url"] = value("http://127.0.0.1:10100/v1");
+        provider["wire_api"] = value("responses");
+        provider["requires_openai_auth"] = value(false);
+
+        assert_eq!(
+            provider["requires_openai_auth"].as_bool(),
+            Some(false),
+            "local Joocode requests must not be redirected through ChatGPT auth"
+        );
+    }
 
     #[test]
     fn catalog_models_are_visible_and_keep_qualified_ids() {
