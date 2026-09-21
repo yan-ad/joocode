@@ -154,27 +154,11 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
         .parse::<DocumentMut>()
         .context("Codex config.toml is not valid TOML")?;
 
-    let previous_catalog = document
-        .get("model_catalog_json")
-        .and_then(Item::as_str)
-        .map(PathBuf::from);
-    let bundled_catalog = bundled_catalog()?;
-    let existing_catalog = previous_catalog
-        .as_deref()
-        .filter(|path| *path != catalog_path)
-        .map(read_catalog)
-        .transpose()?
-        .unwrap_or_else(|| json!({ "models": [] }));
     let effort_cap = TargetPreferences::load()
         .unwrap_or_default()
         .subagent_catalog
         .reasoning_effort_cap;
-    let catalog = merged_catalog(
-        &bundled_catalog,
-        &existing_catalog,
-        registry.models(),
-        effort_cap,
-    )?;
+    let catalog = model_catalog(registry.models(), effort_cap);
     fs::write(&catalog_path, serde_json::to_vec_pretty(&catalog)?)
         .with_context(|| format!("failed to write {}", catalog_path.display()))?;
 
@@ -192,13 +176,7 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
     let providers = document["model_providers"]
         .as_table_mut()
         .context("model_providers must be a TOML table")?;
-    let mut provider = Table::new();
-    provider["name"] = value("Joocode");
-    provider["base_url"] = value(base_url.trim_end_matches('/'));
-    provider["wire_api"] = value("responses");
-    provider["requires_openai_auth"] = value(true);
-    provider["experimental_bearer_token"] = value(LOCAL_BEARER_TOKEN);
-    providers[PROVIDER_ID] = Item::Table(provider);
+    providers[PROVIDER_ID] = Item::Table(provider_config(base_url));
     providers.remove(JOC_PROVIDER_ID);
     providers.remove(CRABCODEX_PROVIDER_ID);
     providers.remove(LEGACY_PROVIDER_ID);
@@ -231,58 +209,29 @@ pub fn install(registry: &Registry, base_url: &str) -> anyhow::Result<InstallRes
     })
 }
 
-fn bundled_catalog() -> anyhow::Result<Value> {
-    let output = Command::new("codex")
-        .args(["debug", "models", "--bundled"])
-        .output()
-        .context("failed to run `codex debug models --bundled`; is Codex installed?")?;
-    if !output.status.success() {
-        bail!(
-            "failed to read Codex bundled models: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    serde_json::from_slice(&output.stdout).context("Codex returned an invalid bundled catalog")
+fn provider_config(base_url: &str) -> Table {
+    let mut provider = Table::new();
+    provider["name"] = value("Joocode");
+    provider["base_url"] = value(base_url.trim_end_matches('/'));
+    provider["wire_api"] = value("responses");
+    provider["requires_openai_auth"] = value(true);
+    provider["experimental_bearer_token"] = value(LOCAL_BEARER_TOKEN);
+    provider
 }
 
-fn read_catalog(path: &Path) -> anyhow::Result<Value> {
-    match fs::read(path) {
-        Ok(content) => serde_json::from_slice(&content)
-            .with_context(|| format!("{} is not valid JSON", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(json!({ "models": [] })),
-        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
-    }
-}
-
-fn merged_catalog(
-    bundled: &Value,
-    existing: &Value,
+fn model_catalog(
     discovered_models: &[ModelInfo],
     effort_cap: Option<ReasoningEffortCap>,
-) -> anyhow::Result<Value> {
-    let mut merged = Vec::new();
+) -> Value {
+    let mut models = Vec::new();
     let mut slugs = HashSet::new();
-    for catalog in [bundled, existing] {
-        let models = catalog
-            .get("models")
-            .and_then(Value::as_array)
-            .context("model catalog must contain a models array")?;
-        for model in models {
-            let Some(slug) = model.get("slug").and_then(Value::as_str) else {
-                continue;
-            };
-            if slugs.insert(slug.to_owned()) {
-                merged.push(model.clone());
-            }
-        }
-    }
     for model in discovered_models {
         let preset = model_preset(model, false, effort_cap);
         if slugs.insert(model.id.clone()) {
-            merged.push(preset);
+            models.push(preset);
         }
     }
-    Ok(json!({ "models": merged }))
+    json!({ "models": models })
 }
 
 fn codex_home() -> anyhow::Result<PathBuf> {
@@ -373,12 +322,7 @@ mod tests {
 
     #[test]
     fn joocode_provider_uses_explicit_local_auth() {
-        let mut provider = Table::new();
-        provider["name"] = value("Joocode");
-        provider["base_url"] = value("http://127.0.0.1:10100/v1");
-        provider["wire_api"] = value("responses");
-        provider["requires_openai_auth"] = value(true);
-        provider["experimental_bearer_token"] = value(LOCAL_BEARER_TOKEN);
+        let provider = provider_config("http://127.0.0.1:10100/v1/");
 
         assert_eq!(
             provider["requires_openai_auth"].as_bool(),
@@ -389,6 +333,10 @@ mod tests {
             provider["experimental_bearer_token"].as_str(),
             Some(LOCAL_BEARER_TOKEN),
             "explicit provider auth must override the ambient ChatGPT session"
+        );
+        assert_eq!(
+            provider["base_url"].as_str(),
+            Some("http://127.0.0.1:10100/v1")
         );
     }
 
@@ -403,13 +351,7 @@ mod tests {
             context_window: Some(1000),
             max_output_tokens: Some(100),
         }];
-        let catalog = merged_catalog(
-            &json!({ "models": [] }),
-            &json!({ "models": [] }),
-            &models,
-            None,
-        )
-        .unwrap();
+        let catalog = model_catalog(&models, None);
         let model = &catalog["models"][0];
         assert_eq!(model["slug"], "demo/model-a");
         assert_eq!(model["display_name"], "demo/model-a");
@@ -425,30 +367,26 @@ mod tests {
     }
 
     #[test]
-    fn merges_bundled_existing_and_opencode_models_without_duplicates() {
-        let bundled = json!({ "models": [
-            { "slug": "gpt-5.4", "display_name": "GPT-5.4" }
-        ]});
-        let existing = json!({ "models": [
-            { "slug": "gpt-5.4", "display_name": "duplicate" },
-            { "slug": "local/model", "display_name": "Local" }
-        ]});
-        let models = vec![ModelInfo {
-            id: "demo/model-a".into(),
+    fn catalog_contains_only_routable_discovered_models() {
+        let model = |id: &str| ModelInfo {
+            id: id.into(),
             provider: "demo".into(),
-            upstream_id: "model-a".into(),
-            name: "Model A".into(),
+            upstream_id: id.into(),
+            name: id.into(),
             reasoning: false,
             context_window: None,
             max_output_tokens: None,
-        }];
-        let merged = merged_catalog(&bundled, &existing, &models, None).unwrap();
-        let slugs = merged["models"]
+        };
+        let catalog = model_catalog(
+            &[model("demo/model-a"), model("demo/model-a"), model("demo/model-b")],
+            None,
+        );
+        let slugs = catalog["models"]
             .as_array()
             .unwrap()
             .iter()
             .map(|model| model["slug"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(slugs, ["gpt-5.4", "local/model", "demo/model-a"]);
+        assert_eq!(slugs, ["demo/model-a", "demo/model-b"]);
     }
 }
